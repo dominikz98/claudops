@@ -1,24 +1,24 @@
 # `claudops-base`
 
-Gemeinsames Basisimage aller Claude-Code-Instanzen. Der Container klont beim Start
-ein Repository und startet darin Claude Code in einer tmux-Session, an die sich der
-claudops-Server später per `docker exec ... tmux attach` hängt.
+Shared base image for all Claude Code instances. On start the container clones a
+repository and runs Claude Code inside a tmux session, which the claudops server
+attaches to later via `docker exec ... tmux attach`.
 
-Projekt-Images (Issue #7) setzen mit `FROM claudops-base` darauf auf.
+Project images (issue #7) build on top of it via `FROM claudops-base`.
 
-## Bauen
+## Build
 
 ```bash
 docker build -t claudops-base docker/base
 ```
 
-Optional die Claude-Code-Version pinnen:
+Optionally pin the Claude Code version:
 
 ```bash
 docker build -t claudops-base --build-arg CLAUDE_CODE_VERSION=1.2.3 docker/base
 ```
 
-## Starten
+## Run
 
 ```bash
 docker run -d --name claudops-demo \
@@ -29,41 +29,43 @@ docker run -d --name claudops-demo \
   claudops-base
 ```
 
-Konsole öffnen (bis die Terminal-Bridge aus #4 existiert):
+Open the console (until the terminal bridge from #4 exists):
 
 ```bash
 docker exec -it claudops-demo tmux attach -t main
 ```
 
-Detach mit `Ctrl-b d` — Claude läuft weiter, ein erneutes `attach` findet Sitzung
-und Scrollback vor. Genauso verhält es sich, wenn die Verbindung einfach abbricht.
+Detach with `Ctrl-b d` -- Claude keeps running, and attaching again finds the
+session and its scrollback intact. The same holds when the connection simply
+drops.
 
 ## Environment
 
-| Variable | Default | Zweck |
+| Variable | Default | Purpose |
 | --- | --- | --- |
-| `REPO_URL` | – | Repository, das nach `/workspace/<name>` geklont wird. Ohne Angabe startet die Session in `/workspace`. |
-| `REPO_BRANCH` | `main` | Branch für den Clone. |
-| `GIT_TOKEN` | – | PAT für private Repos. Wird über einen Credential-Helper aus der Env geliefert, landet also nie in `.git/config` oder `git remote -v`. |
-| `GIT_TOKEN_HOST` | Host aus `REPO_URL` | Beschränkt, welchem Host der Helper das Token zeigt. |
-| `GIT_USERNAME` | `x-access-token` | Benutzername zum Token (GitHub akzeptiert jeden Wert). |
-| `GIT_USER_NAME`, `GIT_USER_EMAIL` | – | Commit-Identität für Claude. |
-| `CLAUDE_CODE_OAUTH_TOKEN` | – | Auth für Claude Code (`claude setup-token`). Bewusst **kein** `ANTHROPIC_API_KEY` — der übersteuert die Subscription. |
-| `CLAUDE_ARGS` | `--dangerously-skip-permissions` | Argumente für den `claude`-Start. Nur zulässig wegen der Container-Isolation. |
-| `WORKSPACE_DIR` | `/workspace` | Basisverzeichnis für Klone. |
-| `TMUX_SESSION` | `main` | Session-Name, an den sich die Bridge hängt. |
+| `REPO_URL` | – | Repository cloned into `/workspace/<name>`. Without it the session starts in `/workspace`. |
+| `REPO_BRANCH` | `main` | Branch to clone. |
+| `GIT_TOKEN` | – | PAT for private repos. Served through a credential helper from the environment, so it never lands in `.git/config` or `git remote -v`. |
+| `GIT_TOKEN_HOST` | host from `REPO_URL` | Restricts which host the helper shows the token to. |
+| `GIT_USERNAME` | `x-access-token` | Username for the token (GitHub accepts any value). |
+| `GIT_USER_NAME`, `GIT_USER_EMAIL` | – | Commit identity for Claude. |
+| `CLAUDE_CODE_OAUTH_TOKEN` | – | Auth for Claude Code (`claude setup-token`). Deliberately **not** an `ANTHROPIC_API_KEY` -- that one overrides the subscription. |
+| `CLAUDE_ARGS` | `--dangerously-skip-permissions` | Arguments for the `claude` start. Only acceptable because of the container isolation. |
+| `WORKSPACE_DIR` | `/workspace` | Base directory for clones. |
+| `TMUX_SESSION` | `main` | Session name the bridge attaches to. |
 
-## Verhalten
+## Behaviour
 
-- **Non-root:** alles läuft als `claude` (UID 1001; 1000 ist im `node`-Image belegt).
-- **Fehlgeschlagener Clone bricht nicht ab.** Die tmux-Session startet trotzdem in
-  `/workspace`, damit man sich per Konsole draufschalten und die Ursache ansehen
-  kann (falscher PAT, falscher Branch). Ein toter Container wäre dafür unerreichbar.
-- **Container-Restart auf gleichem Volume** überspringt den Clone, wenn das
-  Zielverzeichnis schon ein Git-Repo ist.
-- **`docker stop`** beendet den tmux-Server über SIGTERM sauber.
-- **PID 1** ist der Entrypoint; er wacht über die Session und beendet sich, wenn
-  diese endet.
+- **Non-root:** everything runs as `claude` (UID 1001; 1000 is taken in the
+  `node` image).
+- **A failed clone does not abort.** The tmux session still starts in
+  `/workspace` so you can attach through the console and inspect the cause
+  (wrong PAT, wrong branch). A dead container would be unreachable for that.
+- **Restarting the container on the same volume** skips the clone if the target
+  directory already is a git repo.
+- **`docker stop`** shuts the tmux server down cleanly via SIGTERM.
+- **PID 1** is the entrypoint; it watches over the session and exits when the
+  session ends.
 
 ## Test
 
@@ -71,12 +73,13 @@ und Scrollback vor. Genauso verhält es sich, wenn die Verbindung einfach abbric
 ./docker/base/smoke-test.sh
 ```
 
-Baut das Image, fährt einen Container hoch und prüft die Akzeptanzkriterien aus
-Issue #2 (Clone, non-root, Detach/Reattach mit Scrollback, laufender Claude-Prozess)
-sowie das Verhalten des Credential-Helpers. `SKIP_BUILD=1` überspringt den Build.
+Builds the image, brings up a container and checks the acceptance criteria from
+issue #2 (clone, non-root, detach/reattach with scrollback, running Claude
+process) plus the behaviour of the credential helper. `SKIP_BUILD=1` skips the
+build.
 
-## Nicht Teil dieses Images
+## Not part of this image
 
-- Egress-Firewall (`init-firewall.sh`, `NET_ADMIN`) und UI-Login → Issue #9
-- CPU-/RAM-Limits und Recycling → Issue #8
-- dotnet-/Playwright-Bausteine → Issue #7
+- Egress firewall (`init-firewall.sh`, `NET_ADMIN`) and UI login -> issue #9
+- CPU/RAM limits and recycling -> issue #8
+- dotnet/Playwright building blocks -> issue #7

@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Smoke-Test für claudops-base: prüft die Akzeptanzkriterien aus Issue #2
-# gegen einen echt laufenden Container.
+# Smoke test for claudops-base: checks the acceptance criteria from issue #2
+# against a genuinely running container.
 #
-#   ./docker/base/smoke-test.sh              # baut das Image und testet
-#   SKIP_BUILD=1 ./docker/base/smoke-test.sh # nutzt ein vorhandenes Image
+#   ./docker/base/smoke-test.sh              # builds the image and tests
+#   SKIP_BUILD=1 ./docker/base/smoke-test.sh # uses an existing image
 #
-# Ein gesetztes CLAUDE_CODE_OAUTH_TOKEN wird durchgereicht, ist aber nicht nötig.
+# A CLAUDE_CODE_OAUTH_TOKEN, if set, is passed through, but is not required.
 set -uo pipefail
 
-# Git-Bash/MSYS wandelt Argumente wie "/workspace/..." sonst in Windows-Pfade um
-# und die Container-Pruefungen liefen ins Leere. Unter Linux wirkungslos.
+# Otherwise Git Bash/MSYS rewrites arguments like "/workspace/..." into Windows
+# paths and the container checks would test nothing. No effect on Linux.
 export MSYS_NO_PATHCONV=1
 export MSYS2_ARG_CONV_EXCL='*'
 
@@ -28,12 +28,12 @@ ok()   { printf '  \033[32mPASS\033[0m  %s\n' "$1"; pass=$((pass + 1)); }
 bad()  { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; fail=$((fail + 1)); }
 info() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 
-# check <beschreibung> <erwartet> <ist>
+# check <description> <expected> <actual>
 check() {
   if [[ "$2" == "$3" ]]; then
     ok "$1"
   else
-    bad "$1 (erwartet: '$2', ist: '$3')"
+    bad "$1 (expected: '$2', actual: '$3')"
   fi
 }
 
@@ -42,15 +42,15 @@ dexec() { docker exec "$CONTAINER" "$@"; }
 cleanup() { docker rm -f "$CONTAINER" >/dev/null 2>&1; }
 trap cleanup EXIT
 
-# ---------------------------------------------------------------- Build & Start
+# ---------------------------------------------------------------- build & start
 if [[ -z "${SKIP_BUILD:-}" ]]; then
-  info "Image bauen ($IMAGE)"
+  info "Building image ($IMAGE)"
   build_context="$SCRIPT_DIR"
   command -v cygpath >/dev/null 2>&1 && build_context="$(cygpath -w "$SCRIPT_DIR")"
   docker build -t "$IMAGE" "$build_context" || { bad "docker build"; exit 1; }
 fi
 
-info "Container starten"
+info "Starting container"
 cleanup
 docker run -d --name "$CONTAINER" \
   -e REPO_URL="$TEST_REPO" \
@@ -60,52 +60,52 @@ docker run -d --name "$CONTAINER" \
   ${CLAUDE_CODE_OAUTH_TOKEN:+-e CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN"} \
   "$IMAGE" >/dev/null || { bad "docker run"; exit 1; }
 
-# Auf Clone + Session warten
+# Wait for clone + session
 for _ in $(seq 1 60); do
   dexec tmux has-session -t main >/dev/null 2>&1 && break
   sleep 1
 done
 
-# ------------------------------------------------- AK: Repo geklont, non-root
-info "AK 1: docker run klont das Repo und startet Claude Code in tmux"
-check "Repo liegt in $REPO_DIR" "yes" \
+# ------------------------------------------------- AC: repo cloned, non-root
+info "AC 1: docker run clones the repo and starts Claude Code in tmux"
+check "Repo is in $REPO_DIR" "yes" \
   "$(dexec sh -c "[ -d $REPO_DIR/.git ] && echo yes || echo no" 2>/dev/null | tr -d '\r')"
-check "Branch ist $TEST_BRANCH" "$TEST_BRANCH" \
+check "Branch is $TEST_BRANCH" "$TEST_BRANCH" \
   "$(dexec git -C "$REPO_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null | tr -d '\r')"
-check "tmux-Session 'main' existiert" "main" \
+check "tmux session 'main' exists" "main" \
   "$(dexec tmux list-sessions -F '#{session_name}' 2>/dev/null | tr -d '\r')"
 
 claude_procs="$(dexec pgrep -fc 'claude' 2>/dev/null | tr -d '\r')"
 if [[ "${claude_procs:-0}" -ge 1 ]]; then
-  ok "Claude-Code-Prozess läuft im Container ($claude_procs)"
+  ok "Claude Code process is running in the container ($claude_procs)"
 else
-  bad "Kein Claude-Code-Prozess gefunden — Pane-Inhalt:"
+  bad "No Claude Code process found -- pane content:"
   dexec tmux capture-pane -p -t main:0.0 2>/dev/null | sed 's/^/        /'
 fi
-check "Claude-CLI ist installiert" "0" \
+check "Claude CLI is installed" "0" \
   "$(dexec claude --version >/dev/null 2>&1; echo $?)"
 
-info "AK 2: Läuft als non-root"
-check "Benutzer ist 'claude'" "claude" "$(dexec id -un 2>/dev/null | tr -d '\r')"
-check "UID ist nicht 0" "1001" "$(dexec id -u 2>/dev/null | tr -d '\r')"
-check "Arbeitsverzeichnis gehört dem User" "claude" \
+info "AC 2: runs as non-root"
+check "User is 'claude'" "claude" "$(dexec id -un 2>/dev/null | tr -d '\r')"
+check "UID is not 0" "1001" "$(dexec id -u 2>/dev/null | tr -d '\r')"
+check "Working directory is owned by the user" "claude" \
   "$(dexec stat -c '%U' /workspace 2>/dev/null | tr -d '\r')"
 
-# ---------------------------------------------- AK: Detach / Reattach
-info "AK 3: tmux-Detach/-Reattach, Claude läuft weiter"
-check "history-limit ist hochgesetzt" "100000" \
+# ---------------------------------------------- AC: detach / reattach
+info "AC 3: tmux detach/reattach, Claude keeps running"
+check "history-limit is raised" "100000" \
   "$(dexec tmux show-options -gv history-limit 2>/dev/null | tr -d '\r')"
 
 pid_before="$(dexec tmux display-message -p -t main:0.0 '#{pane_pid}' 2>/dev/null | tr -d '\r')"
 
-# Marker in ein separates Fenster schreiben, ohne im Claude-TUI zu tippen.
+# Write the marker into a separate window, without typing into the Claude TUI.
 dexec tmux new-window -t main -n scrollback -d 'bash' >/dev/null 2>&1
 sleep 1
 dexec tmux send-keys -t main:scrollback "echo $MARKER" Enter >/dev/null 2>&1
 sleep 1
 
-# Attach in einer Pseudo-TTY im Container (unabhängig vom Host-Terminal).
-# TERM wird explizit gesetzt, wie es auch ein echter Client tut.
+# Attach inside a pseudo TTY in the container (independent of the host
+# terminal). TERM is set explicitly, just like a real client would.
 attach() {
   docker exec -d -e TERM=xterm-256color "$CONTAINER" \
     script -qc 'tmux attach -t main' /dev/null >/dev/null 2>&1
@@ -115,66 +115,66 @@ attach
 sleep 3
 client_term="$(dexec tmux list-clients -t main -F '#{client_termname}' 2>/dev/null | tr -d '\r')"
 if [[ -n "$client_term" ]]; then
-  ok "Client hängt an der Session (TERM=$client_term)"
+  ok "Client is attached to the session (TERM=$client_term)"
 else
-  bad "Kein angehängter Client"
+  bad "No attached client"
 fi
 
-# Verbindungsabbruch simulieren
+# Simulate a dropped connection
 dexec pkill -f 'tmux attach' >/dev/null 2>&1
 sleep 2
-check "Nach Abbruch kein Client mehr" "0" \
+check "No client left after the drop" "0" \
   "$(dexec tmux list-clients -t main 2>/dev/null | grep -c . | tr -d '\r')"
-check "Session lebt weiter" "0" "$(dexec tmux has-session -t main >/dev/null 2>&1; echo $?)"
-check "Claude-Pane hat dieselbe PID" "$pid_before" \
+check "Session stays alive" "0" "$(dexec tmux has-session -t main >/dev/null 2>&1; echo $?)"
+check "Claude pane has the same PID" "$pid_before" \
   "$(dexec tmux display-message -p -t main:0.0 '#{pane_pid}' 2>/dev/null | tr -d '\r')"
 
 if dexec tmux capture-pane -p -S - -t main:scrollback 2>/dev/null | grep -q "$MARKER"; then
-  ok "Scrollback nach Reattach erhalten"
+  ok "Scrollback survives the reattach"
 else
-  bad "Marker nicht im Scrollback"
+  bad "Marker not in the scrollback"
 fi
 
-# Reattach muss erneut möglich sein
+# Reattaching must be possible again
 attach
 sleep 3
 reattached="$(dexec tmux list-clients -t main 2>/dev/null | grep -c . | tr -d '\r')"
 if [[ "${reattached:-0}" -ge 1 ]]; then
-  ok "Reattach funktioniert"
+  ok "Reattach works"
 else
-  bad "Reattach fehlgeschlagen"
+  bad "Reattach failed"
 fi
 dexec pkill -f 'tmux attach' >/dev/null 2>&1
 
-# ------------------------------------------------------- Credential-Helper
-info "Credential-Helper: Token bleibt aus Config und Remote heraus"
-check "Kein Token in der Remote-URL" "0" \
+# ------------------------------------------------------- credential helper
+info "Credential helper: token stays out of config and remote"
+check "No token in the remote URL" "0" \
   "$(dexec git -C "$REPO_DIR" remote -v 2>/dev/null | grep -c '@github.com' | tr -d '\r')"
-check "credential.helper zeigt auf claudops" "claudops" \
+check "credential.helper points at claudops" "claudops" \
   "$(dexec git config --global --get credential.helper 2>/dev/null | tr -d '\r')"
-check "Passender Host bekommt das Token" "password=s3cret" \
+check "Matching host receives the token" "password=s3cret" \
   "$(docker exec -e GIT_TOKEN=s3cret -e GIT_TOKEN_HOST=github.com "$CONTAINER" \
       sh -c 'printf "protocol=https\nhost=github.com\n\n" | git-credential-claudops get' \
       2>/dev/null | grep '^password=' | tr -d '\r')"
-check "Fremder Host bekommt nichts" "" \
+check "Foreign host receives nothing" "" \
   "$(docker exec -e GIT_TOKEN=s3cret -e GIT_TOKEN_HOST=github.com "$CONTAINER" \
       sh -c 'printf "protocol=https\nhost=evil.example\n\n" | git-credential-claudops get' \
       2>/dev/null | tr -d '\r')"
-check "Ohne GIT_TOKEN bekommt niemand etwas" "" \
+check "Without GIT_TOKEN nobody receives anything" "" \
   "$(docker exec -e GIT_TOKEN= "$CONTAINER" \
       sh -c 'printf "protocol=https\nhost=github.com\n\n" | git-credential-claudops get' \
       2>/dev/null | tr -d '\r')"
 
 # ------------------------------------------------------------ docker stop
-info "Sauberer Stop (SIGTERM)"
+info "Clean stop (SIGTERM)"
 stop_start=$(date +%s)
 docker stop "$CONTAINER" >/dev/null 2>&1
 stop_took=$(( $(date +%s) - stop_start ))
 if [[ "$stop_took" -lt 10 ]]; then
-  ok "Container stoppt in ${stop_took}s (kein SIGKILL-Timeout)"
+  ok "Container stops in ${stop_took}s (no SIGKILL timeout)"
 else
-  bad "Container brauchte ${stop_took}s — SIGTERM wird nicht verarbeitet"
+  bad "Container took ${stop_took}s -- SIGTERM is not being handled"
 fi
 
-info "Ergebnis: $pass bestanden, $fail fehlgeschlagen"
+info "Result: $pass passed, $fail failed"
 [[ "$fail" -eq 0 ]]
