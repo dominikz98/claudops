@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# claudops-base Entrypoint
+# claudops-base entrypoint
 #
-# 1. Git konfigurieren (Credential-Helper für GIT_TOKEN)
-# 2. REPO_URL nach $WORKSPACE_DIR/<repo-name> klonen
-# 3. Claude Code in einer detached tmux-Session starten
-# 4. Als PID 1 über der Session wachen, bis sie endet oder SIGTERM kommt
+# 1. Configure git (credential helper for GIT_TOKEN)
+# 2. Clone REPO_URL into $WORKSPACE_DIR/<repo-name>
+# 3. Start Claude Code in a detached tmux session
+# 4. Watch over the session as PID 1 until it ends or SIGTERM arrives
 #
-# Die Session wird bewusst *detached* gestartet: der claudops-Server startet den
-# Container ohne TTY und hängt sich später per `docker exec ... tmux attach` dran.
+# The session is started *detached* on purpose: the claudops server starts the
+# container without a TTY and attaches later via `docker exec ... tmux attach`.
 set -uo pipefail
 
 WORKSPACE_DIR="${WORKSPACE_DIR:-/workspace}"
@@ -17,7 +17,7 @@ CLAUDE_ARGS="${CLAUDE_ARGS:-}"
 
 log() { printf '[claudops] %s\n' "$*"; }
 
-# Credentials aus URLs entfernen, damit kein Token im Log landet.
+# Strip credentials from URLs so no token ends up in the log.
 redact() { sed -E 's#://[^/@]*@#://***@#g' <<<"$1"; }
 
 host_from_url() {
@@ -46,24 +46,25 @@ clone_repo() {
   local url="$1" target="$2"
 
   if [[ -d "$target/.git" ]]; then
-    log "Repo liegt bereits in $target — Clone übersprungen."
+    log "Repo already present in $target -- skipping clone."
     return 0
   fi
 
-  log "Klone $(redact "$url") (Branch $REPO_BRANCH) nach $target"
+  log "Cloning $(redact "$url") (branch $REPO_BRANCH) into $target"
   if git clone --branch "$REPO_BRANCH" "$url" "$target"; then
-    log "Clone erfolgreich."
+    log "Clone succeeded."
     return 0
   fi
 
-  # Kein Abbruch: ein toter Container wäre per Terminal-Bridge nicht mehr
-  # erreichbar, und genau dann will man nachsehen (falscher PAT, falscher Branch).
-  log "FEHLER: Clone fehlgeschlagen — die Session startet trotzdem in $WORKSPACE_DIR."
+  # No abort here: a dead container would no longer be reachable through the
+  # terminal bridge, and that is exactly when you want to look inside (wrong
+  # PAT, wrong branch).
+  log "ERROR: clone failed -- the session starts in $WORKSPACE_DIR anyway."
   return 1
 }
 
 shutdown() {
-  log "Signal empfangen — beende tmux-Server."
+  log "Signal received -- shutting down the tmux server."
   tmux kill-server 2>/dev/null
   exit 0
 }
@@ -74,24 +75,24 @@ main() {
   configure_git
 
   if [[ -n "${REPO_URL:-}" ]]; then
-    # Das Token nur an den Host des Projekt-Repos ausliefern.
+    # Hand the token only to the host of the project repo.
     export GIT_TOKEN_HOST="${GIT_TOKEN_HOST:-$(host_from_url "$REPO_URL")}"
     target="$(repo_dir_for "$REPO_URL")"
     if clone_repo "$REPO_URL" "$target"; then
       start_dir="$target"
     fi
   else
-    log "Kein REPO_URL gesetzt — starte ohne Repo in $WORKSPACE_DIR."
+    log "No REPO_URL set -- starting without a repo in $WORKSPACE_DIR."
   fi
 
   trap shutdown TERM INT
 
   if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
-    log "tmux-Session '$TMUX_SESSION' läuft bereits."
+    log "tmux session '$TMUX_SESSION' is already running."
   else
-    log "Starte Claude Code in tmux-Session '$TMUX_SESSION' (cwd: $start_dir)."
-    # `exec bash -l` hält den Pane offen, wenn Claude beendet wird — sonst
-    # fällt die Session weg und der Container stirbt beim ersten /exit.
+    log "Starting Claude Code in tmux session '$TMUX_SESSION' (cwd: $start_dir)."
+    # `exec bash -l` keeps the pane open when Claude exits -- otherwise the
+    # session disappears and the container dies on the first /exit.
     tmux new-session -d -s "$TMUX_SESSION" -c "$start_dir" \
       "claude ${CLAUDE_ARGS}; exec bash -l"
   fi
@@ -101,7 +102,7 @@ main() {
     wait $!
   done
 
-  log "tmux-Session beendet — Container fährt runter."
+  log "tmux session ended -- container is shutting down."
 }
 
 main "$@"

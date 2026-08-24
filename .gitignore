@@ -55,3 +55,8 @@ CodeCoverage/
 *.VisualState.xml
 TestResult.xml
 nunit-*.xml
+
+# Claude Code: local settings and MCP secrets stay out of the repo,
+# .claude/skills and .claude/settings.json are shared.
+.claude/settings.local.json
+.mcp.json

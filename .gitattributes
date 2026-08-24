@@ -1,5 +1,5 @@
-# Container-Skripte müssen im Working Tree LF behalten, sonst scheitert der
-# Shebang im Linux-Image ("bad interpreter: no such file or directory").
+# Container scripts must keep LF in the working tree, otherwise the shebang
+# fails inside the Linux image ("bad interpreter: no such file or directory").
 *.sh              text eol=lf
 *.conf            text eol=lf
 Dockerfile        text eol=lf
