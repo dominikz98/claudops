@@ -11,10 +11,14 @@ knows Docker and has never seen this repository.
 - [Operations](operations.md) - running it, cleaning up, troubleshooting
 - [Glossary](glossary.md) - what instance, project and bridge mean here
 
+The REST API and the server's own configuration are documented next to the code,
+in [server/README.md](../server/README.md).
+
 ## Current state
 
-Only the base image exists today; everything else is planned and marked with its
-issue number on the pages below. The component status table lives in the
+An instance can be started, listed and removed over REST; its console still goes
+through `docker exec`. Everything else is planned and marked with its issue
+number on the pages below. The component status table lives in the
 [root README](../README.md#state) -- kept in one place so the two cannot drift
 apart.
 

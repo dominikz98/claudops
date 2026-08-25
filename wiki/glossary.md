@@ -10,4 +10,6 @@
 | **Bridge / terminal bridge** | The WebSocket endpoint that pipes a container TTY to the browser console. Planned (#4). |
 | **Reconcile** | The startup pass that compares Docker reality against the database and removes or marks the leftovers. Planned (#8). |
 | **claudops label** | `claudops.instance=<id>`, set on every resource an instance owns, so cleanup can find them all. |
+| **Instance status** | Read from the Docker API on every request, never stored: the Docker state (`running`, `exited`, `created`, …) or `missing` when the server has a row and Docker has no container. |
+| **Instance id** | The short id the server generates. It names the container (`claudops-<id>`) and is the value of the claudops label. |
 | **NUC** | The Intel NUC running Ubuntu and Docker that hosts all of this. |

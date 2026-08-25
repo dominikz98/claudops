@@ -1,0 +1,82 @@
+import type { Database } from 'better-sqlite3';
+
+/** An instance as it is stored -- identity only, no status and no secrets. */
+export interface InstanceRecord {
+  id: string;
+  name: string;
+  image: string;
+  containerId: string | null;
+  repoUrl: string | null;
+  repoBranch: string | null;
+  createdAt: string;
+}
+
+export interface NewInstance {
+  id: string;
+  name: string;
+  image: string;
+  repoUrl: string | null;
+  repoBranch: string | null;
+  createdAt: string;
+}
+
+interface InstanceRow {
+  id: string;
+  name: string;
+  image: string;
+  container_id: string | null;
+  repo_url: string | null;
+  repo_branch: string | null;
+  created_at: string;
+}
+
+function toRecord(row: InstanceRow): InstanceRecord {
+  return {
+    id: row.id,
+    name: row.name,
+    image: row.image,
+    containerId: row.container_id,
+    repoUrl: row.repo_url,
+    repoBranch: row.repo_branch,
+    createdAt: row.created_at,
+  };
+}
+
+export class InstanceRepository {
+  constructor(private readonly db: Database) {}
+
+  insert(instance: NewInstance): InstanceRecord {
+    this.db
+      .prepare(
+        `INSERT INTO instances (id, name, image, container_id, repo_url, repo_branch, created_at)
+         VALUES (@id, @name, @image, NULL, @repoUrl, @repoBranch, @createdAt)`,
+      )
+      .run(instance);
+
+    return { ...instance, containerId: null };
+  }
+
+  attachContainer(id: string, containerId: string): void {
+    this.db.prepare('UPDATE instances SET container_id = ? WHERE id = ?').run(containerId, id);
+  }
+
+  get(id: string): InstanceRecord | undefined {
+    const row = this.db.prepare('SELECT * FROM instances WHERE id = ?').get(id) as
+      | InstanceRow
+      | undefined;
+    return row === undefined ? undefined : toRecord(row);
+  }
+
+  list(): InstanceRecord[] {
+    const rows = this.db
+      .prepare('SELECT * FROM instances ORDER BY created_at DESC, id DESC')
+      .all() as InstanceRow[];
+    return rows.map(toRecord);
+  }
+
+  /** Returns whether a row was actually removed, so the caller can tell a
+   *  delete from a no-op. */
+  delete(id: string): boolean {
+    return this.db.prepare('DELETE FROM instances WHERE id = ?').run(id).changes > 0;
+  }
+}

@@ -7,14 +7,15 @@ lives in the container, not in the browser tab.
 
 ## State
 
-Only the base image exists today. Everything else is planned; see the
+Instances can be started, listed and removed over REST; their consoles still go
+through `docker exec`. Everything else is planned; see the
 [issues](https://github.com/dominikz98/claudops/issues) and
 [EPIC #1](https://github.com/dominikz98/claudops/issues/1).
 
 | Component | State |
 | --- | --- |
 | Base image `claudops-base` | Available, smoke-tested |
-| Server (Fastify, dockerode, SQLite) | Planned (#3) |
+| Server (Fastify, dockerode, SQLite) | Available, smoke-tested |
 | Terminal bridge (WebSocket) | Planned (#4) |
 | Web UI (xterm.js) | Planned (#5) |
 | Projects and project images | Planned (#6, #7) |
@@ -25,28 +26,35 @@ Only the base image exists today. Everything else is planned; see the
 
 ```bash
 docker build -t claudops-base docker/base
+pnpm install && pnpm build
 ```
 
 ```bash
-docker run -d --name my-instance \
-  -e REPO_URL=https://github.com/dominikz98/claudops.git \
-  -e GIT_TOKEN="$GITHUB_PAT" \
-  -e CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN" \
-  claudops-base
+CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN" node server/dist/index.js
 ```
 
 ```bash
-docker exec -it my-instance tmux attach -t main
+curl -s localhost:8080/instances \
+  -H 'content-type: application/json' \
+  -d '{"name":"demo","repoUrl":"https://github.com/dominikz98/claudops.git"}'
+```
+
+The answer carries the instance `id`; its console is one `docker exec` away:
+
+```bash
+docker exec -it claudops-<id> tmux attach -t main
 ```
 
 Detach with `Ctrl-b d`; Claude keeps running. The full walkthrough is in
-[wiki/getting-started.md](wiki/getting-started.md).
+[wiki/getting-started.md](wiki/getting-started.md), the API and the server's
+configuration in [server/README.md](server/README.md).
 
 ## Layout
 
 | Path | Contains |
 | --- | --- |
 | [`docker/base/`](docker/base/) | The `claudops-base` image, its entrypoint and its smoke test |
+| [`server/`](server/README.md) | The Fastify server: instance REST, Docker access, SQLite, its smoke test |
 | [`wiki/`](wiki/README.md) | Documentation for users and colleagues: architecture, getting started, operations, glossary |
 | [`knowledge/`](knowledge/README.md) | Domain knowledge database: the non-obvious decisions and their reasons |
 | [`CLAUDE.md`](CLAUDE.md) | Project rules for Claude Code working in this repository |
@@ -65,5 +73,13 @@ repository is written in English.
 ## Test
 
 ```bash
-./docker/base/smoke-test.sh
+pnpm lint && pnpm tsc --noEmit && pnpm test
 ```
+
+```bash
+./docker/base/smoke-test.sh
+./server/smoke-test.sh
+```
+
+The unit tests need no Docker; both smoke tests do. `SKIP_BUILD=1` makes either
+of them reuse what is already built.

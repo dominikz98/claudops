@@ -5,3 +5,11 @@
 Dockerfile        text eol=lf
 .dockerignore     text eol=lf
 git-credential-*  text eol=lf
+
+# Server sources. Not run in the image today, but the dev host is Windows with
+# autocrlf on, and CRLF would arrive the moment one of these is copied into a
+# container or diffed against a Linux checkout.
+*.ts              text eol=lf
+*.js              text eol=lf
+*.json            text eol=lf
+*.yaml            text eol=lf

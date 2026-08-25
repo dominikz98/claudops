@@ -1,28 +1,63 @@
 # Operations
 
-Running instances by hand, until the server takes over (#3, #8).
+Running claudops day to day. Automatic recycling and resource limits are still
+to come (#8).
+
+## Is the server healthy
+
+```bash
+curl -s localhost:8080/health
+```
+
+`{"status":"ok","docker":"ok"}` means the process is up and the Docker daemon
+answers. `503` with `"docker":"unreachable"` means the server is running but
+cannot start or list anything -- check the daemon before looking anywhere else.
+The server deliberately starts even when Docker is down, so this is a real
+state, not a hypothetical one.
 
 ## Look around
 
 ```bash
-docker ps --filter label=claudops.instance          # instances started by the server
-docker logs my-instance                             # entrypoint output: clone, session start
-docker exec my-instance tmux list-sessions          # is the session alive
-docker exec my-instance tmux capture-pane -p -t main:0.0   # what does Claude show right now
+curl -s localhost:8080/instances                    # what the server knows, with live status
+docker ps --filter label=claudops.instance          # what Docker has
+docker logs claudops-<id>                           # entrypoint output: clone, session start
+docker exec claudops-<id> tmux list-sessions        # is the session alive
+docker exec claudops-<id> tmux capture-pane -p -t main:0.0   # what does Claude show right now
 ```
 
 `capture-pane` is the read-only look at the console: it prints the pane without
 attaching, so it cannot disturb a session someone else is using.
 
+The two lists should agree. Where they do not, the status says which way:
+
+| Status | Meaning |
+| --- | --- |
+| `running` | Normal. |
+| `exited` | The container stopped -- tmux session ended, or somebody ran `docker stop`. The instance still exists and can be deleted. |
+| `missing` | The server has a row but Docker has no container. Either a create failed halfway, or the container was removed by hand. Deleting the instance clears the row. |
+
+A container in `docker ps` that is *not* in the instance list was started by
+hand. It carries no `claudops.instance` label, so nothing below will find it.
+
 ## Stop and remove
 
 ```bash
-docker stop my-instance     # SIGTERM, the entrypoint shuts tmux down cleanly
-docker rm -f my-instance
+curl -s -X DELETE localhost:8080/instances/<id>     # container and row, in that order
+```
+
+This removes the container's anonymous volumes too, so uncommitted work in the
+workspace is gone.
+
+Only the container, keeping the instance:
+
+```bash
+docker stop claudops-<id>     # SIGTERM, the entrypoint shuts tmux down cleanly
 ```
 
 A stop takes about a second. If it takes ten, SIGTERM is not being handled and
-Docker had to kill the container -- that is a bug, not a slow shutdown.
+Docker had to kill the container -- that is a bug, not a slow shutdown. The
+instance then lists as `exited`; there is no restart endpoint yet, so getting it
+running again means deleting it and creating a new one.
 
 ## Troubleshooting
 
@@ -44,20 +79,50 @@ has expired. Mint a new one with `claude setup-token`.
 **The container exits right after start.** The tmux session ended, which is what
 the entrypoint watches for. `docker logs` shows the last line before the exit.
 
+**`POST /instances` answers 422.** The base image is not built, or
+`CLAUDOPS_BASE_IMAGE` names a tag that does not exist. `docker images
+claudops-base` says which.
+
+**`POST /instances` answers 503.** The Docker daemon is not reachable. No
+instance was created -- the server rolls the row back rather than leaving a
+half-created one behind.
+
+**A request answers 400 for a field that looks right.** Unknown fields are
+rejected rather than ignored, so a typo in `repoBranch` fails the request
+instead of silently starting an instance on the default branch. The message
+names the offending property.
+
 ## Resource limits
 
-Not enforced yet. Until #8 lands, an instance can use as much CPU and memory as
-the NUC has, so start them one at a time when you are trying things out. Manual
-limits work in the meantime:
+Not enforced yet. Until #8 lands, the server starts containers without limits, so
+an instance can use as much CPU and memory as the NUC has -- create them one at a
+time when you are trying things out. A hand-started container can be capped in
+the meantime:
 
 ```bash
 docker run -d --cpus 2 --memory 4g ... claudops-base
 ```
 
+## The database
+
+Instance metadata lives in the SQLite file named by `CLAUDOPS_DB`, by default
+`data/claudops.db` next to wherever the server was started. It holds identity
+only -- no status, no tokens. Deleting it loses the names and creation times of
+running instances, but not the instances: their containers keep running and are
+still findable by label.
+
+```bash
+docker ps -a --filter label=claudops.instance
+```
+
 ## Cleaning up leftovers
 
-Until the startup reconcile exists (#8), orphaned containers and volumes have to
-go by hand:
+The normal path is `DELETE /instances/<id>`. Until the startup reconcile exists
+(#8), two cases still need hands:
+
+- an instance listed as `missing` -- delete it, which clears the row
+- a container with the label but no instance, from a create that died between
+  the two steps
 
 ```bash
 docker ps -a --filter label=claudops.instance
@@ -69,5 +134,6 @@ Claude session open in it.
 
 ## Not there yet
 
-Egress firewall and UI login (#9), automatic recycling and limits (#8), and
-anything to do with the server or the web UI (#3 to #7).
+Egress firewall and UI login (#9), automatic recycling and limits (#8), the
+browser console (#4, #5) and projects (#6, #7). Restarting an instance is not an
+endpoint either; delete and create.
