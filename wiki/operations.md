@@ -3,6 +3,26 @@
 Running claudops day to day. Automatic recycling and resource limits are still
 to come (#8).
 
+## The web UI
+
+<http://localhost:8080> -- the same port as the API. The instance list refreshes
+itself every three seconds with the status Docker reports; **Console** opens the
+tmux session of an instance, **Delete** asks twice and then takes the container
+with it.
+
+There is no login yet (#9), so anyone who can reach the port can start and delete
+instances and type into every console. Keep it on a trusted network or behind a
+reverse proxy until then.
+
+A page that shows the list but never fills it means the API is answering with an
+error -- the red banner names it. If the browser shows the JSON of an endpoint
+instead of a page, the UI was not built: `pnpm build`, or point
+`CLAUDOPS_WEB_ROOT` at an existing `web/dist`. The server says so at startup:
+
+```
+WARN: no built web UI found -- serving the API only
+```
+
 ## Is the server healthy
 
 ```bash
@@ -71,8 +91,13 @@ running again means deleting it and creating a new one.
 
 ## The console over the WebSocket
 
-`/instances/<id>/terminal` mirrors the session for anyone who can reach the
-server. Any WebSocket client will do:
+The browser uses `/instances/<id>/terminal`; so can anything else that speaks
+WebSocket. The status line in the UI is the first diagnosis: `connected · 148×39`
+names the geometry the container is being told about, and a `disconnected · ...`
+line names the close code in words. Nothing reconnects on its own -- reload, or
+press Reconnect.
+
+Any WebSocket client will do:
 
 ```bash
 npx wscat -c 'ws://localhost:8080/instances/<id>/terminal?cols=120&rows=40'
@@ -112,6 +137,13 @@ my-instance` has the git error, with any credentials redacted.
 
 **`tmux attach` says "terminal does not support clear".** The exec is missing a
 TTY. Use `docker exec -it`, or pass `-e TERM=xterm-256color`.
+
+**The console shows rows of underscores where Claude's boxes should be.** tmux
+replaces every multi-byte character for a client that has not declared UTF-8.
+`claudops-base` sets `LANG=C.UTF-8` and the bridge attaches with `tmux -u`, so
+this only happens with a project image that dropped the locale, or with a
+hand-run `docker exec` into such an image -- `tmux -u attach -t main` fixes that
+one on the spot.
 
 **Claude asks for authentication.** `CLAUDE_CODE_OAUTH_TOKEN` was not passed in or
 has expired. Mint a new one with `claude setup-token`.
@@ -174,6 +206,6 @@ Claude session open in it.
 
 ## Not there yet
 
-Egress firewall and UI login (#9), automatic recycling and limits (#8), the
-browser page for the console (#5) and projects (#6, #7). Restarting an instance
-is not an endpoint either; delete and create.
+Egress firewall and UI login (#9), automatic recycling and limits (#8), and
+projects (#6, #7). Restarting an instance is not an endpoint either; delete and
+create.

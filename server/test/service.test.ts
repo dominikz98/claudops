@@ -235,7 +235,13 @@ describe('InstanceService', () => {
 
       expect(engine.lastTerminal().containerId).toBe('container-1');
       // `attach`, not `new`: the session belongs to the entrypoint.
-      expect(engine.lastTerminal().options.command).toEqual(['tmux', 'attach', '-t', 'main']);
+      expect(engine.lastTerminal().options.command).toEqual([
+        'tmux',
+        '-u',
+        'attach',
+        '-t',
+        'main',
+      ]);
       expect(engine.lastTerminal().options.size).toEqual({ cols: 120, rows: 40 });
       expect(session.stream.writable).toBe(true);
     });
@@ -261,7 +267,13 @@ describe('InstanceService', () => {
 
       await other.openTerminal('id-9');
 
-      expect(engine.lastTerminal().options.command).toEqual(['tmux', 'attach', '-t', 'claude']);
+      expect(engine.lastTerminal().options.command).toEqual([
+      'tmux',
+      '-u',
+      'attach',
+      '-t',
+      'claude',
+    ]);
     });
 
     it('attaches without a size when the client did not send one', async () => {

@@ -4,10 +4,12 @@ claudops starts isolated Claude Code instances in Docker containers on an Intel
 NUC and mirrors their consoles into the browser.
 
 ```
-Browser (xterm.js) <=> WebSocket <=> claudops-server (Node/TS)
-                                      |- REST: projects and instances (SQLite)
-                                      |- dockerode -> Docker Engine
-                                      +- image builds per project
+Browser (SPA + xterm.js) <=> HTTP + WebSocket <=> claudops-server (Node/TS)
+                                                  |- static: the SPA itself
+                                                  |- REST: projects and instances (SQLite)
+                                                  |- WS: one TTY per console
+                                                  |- dockerode -> Docker Engine
+                                                  +- image builds per project
 
 Container per instance: project image -> clone repo -> tmux -> claude
 ```
@@ -17,8 +19,8 @@ Container per instance: project image -> clone repo -> tmux -> claude
 | Component | Role | State |
 | --- | --- | --- |
 | `claudops-base` | Base image: Node, Claude Code CLI, git, tmux, non-root user, entrypoint | Available |
-| `claudops-server` | Fastify: instance REST and the terminal bridge; projects to come | Instance REST and terminal available; #6 open |
-| Web UI | Vite SPA served by the server on the same port: instance list and console | Planned (#5) |
+| `claudops-server` | Fastify: instance REST, the terminal bridge and the UI; projects to come | Instance REST, terminal and UI available; #6 open |
+| Web UI | Vite SPA served by the server on the same port: instance list and console | Available |
 | SQLite | Metadata for instances; projects join it with #6 | Available |
 
 ## Decisions worth knowing
@@ -38,6 +40,15 @@ attached client, a forgotten 80x24 client shrinks the pane for everyone else. Th
 bridge therefore sends tmux's detach sequence before dropping the stream, and
 pings every 30 seconds so a client that vanished without saying goodbye is
 noticed at all.
+
+**One port, and the browser routes in the fragment.** The server serves the built
+SPA at `/` next to its own API, so there is no second process, no second origin
+and no CORS. The UI's own routes live in the hash (`#/i/<id>`) rather than in the
+path, because `/instances/<id>` is already the REST resource -- a history route
+would have to shadow the API or branch on the `Accept` header, and a catch-all
+`index.html` would turn the JSON 404 into an HTML page for every mistyped API
+call. A checkout where the UI was never built still starts: the server logs a
+warning and serves the API alone.
 
 **Environments are prebuilt images.** A project defines its environment through
 building blocks (dotnet, Playwright); the server builds a project image from them
@@ -69,7 +80,6 @@ would override the subscription and bill per token.
 ## Order of work
 
 Packages #2 to #5 produce the first walking skeleton: start an instance, use its
-console in the browser. #2 to #4 are done -- an instance can be started and
-removed over REST and its console is on a WebSocket; what is missing is the
-browser that talks to it (#5). #6 to #9 make it usable in practice. See issue
-#1.
+console in the browser. All four are done -- an instance can be created, driven
+and deleted from a browser page, and a refresh finds the session where it was.
+#6 to #9 make it usable in practice. See issue #1.

@@ -8,6 +8,7 @@
 | **Project image** | `claudops-project-<id>` -- the base image plus the environment building blocks of one project, prebuilt. Planned (#7). |
 | **Building block** | An optional layer in a project image, e.g. dotnet SDK or Playwright with Chromium. Planned (#7). |
 | **Bridge / terminal bridge** | The WebSocket endpoint `/instances/:id/terminal` that pipes a container TTY to the browser console. One exec and one tmux client per connection. |
+| **Web UI** | The Vite SPA in `web/`, served by the server itself on the same port: instance list and one console per instance. Its own routes live in the URL fragment (`#/i/<id>`), because the path belongs to the REST API. |
 | **Reconcile** | The startup pass that compares Docker reality against the database and removes or marks the leftovers. Planned (#8). |
 | **claudops label** | `claudops.instance=<id>`, set on every resource an instance owns, so cleanup can find them all. |
 | **Instance status** | Read from the Docker API on every request, never stored: the Docker state (`running`, `exited`, `created`, …) or `missing` when the server has a row and Docker has no container. |

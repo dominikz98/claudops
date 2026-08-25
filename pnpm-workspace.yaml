@@ -1,9 +1,13 @@
 packages:
   - server
+  - web
+  - e2e
 
 # better-sqlite3 is a native module and needs its install script; esbuild
-# (via vitest) unpacks its platform binary the same way. Everything else
-# stays blocked, which is pnpm 10's default.
+# (via vite and vitest) unpacks its platform binary the same way. Everything
+# else stays blocked, which is pnpm 10's default -- including Playwright's
+# browser download, which is a separate explicit step
+# (knowledge/playwright-browsers-need-an-explicit-install.md).
 onlyBuiltDependencies:
   - better-sqlite3
   - esbuild

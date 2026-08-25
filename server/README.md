@@ -1,8 +1,8 @@
 # `@claudops/server`
 
 Fastify server that starts Claude Code instances as Docker containers, keeps
-their metadata in SQLite and mirrors their consoles over a WebSocket. The web UI
-(#5) will be served from the same process.
+their metadata in SQLite, mirrors their consoles over a WebSocket and serves the
+web UI -- all on one port.
 
 ## Run
 
@@ -28,6 +28,7 @@ docker build -t claudops-base docker/base
 
 | Method | Path | Purpose |
 | --- | --- | --- |
+| `GET` | `/` | The web UI, from `CLAUDOPS_WEB_ROOT`. See [Web UI](#web-ui). |
 | `GET` | `/health` | Readiness: `200` when the Docker daemon answers, `503` when it does not. |
 | `POST` | `/instances` | Start an instance. Body: `name` (required), `repoUrl`, `repoBranch`, `gitToken`. Answers `201` with the instance. |
 | `GET` | `/instances` | All instances, each with the status Docker reports. |
@@ -47,6 +48,18 @@ image is not built, `503` while the Docker daemon is unreachable.
 
 `gitToken` is passed into the container environment and is never stored, logged
 or echoed back.
+
+## Web UI
+
+The built SPA from [`web/`](../web/README.md) is served at `/`, so browser and
+API share one port and one origin. Exact routes win against the static wildcard,
+and the SPA keeps its own routes in the fragment (`#/i/<id>`), so nothing here
+shadows `/instances` and an unknown path still answers with the JSON 404.
+
+`CLAUDOPS_WEB_ROOT` names the directory; by default it is `web/dist` next to this
+package, resolved from the server's own location rather than from the working
+directory. A directory without an `index.html` -- a checkout where `pnpm build`
+never ran -- is not fatal: the server logs a warning and serves the API only.
 
 ## Terminal
 
@@ -103,6 +116,7 @@ drives.
 | `CLAUDOPS_PORT` | `8080` | Listen port. |
 | `CLAUDOPS_DB` | `data/claudops.db` | SQLite file. Created together with its directory. |
 | `CLAUDOPS_BASE_IMAGE` | `claudops-base` | Image instances are started from. Per-project images arrive with #7. |
+| `CLAUDOPS_WEB_ROOT` | `web/dist` next to the package | Directory the web UI is served from. Without an `index.html` in it the server runs API-only. |
 | `CLAUDOPS_TMUX_SESSION` | `main` | Session the terminal attaches to. Matches `TMUX_SESSION` in the image; only a project image with its own entrypoint needs another. |
 | `CLAUDOPS_LOG_LEVEL` | `info` | Fastify log level. |
 | `DOCKER_SOCKET` | platform default | `/var/run/docker.sock` on Linux, `//./pipe/docker_engine` on Windows. |
@@ -122,7 +136,7 @@ src/instances/routes.ts   REST endpoints and their schemas
 src/terminal/protocol.ts  the wire format: frames, close codes
 src/terminal/bridge.ts    one socket to one TTY, both directions
 src/terminal/routes.ts    the WebSocket endpoint
-src/app.ts                Fastify instance, error mapping, /health
+src/app.ts                Fastify instance, error mapping, /health, static UI
 scripts/ws-probe.ts       WebSocket client for the smoke test
 ```
 
@@ -135,6 +149,7 @@ scripts/ws-probe.ts       WebSocket client for the smoke test
 pnpm test                          # vitest, no Docker needed
 ./server/smoke-test.sh             # the issue #3 acceptance criteria against real Docker
 ./server/terminal-smoke-test.sh    # the issue #4 acceptance criteria, real container and socket
+./e2e/run.sh                       # the issue #5 acceptance criteria, in a real browser
 ```
 
 Both share `smoke-lib.sh` and clean up after themselves by label, so a failed run
@@ -146,7 +161,6 @@ without it or the result describes the code you replaced.
 
 ## Not part of this yet
 
-- Web UI -> #5
 - Projects and per-project images -> #6, #7
 - Resource limits, startup reconcile -> #8
 - Auth, egress firewall -> #9

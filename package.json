@@ -8,10 +8,12 @@
   },
   "scripts": {
     "dev": "pnpm --filter @claudops/server dev",
+    "dev:web": "pnpm --filter @claudops/web dev",
     "build": "pnpm -r build",
     "lint": "eslint .",
     "tsc": "pnpm -r exec tsc",
-    "test": "pnpm -r test"
+    "test": "pnpm -r test",
+    "e2e": "pnpm --filter @claudops/e2e e2e"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

@@ -171,7 +171,12 @@ export class InstanceService {
     return this.engine.attachTerminal(record.containerId, {
       // `attach`, not `new -A`: the session belongs to the entrypoint, and
       // creating one here would produce a console nobody is watching over.
-      command: ['tmux', 'attach', '-t', this.tmuxSession],
+      //
+      // `-u` says the client takes UTF-8. claudops-base sets LANG for the same
+      // reason, but a project image (#7) might not, and without it tmux writes
+      // an underscore for every multi-byte character
+      // (knowledge/tmux-needs-a-utf8-client.md).
+      command: ['tmux', '-u', 'attach', '-t', this.tmuxSession],
       size,
       closeInput: TMUX_DETACH,
     });
