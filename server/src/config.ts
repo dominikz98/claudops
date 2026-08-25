@@ -1,4 +1,5 @@
 import { resolve } from 'node:path';
+import { createCipher, parseSecretKey, type SecretCipher } from './secrets/cipher.ts';
 
 /**
  * Server configuration, read from the environment exactly once at startup.
@@ -30,6 +31,14 @@ export interface ServerConfig {
   /** `undefined` leaves the transport to dockerode, which then honours
    *  DOCKER_HOST. */
   dockerSocket: string | undefined;
+  /**
+   * Encrypts and decrypts the PAT a project keeps. A cipher rather than the key
+   * itself: `JSON.stringify` of a Buffer prints every one of its bytes, and a
+   * config object ends up in a log line sooner or later. Without
+   * CLAUDOPS_SECRET_KEY this is the variant that refuses rather than the one
+   * that encrypts (server/src/secrets/cipher.ts).
+   */
+  cipher: SecretCipher;
   instanceEnv: InstanceEnvConfig;
 }
 
@@ -70,6 +79,23 @@ function port(env: NodeJS.ProcessEnv): number {
   return parsed;
 }
 
+/**
+ * A missing key is not a configuration error: the server starts, projects work,
+ * only a PAT cannot be stored -- and the request that tries says so. A key that
+ * is present but unusable is an error, because the alternative is discovering it
+ * when somebody saves a token.
+ */
+function cipher(env: NodeJS.ProcessEnv): SecretCipher {
+  const raw = optional(env, 'CLAUDOPS_SECRET_KEY');
+  if (raw === undefined) return createCipher(undefined);
+
+  const key = parseSecretKey(raw);
+  if (key === undefined) {
+    throw new ConfigError('CLAUDOPS_SECRET_KEY must be 32 bytes, base64 or hex encoded');
+  }
+  return createCipher(key);
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   // DOCKER_HOST wins over the platform default: dockerode reads it itself, so
   // we hand it no socket path at all in that case.
@@ -86,6 +112,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     webRoot: optional(env, 'CLAUDOPS_WEB_ROOT') ?? defaultWebRoot(),
     tmuxSession: optional(env, 'CLAUDOPS_TMUX_SESSION') ?? 'main',
     dockerSocket,
+    cipher: cipher(env),
     instanceEnv: {
       claudeOauthToken: optional(env, 'CLAUDE_CODE_OAUTH_TOKEN'),
       gitUserName: optional(env, 'CLAUDOPS_GIT_USER_NAME'),

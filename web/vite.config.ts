@@ -10,6 +10,7 @@ export default defineConfig({
       // `ws: true` matters: without it Vite answers the terminal upgrade itself
       // and the console never connects.
       '/instances': { target: SERVER, ws: true },
+      '/projects': { target: SERVER },
       '/health': { target: SERVER },
     },
   },

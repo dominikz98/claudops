@@ -1,12 +1,14 @@
 /**
- * The instance list: create, see the status Docker reports, open the console,
- * delete.
+ * The instance list: create from a project, see the status Docker reports, open
+ * the console, delete.
  *
  * The table body is re-rendered on every poll, the shell around it is not --
  * otherwise typing in the create form would lose focus every three seconds.
+ * The project list is fetched once: it only changes on the projects page, and
+ * navigating back here mounts this view again anyway.
  */
 
-import { ApiCallError, type Api, type Instance } from '../api.ts';
+import { ApiCallError, type Api, type Instance, type Project } from '../api.ts';
 import { clear, el, relativeTime } from '../dom.ts';
 import { routeHash } from '../router.ts';
 import type { View } from './view.ts';
@@ -27,6 +29,7 @@ function describe(error: unknown): string {
 
 export function mountList(root: HTMLElement, api: Api): View {
   let instances: Instance[] = [];
+  let projects: Project[] = [];
   /** The id whose delete button is currently asking "are you sure". */
   let confirming: string | undefined;
   let destroyed = false;
@@ -53,16 +56,29 @@ export function mountList(root: HTMLElement, api: Api): View {
     return el('label', {}, el('span', {}, label), input);
   };
 
+  // Repository, branch and PAT are the project's now -- picking one is the whole
+  // configuration an instance has.
+  const projectSelect = el('select', {
+    name: 'projectId',
+    required: 'required',
+    'data-testid': 'projectId',
+  });
+
+  const projectHint = el(
+    'p',
+    { class: 'hint', hidden: 'hidden', 'data-testid': 'no-projects' },
+    'No projects yet -- ',
+    el('a', { href: routeHash({ view: 'projects' }) }, 'create one first'),
+    '.',
+  );
+
   const form = el(
     'form',
     { class: 'create', 'data-testid': 'create-form' },
     field('Name', 'name', 'text', 'my-instance', true),
-    field('Repository', 'repoUrl', 'text', 'https://github.com/you/repo.git'),
-    field('Branch', 'repoBranch', 'text', 'main'),
-    // A PAT is a secret even on a page only you can reach: masked, never
-    // remembered by the browser and never kept by this page.
-    field('Git token', 'gitToken', 'password', 'PAT for a private repository'),
+    el('label', {}, el('span', {}, 'Project'), projectSelect),
     submit,
+    projectHint,
   );
 
   const showError = (error: unknown): void => {
@@ -74,6 +90,24 @@ export function mountList(root: HTMLElement, api: Api): View {
     banner.setAttribute('hidden', 'hidden');
   };
 
+  /** Renders the picker and, when there is nothing to pick, says so instead of
+   *  offering an empty dropdown. */
+  const renderProjects = (): void => {
+    clear(projectSelect);
+    for (const project of projects) {
+      projectSelect.append(el('option', { value: project.id }, project.name));
+    }
+
+    const none = projects.length === 0;
+    if (none) submit.setAttribute('disabled', 'disabled');
+    else submit.removeAttribute('disabled');
+    if (none) projectHint.removeAttribute('hidden');
+    else projectHint.setAttribute('hidden', 'hidden');
+  };
+
+  const projectName = (id: string | null): string =>
+    projects.find((project) => project.id === id)?.name ?? '--';
+
   const renderRows = (): void => {
     clear(rows);
 
@@ -82,7 +116,7 @@ export function mountList(root: HTMLElement, api: Api): View {
         el(
           'tr',
           { 'data-testid': 'empty' },
-          el('td', { colspan: '6' }, 'No instances yet. Create one above.'),
+          el('td', { colspan: '7' }, 'No instances yet. Create one above.'),
         ),
       );
       return;
@@ -127,6 +161,9 @@ export function mountList(root: HTMLElement, api: Api): View {
             },
             instance.status,
           ),
+          el('td', { 'data-testid': 'project' }, projectName(instance.projectId)),
+          // The repository as the container was told it, not as the project
+          // reads today.
           el('td', { class: 'repo' }, instance.repoUrl ?? '--'),
           el('td', {}, instance.repoBranch ?? '--'),
           el('td', { title: instance.createdAt }, relativeTime(instance.createdAt)),
@@ -171,14 +208,7 @@ export function mountList(root: HTMLElement, api: Api): View {
 
     submit.setAttribute('disabled', 'disabled');
     try {
-      await api.create({
-        name: value('name'),
-        repoUrl: value('repoUrl'),
-        repoBranch: value('repoBranch'),
-        gitToken: value('gitToken'),
-      });
-      // Reset before the refresh, so the token does not sit in the DOM any
-      // longer than the request took.
+      await api.create({ name: value('name'), projectId: value('projectId') });
       form.reset();
       clearError();
       await refresh();
@@ -194,6 +224,19 @@ export function mountList(root: HTMLElement, api: Api): View {
     void create();
   });
 
+  /** Fetched once, not polled: only the projects page changes this list. */
+  const loadProjects = async (): Promise<void> => {
+    try {
+      projects = await api.listProjects();
+      if (destroyed) return;
+      renderProjects();
+      renderRows();
+    } catch (error) {
+      if (destroyed) return;
+      showError(error);
+    }
+  };
+
   clear(root);
   root.append(
     el(
@@ -201,6 +244,11 @@ export function mountList(root: HTMLElement, api: Api): View {
       {},
       el('h1', {}, 'claudops'),
       el('p', { class: 'subtitle' }, 'Claude Code instances on the NUC'),
+      el(
+        'a',
+        { class: 'nav', href: routeHash({ view: 'projects' }), 'data-testid': 'projects-link' },
+        'Projects →',
+      ),
     ),
     form,
     banner,
@@ -215,6 +263,7 @@ export function mountList(root: HTMLElement, api: Api): View {
           {},
           el('th', {}, 'Name'),
           el('th', {}, 'Status'),
+          el('th', {}, 'Project'),
           el('th', {}, 'Repository'),
           el('th', {}, 'Branch'),
           el('th', {}, 'Age'),
@@ -225,7 +274,9 @@ export function mountList(root: HTMLElement, api: Api): View {
     ),
   );
 
+  renderProjects();
   renderRows();
+  void loadProjects();
   void refresh();
   const timer = setInterval(() => void refresh(), POLL_MS);
 

@@ -1,10 +1,10 @@
 # `@claudops/web`
 
-The browser side of claudops: the instance list and one xterm.js console per
-instance. Built with Vite into `dist/`, from where the server serves it on its
-own port -- there is no second process and no second origin.
+The browser side of claudops: the projects page, the instance list and one
+xterm.js console per instance. Built with Vite into `dist/`, from where the server
+serves it on its own port -- there is no second process and no second origin.
 
-Plain TypeScript, no framework. There are two views, and the only real
+Plain TypeScript, no framework. There are three views, and the only real
 dependency is `@xterm/xterm` with its fit addon.
 
 ## Run
@@ -13,7 +13,7 @@ Against a server that is already up:
 
 ```bash
 pnpm --filter @claudops/server dev     # :8080
-pnpm dev:web                           # :5173, proxies /instances and /health
+pnpm dev:web                           # :5173, proxies /projects, /instances, /health
 ```
 
 The dev server proxies the API *and* the terminal upgrade (`ws: true`), so the
@@ -35,17 +35,25 @@ logs a warning and serves the API only.
 
 | Route | Page |
 | --- | --- |
-| `#/` | Instance list: create, status, delete. Polls `GET /instances` every 3 s. |
+| `#/` | Instance list: create from a project, status, delete. Polls `GET /instances` every 3 s. |
+| `#/projects` | Projects: create, edit, delete the templates instances come from. No polling. |
 | `#/i/<id>` | The console of one instance, over `GET /instances/<id>/terminal`. |
 
-Routes live in the hash on purpose: `/instances/<id>` is already the REST
-resource, so a history route would collide with it.
+Routes live in the hash on purpose: `/instances/<id>` and `/projects` are already
+REST resources, so a history route would collide with them.
 
 Deleting asks twice -- the first click turns the button into "Really delete?" --
-because a delete takes the container and everything uncommitted in it.
+because a delete takes the container and everything uncommitted in it. A project
+whose instances still exist cannot be deleted at all; the banner shows what the
+server said.
 
-The git token field is a password input, is never stored, and is cleared as soon
-as the request returns.
+The instance form is a name and a project picker: repository, branch and
+credential belong to the project. With no projects yet the picker says so and
+links to the other page.
+
+The git token field is a password input on the projects page, is never sent back
+by the server, and is left empty when a project is opened for editing -- an empty
+field means "keep the stored token", and removing it is its own button.
 
 ## Console details
 
@@ -69,8 +77,9 @@ src/router.ts             hash routes
 src/api.ts                the REST client, with an injectable fetch
 src/terminal/session.ts   the WebSocket: frames, close codes, geometry
 src/views/list.ts         instance list and create form
+src/views/projects.ts     projects: form, edit mode, table
 src/views/console.ts      xterm.js, fit addon, status line
-src/dom.ts                the three lines of DOM plumbing both views share
+src/dom.ts                the three lines of DOM plumbing the views share
 ```
 
 ## Test

@@ -13,6 +13,20 @@ import {
 } from './docker/engine.ts';
 import { instanceRoutes } from './instances/routes.ts';
 import { InstanceService } from './instances/service.ts';
+import { ProjectRepository } from './db/projects.ts';
+import { projectRoutes } from './projects/routes.ts';
+import {
+  ProjectInUseError,
+  ProjectNameTakenError,
+  ProjectNotFoundError,
+  ProjectService,
+} from './projects/service.ts';
+import {
+  createCipher,
+  SecretKeyMissingError,
+  SecretUndecryptableError,
+  type SecretCipher,
+} from './secrets/cipher.ts';
 import type { BridgeOptions } from './terminal/bridge.ts';
 import { terminalRoutes } from './terminal/routes.ts';
 
@@ -44,6 +58,9 @@ export interface AppOptions {
   engine: DockerEngine;
   baseImage: string;
   instanceEnv: InstanceEnvConfig;
+  /** Encrypts the project PATs. Left out, the server runs but refuses to store
+   *  one -- the same behaviour as a missing CLAUDOPS_SECRET_KEY. */
+  cipher?: SecretCipher | undefined;
   /** Directory the built web UI is served from. Left out, or pointing at a
    *  directory without an `index.html`, the server runs API-only. */
   webRoot?: string | undefined;
@@ -70,9 +87,14 @@ export function buildApp(options: AppOptions): FastifyInstance {
     },
   });
 
+  const projects = new ProjectService(new ProjectRepository(options.db), {
+    cipher: options.cipher ?? createCipher(undefined),
+  });
+
   const service = new InstanceService(new InstanceRepository(options.db), options.engine, {
     baseImage: options.baseImage,
     instanceEnv: options.instanceEnv,
+    projects,
     tmuxSession: options.tmuxSession,
   });
 
@@ -83,6 +105,26 @@ export function buildApp(options: AppOptions): FastifyInstance {
     }
     if (error instanceof ImageNotFoundError) {
       return reply.code(422).send({ error: 'image_not_found', message: error.message });
+    }
+    // Only reachable from POST /instances: the project routes answer 404 for an
+    // id in their own path. An unknown reference in a body is a 422, the same
+    // reading as a base image that was never built.
+    if (error instanceof ProjectNotFoundError) {
+      return reply.code(422).send({ error: 'project_not_found', message: error.message });
+    }
+    if (error instanceof ProjectInUseError) {
+      return reply.code(409).send({ error: 'project_in_use', message: error.message });
+    }
+    if (error instanceof ProjectNameTakenError) {
+      return reply.code(409).send({ error: 'project_name_taken', message: error.message });
+    }
+    // Both messages name the variable rather than the secret: the caller needs
+    // to know the server cannot hold a PAT, not what the PAT was.
+    if (error instanceof SecretKeyMissingError) {
+      return reply.code(422).send({ error: 'secret_key_missing', message: error.message });
+    }
+    if (error instanceof SecretUndecryptableError) {
+      return reply.code(422).send({ error: 'secret_undecryptable', message: error.message });
     }
 
     // Fastify hands the handler an `unknown` -- a route can throw anything.
@@ -124,6 +166,7 @@ export function buildApp(options: AppOptions): FastifyInstance {
   // the upgrade handling and `ws`, the bridge in src/terminal does the piping.
   void app.register(websocketPlugin, { options: { maxPayload: MAX_WS_PAYLOAD } });
 
+  void app.register(projectRoutes, { service: projects });
   void app.register(instanceRoutes, { service });
   void app.register(terminalRoutes, { service, bridge: options.terminalBridge });
 

@@ -51,10 +51,20 @@ test.afterAll(async () => {
 });
 
 test('an instance can be created from the browser', async () => {
+  // An instance is created from a project (#6). This one carries no PAT, so
+  // everything below stays independent of any credential -- the clone fails and
+  // the container keeps running, which is the documented behaviour
+  // (knowledge/failed-clone-must-not-abort.md).
+  const project = await page.request.post('/projects', {
+    data: { name: 'e2e-console', repoUrl: 'https://github.com/dominikz98/does-not-exist.git' },
+  });
+  expect(project.status(), await project.text()).toBe(201);
+
   await page.goto('/');
   await expect(page.getByTestId('empty')).toBeVisible();
 
   await page.getByTestId('name').fill('e2e');
+  await page.getByTestId('projectId').selectOption({ label: 'e2e-console' });
   await page.getByTestId('create-submit').click();
 
   const row = page.locator('tr[data-instance-id]');

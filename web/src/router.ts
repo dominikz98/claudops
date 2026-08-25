@@ -8,21 +8,25 @@
  * (knowledge/spa-hash-routing-avoids-the-api-namespace.md).
  */
 
-export type Route = { view: 'list' } | { view: 'console'; id: string };
+export type Route = { view: 'list' } | { view: 'projects' } | { view: 'console'; id: string };
 
 const CONSOLE_PREFIX = '#/i/';
+const PROJECTS_HASH = '#/projects';
 
 /** Anything unrecognised is the list: a mistyped hash must not leave the page
  *  blank. */
 export function parseRoute(hash: string): Route {
-  if (!hash.startsWith(CONSOLE_PREFIX)) return { view: 'list' };
+  if (hash.startsWith(CONSOLE_PREFIX)) {
+    const id = decodeURIComponent(hash.slice(CONSOLE_PREFIX.length));
+    return id === '' ? { view: 'list' } : { view: 'console', id };
+  }
 
-  const id = decodeURIComponent(hash.slice(CONSOLE_PREFIX.length));
-  return id === '' ? { view: 'list' } : { view: 'console', id };
+  return hash === PROJECTS_HASH ? { view: 'projects' } : { view: 'list' };
 }
 
 export function routeHash(route: Route): string {
-  return route.view === 'list' ? '#/' : `${CONSOLE_PREFIX}${encodeURIComponent(route.id)}`;
+  if (route.view === 'console') return `${CONSOLE_PREFIX}${encodeURIComponent(route.id)}`;
+  return route.view === 'projects' ? PROJECTS_HASH : '#/';
 }
 
 export function navigate(route: Route): void {

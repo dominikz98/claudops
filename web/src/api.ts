@@ -13,6 +13,10 @@ export interface Instance {
   name: string;
   image: string;
   containerId: string | null;
+  /** The project it was created from. `null` only for rows older than #6. */
+  projectId: string | null;
+  /** What the container was actually told to clone, snapshotted at create time
+   *  -- not a live view of the project. */
   repoUrl: string | null;
   repoBranch: string | null;
   createdAt: string;
@@ -22,10 +26,47 @@ export interface Instance {
 
 export interface CreateInstanceInput {
   name: string;
-  repoUrl?: string;
+  /** Repository, branch and PAT all come from the project. */
+  projectId: string;
+}
+
+/** The optional layers a project image gets in #7. Stored today, built there. */
+export interface BuildingBlocks {
+  dotnet: boolean;
+  playwright: boolean;
+}
+
+/** `ProjectView` in server/src/projects/service.ts. The PAT appears only as
+ *  `hasGitToken`: it is stored encrypted server-side and never sent back. */
+export interface Project {
+  id: string;
+  name: string;
+  repoUrl: string;
+  repoBranch: string | null;
+  buildingBlocks: BuildingBlocks;
+  hasGitToken: boolean;
+  instanceCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateProjectInput {
+  name: string;
+  repoUrl: string;
   repoBranch?: string;
-  /** Passed straight through to the container. Never stored in the browser. */
   gitToken?: string;
+  buildingBlocks: BuildingBlocks;
+}
+
+export interface UpdateProjectInput {
+  name?: string;
+  repoUrl?: string;
+  /** `null` clears the branch and falls back to the container default. */
+  repoBranch?: string | null;
+  /** Left out the stored PAT stays -- which is what an empty password field
+   *  means. `null` removes it, a string replaces it. */
+  gitToken?: string | null;
+  buildingBlocks?: BuildingBlocks;
 }
 
 /** A request the server answered with an error body: `{ error, message }`. */
@@ -45,6 +86,10 @@ export interface Api {
   get(id: string): Promise<Instance>;
   create(input: CreateInstanceInput): Promise<Instance>;
   remove(id: string): Promise<void>;
+  listProjects(): Promise<Project[]>;
+  createProject(input: CreateProjectInput): Promise<Project>;
+  updateProject(id: string, input: UpdateProjectInput): Promise<Project>;
+  removeProject(id: string): Promise<void>;
 }
 
 interface ErrorBody {
@@ -66,45 +111,86 @@ async function failure(response: Response): Promise<ApiCallError> {
 }
 
 /** Blank optional fields are dropped rather than sent: the server validates
- *  `minLength: 1` and would answer 400 for an empty string. */
-function createBody(input: CreateInstanceInput): Record<string, string> {
-  const body: Record<string, string> = { name: input.name };
-  if (input.repoUrl) body.repoUrl = input.repoUrl;
-  if (input.repoBranch) body.repoBranch = input.repoBranch;
-  if (input.gitToken) body.gitToken = input.gitToken;
-  return body;
+ *  `minLength: 1` and would answer 400 for an empty string. An explicit `null`
+ *  is kept, because that is the removal. */
+function withoutBlanks(fields: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(fields).filter(([, value]) => value !== undefined && value !== ''),
+  );
 }
 
 export function createApi(fetchImpl: typeof fetch = globalThis.fetch.bind(globalThis)): Api {
+  /** Every call goes through here, so an error body is turned into an
+   *  ApiCallError in exactly one place. */
+  const request = async <T>(path: string, init?: RequestInit): Promise<T> => {
+    const response = await fetchImpl(path, init);
+    if (!response.ok) throw await failure(response);
+    return (await response.json()) as T;
+  };
+
+  const send = (method: string, body: Record<string, unknown>): RequestInit => ({
+    method,
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+
+  /** DELETE answers 204 with no body, so it cannot go through `request`. */
+  const remove = async (path: string): Promise<void> => {
+    const response = await fetchImpl(path, { method: 'DELETE' });
+    if (!response.ok) throw await failure(response);
+  };
+
   return {
     async list(): Promise<Instance[]> {
-      const response = await fetchImpl('/instances');
-      if (!response.ok) throw await failure(response);
-      const body = (await response.json()) as { instances: Instance[] };
-      return body.instances;
+      return (await request<{ instances: Instance[] }>('/instances')).instances;
     },
 
-    async get(id: string): Promise<Instance> {
-      const response = await fetchImpl(`/instances/${encodeURIComponent(id)}`);
-      if (!response.ok) throw await failure(response);
-      return (await response.json()) as Instance;
+    get(id: string): Promise<Instance> {
+      return request<Instance>(`/instances/${encodeURIComponent(id)}`);
     },
 
-    async create(input: CreateInstanceInput): Promise<Instance> {
-      const response = await fetchImpl('/instances', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(createBody(input)),
-      });
-      if (!response.ok) throw await failure(response);
-      return (await response.json()) as Instance;
+    create(input: CreateInstanceInput): Promise<Instance> {
+      return request<Instance>(
+        '/instances',
+        send('POST', { name: input.name, projectId: input.projectId }),
+      );
     },
 
-    async remove(id: string): Promise<void> {
-      const response = await fetchImpl(`/instances/${encodeURIComponent(id)}`, {
-        method: 'DELETE',
-      });
-      if (!response.ok) throw await failure(response);
+    remove(id: string): Promise<void> {
+      return remove(`/instances/${encodeURIComponent(id)}`);
+    },
+
+    async listProjects(): Promise<Project[]> {
+      return (await request<{ projects: Project[] }>('/projects')).projects;
+    },
+
+    createProject(input: CreateProjectInput): Promise<Project> {
+      return request<Project>(
+        '/projects',
+        send(
+          'POST',
+          withoutBlanks({
+            name: input.name,
+            repoUrl: input.repoUrl,
+            repoBranch: input.repoBranch,
+            gitToken: input.gitToken,
+            buildingBlocks: input.buildingBlocks,
+          }),
+        ),
+      );
+    },
+
+    updateProject(id: string, input: UpdateProjectInput): Promise<Project> {
+      return request<Project>(
+        `/projects/${encodeURIComponent(id)}`,
+        // PATCH, not PUT: a field that is not sent keeps its stored value, which
+        // is how an untouched password field leaves the PAT alone.
+        send('PATCH', withoutBlanks({ ...input })),
+      );
+    },
+
+    removeProject(id: string): Promise<void> {
+      return remove(`/projects/${encodeURIComponent(id)}`);
     },
   };
 }

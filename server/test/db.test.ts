@@ -1,12 +1,21 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
+import { openDatabase } from '../src/db/index.ts';
 import { InstanceRepository } from '../src/db/instances.ts';
 import { latestSchemaVersion, migrate, schemaVersion } from '../src/db/migrations.ts';
+import { ProjectRepository, type NewProject } from '../src/db/projects.ts';
 
 function freshDb(): Database.Database {
   const db = new Database(':memory:');
   migrate(db);
   return db;
+}
+
+function columnsOf(db: Database.Database, table: string): string[] {
+  return db
+    .prepare('SELECT name FROM pragma_table_info(?)')
+    .all(table)
+    .map((row) => (row as { name: string }).name);
 }
 
 describe('migrations', () => {
@@ -22,13 +31,8 @@ describe('migrations', () => {
     expect(migrate(db)).toBe(latestSchemaVersion);
   });
 
-  it('has no status and no token column -- both live elsewhere', () => {
-    const columns = freshDb()
-      .prepare('SELECT name FROM pragma_table_info(?)')
-      .all('instances')
-      .map((row) => (row as { name: string }).name);
-
-    expect(columns).toEqual([
+  it('gives instances no status and no token column -- both live elsewhere', () => {
+    expect(columnsOf(freshDb(), 'instances')).toEqual([
       'id',
       'name',
       'image',
@@ -36,6 +40,22 @@ describe('migrations', () => {
       'repo_url',
       'repo_branch',
       'created_at',
+      // Added by migration 2, hence last: SQLite appends.
+      'project_id',
+    ]);
+  });
+
+  it('keeps the project PAT in a single column and nothing else secret', () => {
+    expect(columnsOf(freshDb(), 'projects')).toEqual([
+      'id',
+      'name',
+      'repo_url',
+      'repo_branch',
+      'block_dotnet',
+      'block_playwright',
+      'git_token',
+      'created_at',
+      'updated_at',
     ]);
   });
 });
@@ -47,6 +67,7 @@ describe('InstanceRepository', () => {
     id: 'abc123',
     name: 'demo',
     image: 'claudops-base',
+    projectId: null,
     repoUrl: 'https://github.com/dominikz98/claudops.git',
     repoBranch: 'main',
     createdAt: '2026-08-25T08:00:00.000Z',
@@ -105,5 +126,160 @@ describe('InstanceRepository', () => {
     repository.insert(newInstance);
 
     expect(() => repository.insert(newInstance)).toThrow(/UNIQUE/);
+  });
+});
+
+describe('ProjectRepository', () => {
+  let projects: ProjectRepository;
+
+  const newProject: NewProject = {
+    id: 'proj-1',
+    name: 'claudops',
+    repoUrl: 'https://github.com/dominikz98/claudops.git',
+    repoBranch: 'main',
+    buildingBlocks: { dotnet: true, playwright: false },
+    sealedGitToken: 'v1:sealed-blob',
+    createdAt: '2026-08-25T08:00:00.000Z',
+    updatedAt: '2026-08-25T08:00:00.000Z',
+  };
+
+  beforeEach(() => {
+    projects = new ProjectRepository(freshDb());
+  });
+
+  it('stores and returns a project unchanged', () => {
+    expect(projects.insert(newProject)).toEqual(newProject);
+    expect(projects.get('proj-1')).toEqual(newProject);
+  });
+
+  it('keeps a project without a branch and without a token', () => {
+    projects.insert({ ...newProject, repoBranch: null, sealedGitToken: null });
+
+    expect(projects.get('proj-1')).toMatchObject({ repoBranch: null, sealedGitToken: null });
+  });
+
+  it('returns undefined for an unknown id', () => {
+    expect(projects.get('nope')).toBeUndefined();
+  });
+
+  it('lists by name, ignoring case -- the list is a picker', () => {
+    projects.insert({ ...newProject, id: 'p2', name: 'zulu' });
+    projects.insert({ ...newProject, id: 'p1', name: 'alpha' });
+    projects.insert({ ...newProject, id: 'p3', name: 'Bravo' });
+
+    expect(projects.list().map((project) => project.name)).toEqual(['alpha', 'Bravo', 'zulu']);
+  });
+
+  it('rejects a duplicate name', () => {
+    projects.insert(newProject);
+
+    expect(() => projects.insert({ ...newProject, id: 'other' })).toThrow(/UNIQUE/);
+  });
+
+  describe('update', () => {
+    beforeEach(() => {
+      projects.insert(newProject);
+    });
+
+    it('changes only what it was given', () => {
+      const updated = projects.update('proj-1', {
+        name: 'renamed',
+        updatedAt: '2026-08-25T09:00:00.000Z',
+      });
+
+      expect(updated).toEqual({
+        ...newProject,
+        name: 'renamed',
+        updatedAt: '2026-08-25T09:00:00.000Z',
+      });
+    });
+
+    it('removes the token when handed null, and keeps it when handed nothing', () => {
+      expect(
+        projects.update('proj-1', { sealedGitToken: null, updatedAt: 'x' })?.sealedGitToken,
+      ).toBeNull();
+      expect(projects.update('proj-1', { updatedAt: 'y' })?.sealedGitToken).toBeNull();
+    });
+
+    it('replaces both building block flags together', () => {
+      const updated = projects.update('proj-1', {
+        buildingBlocks: { dotnet: false, playwright: true },
+        updatedAt: 'z',
+      });
+
+      expect(updated?.buildingBlocks).toEqual({ dotnet: false, playwright: true });
+    });
+
+    it('reports an unknown id as undefined rather than inventing a row', () => {
+      expect(projects.update('nope', { name: 'x', updatedAt: 'z' })).toBeUndefined();
+    });
+  });
+
+  it('reports whether a delete removed anything', () => {
+    projects.insert(newProject);
+
+    expect(projects.delete('proj-1')).toBe(true);
+    expect(projects.delete('proj-1')).toBe(false);
+  });
+
+  describe('instance counts', () => {
+    let instances: InstanceRepository;
+
+    const instanceOf = (id: string, projectId: string | null) => ({
+      id,
+      name: id,
+      image: 'claudops-base',
+      projectId,
+      repoUrl: null,
+      repoBranch: null,
+      createdAt: '2026-08-25T08:00:00.000Z',
+    });
+
+    beforeEach(() => {
+      const db = freshDb();
+      projects = new ProjectRepository(db);
+      instances = new InstanceRepository(db);
+      projects.insert(newProject);
+      projects.insert({ ...newProject, id: 'proj-2', name: 'other' });
+    });
+
+    it('counts the instances of one project', () => {
+      instances.insert(instanceOf('i1', 'proj-1'));
+      instances.insert(instanceOf('i2', 'proj-1'));
+      instances.insert(instanceOf('i3', 'proj-2'));
+      // A row from before projects existed must not be counted anywhere.
+      instances.insert(instanceOf('i4', null));
+
+      expect(projects.countInstances('proj-1')).toBe(2);
+      expect(projects.countInstances('proj-2')).toBe(1);
+      expect(projects.countInstances('nope')).toBe(0);
+      expect([...projects.instanceCounts()]).toEqual([
+        ['proj-1', 2],
+        ['proj-2', 1],
+      ]);
+    });
+
+    it('has no entry at all for a project nothing points at', () => {
+      expect(projects.instanceCounts().get('proj-1')).toBeUndefined();
+    });
+  });
+
+  it('lets the foreign key catch a delete the service did not check', () => {
+    // openDatabase, not freshDb: `foreign_keys = ON` is set there and nowhere
+    // else, so a test on a bare `new Database()` would see the delete succeed
+    // (knowledge/sqlite-fk-needs-the-pragma-in-tests.md).
+    const db = openDatabase(':memory:');
+    new ProjectRepository(db).insert(newProject);
+    new InstanceRepository(db).insert({
+      id: 'i1',
+      name: 'demo',
+      image: 'claudops-base',
+      projectId: 'proj-1',
+      repoUrl: null,
+      repoBranch: null,
+      createdAt: '2026-08-25T08:00:00.000Z',
+    });
+
+    expect(() => new ProjectRepository(db).delete('proj-1')).toThrow(/FOREIGN KEY/);
   });
 });

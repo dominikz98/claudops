@@ -11,4 +11,11 @@ and its session state across all instances. The token must not reach the databas
 the logs or any API response -- it lives in the server config and in the container
 environment only.
 
-**Applies to.** `docker/base/Dockerfile`, `docker/base/README.md`, issues #3, #9.
+The one secret that does reach the database is a project's git PAT, and only
+encrypted -- see
+[A project's PAT is encrypted at rest](project-pat-encrypted-at-rest.md). The
+Claude token is not among them: it is the same for every instance and comes from
+the server environment, so there is nothing to store.
+
+**Applies to.** `docker/base/Dockerfile`, `docker/base/README.md`, issues #3, #6,
+ #9.

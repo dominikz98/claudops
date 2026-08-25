@@ -30,24 +30,78 @@ docker build -t claudops-base docker/base
 | --- | --- | --- |
 | `GET` | `/` | The web UI, from `CLAUDOPS_WEB_ROOT`. See [Web UI](#web-ui). |
 | `GET` | `/health` | Readiness: `200` when the Docker daemon answers, `503` when it does not. |
-| `POST` | `/instances` | Start an instance. Body: `name` (required), `repoUrl`, `repoBranch`, `gitToken`. Answers `201` with the instance. |
+| `POST` | `/projects` | Create a project. Body: `name`, `repoUrl` (both required), `repoBranch`, `gitToken`, `buildingBlocks`. Answers `201`. |
+| `GET` | `/projects` | All projects, each with `hasGitToken` and `instanceCount`. |
+| `GET` | `/projects/:id` | One project. `404` if unknown. |
+| `PATCH` | `/projects/:id` | Change a project. Every field optional; see [Projects](#projects). |
+| `DELETE` | `/projects/:id` | Remove a project. `204`, `404` if unknown, `409` while instances point at it. |
+| `POST` | `/instances` | Start an instance from a project. Body: `name`, `projectId` (both required). Answers `201` with the instance. |
 | `GET` | `/instances` | All instances, each with the status Docker reports. |
 | `GET` | `/instances/:id` | One instance. `404` if unknown. |
 | `DELETE` | `/instances/:id` | Remove the container and the instance. `204`, or `404` if unknown. |
 | `GET` | `/instances/:id/terminal` | WebSocket: the instance console. See [Terminal](#terminal). |
 
+A project first, then an instance from it -- the answer to the first call carries
+the `id` the second one needs:
+
+```bash
+curl -s localhost:8080/projects \
+  -H 'content-type: application/json' \
+  -d '{"name":"claudops","repoUrl":"https://github.com/dominikz98/claudops.git","repoBranch":"main"}'
+```
+
 ```bash
 curl -s localhost:8080/instances \
   -H 'content-type: application/json' \
-  -d '{"name":"demo","repoUrl":"https://github.com/dominikz98/claudops.git","repoBranch":"main"}'
+  -d '{"name":"demo","projectId":"<project id>"}'
 ```
 
 Status codes worth knowing: `400` for a body that fails validation -- including
-an unknown field, which is rejected rather than dropped -- `422` when the base
-image is not built, `503` while the Docker daemon is unreachable.
+an unknown field, which is rejected rather than dropped -- `409` for a duplicate
+project name or a project still in use, `422` when the base image is not built or
+the referenced project does not exist, `503` while the Docker daemon is
+unreachable.
 
-`gitToken` is passed into the container environment and is never stored, logged
-or echoed back.
+## Projects
+
+A project is the template an instance is created from: repository, branch,
+environment building blocks and the PAT for a private repository. `POST
+/instances` takes nothing but a `name` and a `projectId` -- an old caller sending
+`repoUrl` or `gitToken` gets a `400` rather than a silently ignored field.
+
+```json
+{
+  "name": "claudops",
+  "repoUrl": "https://github.com/dominikz98/claudops.git",
+  "repoBranch": "main",
+  "gitToken": "ghp_…",
+  "buildingBlocks": { "dotnet": true, "playwright": false }
+}
+```
+
+`buildingBlocks` are stored now and built into a project image with #7; until
+then every instance starts from `CLAUDOPS_BASE_IMAGE`.
+
+The PAT is write-only. It is encrypted with `CLAUDOPS_SECRET_KEY` before it is
+stored, and no response ever carries it -- a project reports `hasGitToken`
+instead. Without a key the server still runs, but a request carrying a `gitToken`
+answers `422 secret_key_missing`; a project whose PAT no longer decrypts (a
+rotated key) fails instance creation with `422 secret_undecryptable`.
+
+`PATCH` sends only what changes. A field that is not in the body keeps its stored
+value -- which is what makes an untouched password field leave the PAT alone --
+and `null` removes it:
+
+```bash
+curl -s -X PATCH localhost:8080/projects/<id> \
+  -H 'content-type: application/json' \
+  -d '{"repoBranch":"develop","gitToken":null}'
+```
+
+An instance keeps a snapshot of the repository and branch it was started with, so
+editing a project afterwards does not rewrite what a running instance was told to
+clone. Deleting a project answers `409 project_in_use` for as long as any instance
+references it, running or exited -- the message says how many.
 
 ## Web UI
 
@@ -118,6 +172,7 @@ drives.
 | `CLAUDOPS_BASE_IMAGE` | `claudops-base` | Image instances are started from. Per-project images arrive with #7. |
 | `CLAUDOPS_WEB_ROOT` | `web/dist` next to the package | Directory the web UI is served from. Without an `index.html` in it the server runs API-only. |
 | `CLAUDOPS_TMUX_SESSION` | `main` | Session the terminal attaches to. Matches `TMUX_SESSION` in the image; only a project image with its own entrypoint needs another. |
+| `CLAUDOPS_SECRET_KEY` | – | 32 bytes, base64 or hex: encrypts the PAT a project stores. Without it a project can be created but not with a `gitToken`. |
 | `CLAUDOPS_LOG_LEVEL` | `info` | Fastify log level. |
 | `DOCKER_SOCKET` | platform default | `/var/run/docker.sock` on Linux, `//./pipe/docker_engine` on Windows. |
 | `DOCKER_HOST` | – | If set and `DOCKER_SOCKET` is not, the transport is left to dockerode. |
@@ -128,9 +183,12 @@ drives.
 
 ```
 src/config.ts             environment -> typed config, read once at startup
-src/db/                   SQLite: migrations, connection, instance repository
+src/db/                   SQLite: migrations, connection, the two repositories
 src/docker/engine.ts      the port: everything the server needs from Docker
 src/docker/dockerode-engine.ts   the real implementation
+src/secrets/cipher.ts     AES-256-GCM for the one secret that is stored
+src/projects/service.ts   projects: CRUD, the PAT, the in-use check
+src/projects/routes.ts    REST endpoints and their schemas
 src/instances/service.ts  orchestration: rows, containers, status join, attach
 src/instances/routes.ts   REST endpoints and their schemas
 src/terminal/protocol.ts  the wire format: frames, close codes
@@ -147,10 +205,14 @@ scripts/ws-probe.ts       WebSocket client for the smoke test
 
 ```bash
 pnpm test                          # vitest, no Docker needed
-./server/smoke-test.sh             # the issue #3 acceptance criteria against real Docker
+./server/smoke-test.sh             # the issue #3 and #6 acceptance criteria against real Docker
 ./server/terminal-smoke-test.sh    # the issue #4 acceptance criteria, real container and socket
-./e2e/run.sh                       # the issue #5 acceptance criteria, in a real browser
+./e2e/run.sh                       # the issue #5 and #6 acceptance criteria, in a real browser
 ```
+
+`smoke-test.sh` needs network access: one of its instances really clones the
+public claudops repository, which is how "the project's branch is what gets
+checked out" is verified.
 
 Both share `smoke-lib.sh` and clean up after themselves by label, so a failed run
 leaves no containers behind.
@@ -161,6 +223,6 @@ without it or the result describes the code you replaced.
 
 ## Not part of this yet
 
-- Projects and per-project images -> #6, #7
+- Per-project images, built from the building blocks -> #7
 - Resource limits, startup reconcile -> #8
 - Auth, egress firewall -> #9

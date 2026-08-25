@@ -21,6 +21,21 @@ Keep the value. It goes into the container as `CLAUDE_CODE_OAUTH_TOKEN`. Do not
 set `ANTHROPIC_API_KEY` next to it -- it would override the subscription and
 usage would be billed per token.
 
+## Generate the secret key
+
+A project stores the PAT for its repository, and it is encrypted before it
+reaches the database. The key for that is 32 bytes, base64 or hex:
+
+```bash
+node -e 'console.log(require("node:crypto").randomBytes(32).toString("base64"))'
+```
+
+Keep it with the rest of your server configuration; it has to be the same on
+every start, or the stored PATs can no longer be read. Losing it costs exactly
+one thing: every project needs its token entered again. Without a key the server
+still runs -- projects work, they just cannot hold a PAT, so private
+repositories do not.
+
 ## Build the image
 
 ```bash
@@ -43,38 +58,62 @@ will start:
 
 ```bash
 CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN" \
+CLAUDOPS_SECRET_KEY="$CLAUDOPS_SECRET_KEY" \
 CLAUDOPS_GIT_USER_NAME="Your Name" \
 CLAUDOPS_GIT_USER_EMAIL="you@example.com" \
 node server/dist/index.js
 ```
 
 It listens on port 8080. Open <http://localhost:8080> and the instance list is
-there; `curl localhost:8080/health` answers `200` when Docker is reachable and
+there, with **Projects** in the top right;
+`curl localhost:8080/health` answers `200` when Docker is reachable and
 `503` when it is not -- that is the first thing to check if anything below
 misbehaves. The full variable table is in
 [server/README.md](../server/README.md).
 
-## Start an instance
+## Create a project
 
-In the browser: fill in a name, optionally a repository, branch and a PAT for a
-private one, and press Create. The row appears with the status Docker reports.
+An instance is created from a project: repository, branch, environment building
+blocks and -- for a private repository -- the PAT. Open **Projects** in the top
+right, fill in name and repository, optionally a branch and a token, and press
+Create. The token is masked, stored encrypted and never shown again; the row says
+`stored` instead.
 
 The same thing over the API:
 
 ```bash
-curl -s localhost:8080/instances \
+curl -s localhost:8080/projects \
   -H 'content-type: application/json' \
   -d '{
-        "name": "my-instance",
+        "name": "claudops",
         "repoUrl": "https://github.com/dominikz98/claudops.git",
         "repoBranch": "main",
-        "gitToken": "'"$GITHUB_PAT"'"
+        "gitToken": "'"$GITHUB_PAT"'",
+        "buildingBlocks": { "dotnet": false, "playwright": false }
       }'
 ```
 
+The answer carries the project `id`. `buildingBlocks` are remembered but have no
+effect yet -- they become layers of a per-project image with #7.
+
+## Start an instance
+
+In the browser: back on the instance list, fill in a name, pick the project and
+press Create. The row appears with the status Docker reports.
+
+The same thing over the API, with the project id from above:
+
+```bash
+curl -s localhost:8080/instances \
+  -H 'content-type: application/json' \
+  -d '{"name":"my-instance","projectId":"<project id>"}'
+```
+
 The answer carries the instance `id` and the `containerId`. The container clones
-the repository into `/workspace/<repo-name>` and starts Claude Code there, inside
-a tmux session called `main`.
+the project's repository into `/workspace/<repo-name>` and starts Claude Code
+there, inside a tmux session called `main`. The instance keeps the repository and
+branch it was started with, so editing the project later does not change what a
+running instance was told to clone.
 
 ```bash
 curl -s localhost:8080/instances     # every instance with its Docker status
@@ -119,6 +158,14 @@ curl -s -X DELETE localhost:8080/instances/<id>
 The container goes with it, including its anonymous volumes -- so anything not
 pushed is gone.
 
+A project is deleted the same way, on the Projects page -- but only once no
+instance points at it any more. While one does, the request answers `409` and the
+banner says how many are in the way:
+
+```bash
+curl -s -X DELETE localhost:8080/projects/<id>
+```
+
 ## Without the server
 
 An instance can still be started by hand, which is useful when you want to try
@@ -150,14 +197,21 @@ into each container.
 | `CLAUDOPS_TMUX_SESSION` | Session the console attaches to, default `main`. |
 | `CLAUDOPS_WEB_ROOT` | Where the built UI is, default `web/dist` next to the server. |
 | `CLAUDE_CODE_OAUTH_TOKEN` | Claude Code auth, injected into every instance. |
+| `CLAUDOPS_SECRET_KEY` | 32 bytes, base64 or hex: encrypts the PAT a project stores. |
 | `CLAUDOPS_GIT_USER_NAME`, `CLAUDOPS_GIT_USER_EMAIL` | Commit identity for instances. |
 
-| Per request | Purpose |
+| On a project | Purpose |
+| --- | --- |
+| `name` | Label, unique across projects. Required. |
+| `repoUrl` | Repository every instance of this project clones. Required. |
+| `repoBranch` | Branch, default `main` in the container. |
+| `gitToken` | PAT for a private repo. Stored encrypted, never logged or returned. |
+| `buildingBlocks` | `dotnet` and `playwright` flags. Stored today, built with #7. |
+
+| On an instance | Purpose |
 | --- | --- |
 | `name` | Label for the instance. Required. |
-| `repoUrl` | Repository to clone. Without it the session starts in `/workspace`. |
-| `repoBranch` | Branch, default `main`. |
-| `gitToken` | PAT for a private repo. Never stored, logged or returned. |
+| `projectId` | The project it is created from. Required -- there is nothing else to configure. |
 
 Full tables: [server/README.md](../server/README.md) for the server,
 [docker/base/README.md](../docker/base/README.md) for what the container

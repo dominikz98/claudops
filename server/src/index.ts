@@ -13,10 +13,18 @@ async function main(): Promise<void> {
     engine,
     baseImage: config.baseImage,
     instanceEnv: config.instanceEnv,
+    cipher: config.cipher,
     webRoot: config.webRoot,
     tmuxSession: config.tmuxSession,
     logLevel: config.logLevel,
   });
+
+  // Said once at startup rather than only when somebody tries: a private
+  // repository is the common case, and finding out at project-create time that
+  // no PAT can be stored is a worse moment to learn it.
+  if (!config.cipher.available) {
+    app.log.warn('no CLAUDOPS_SECRET_KEY set -- projects can be created, but without a PAT');
+  }
 
   // Docker being down is not a reason to refuse to start: /health reports it
   // and the existing instances stay listable once it comes back.
