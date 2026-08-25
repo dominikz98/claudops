@@ -18,9 +18,15 @@ const POLL_MS = 3000;
 
 const STATUS_HINTS: Record<string, string> = {
   running: 'The container is up and the console can be attached.',
-  exited: 'The container stopped. The instance can still be deleted.',
-  missing: 'The server has a row but Docker has no container.',
+  exited: 'The container is stopped. Start brings it back with its workspace.',
+  missing: 'The server has a row but Docker has no container. Only Delete is left.',
 };
+
+/** Which way the power button points, by Docker state. `missing` is in neither
+ *  list -- there is no container to stop and none to start -- and neither is
+ *  `paused`, which needs an unpause rather than a start. */
+const RUNNING_STATES = new Set(['running', 'restarting']);
+const STARTABLE_STATES = new Set(['exited', 'created']);
 
 function describe(error: unknown): string {
   if (error instanceof ApiCallError) return `${error.code}: ${error.message}`;
@@ -136,6 +142,29 @@ export function mountList(root: HTMLElement, api: Api): View {
   const projectName = (id: string | null): string =>
     projects.find((project) => project.id === id)?.name ?? '--';
 
+  /**
+   * Stop or Start, whichever the instance's state allows -- and nothing at all
+   * for a state where neither would work. No confirmation: a stop keeps the
+   * container and everything in it, so the worst case is pressing Start again.
+   */
+  const powerButton = (instance: Instance): HTMLElement | undefined => {
+    const running = RUNNING_STATES.has(instance.status);
+    if (!running && !STARTABLE_STATES.has(instance.status)) return undefined;
+
+    const button = el(
+      'button',
+      { type: 'button', class: 'secondary', 'data-testid': running ? 'stop' : 'start' },
+      running ? 'Stop' : 'Start',
+    );
+    button.addEventListener('click', () => {
+      // The list is re-rendered on the next poll, and until then this button
+      // must not be pressed a second time.
+      button.setAttribute('disabled', 'disabled');
+      void power(instance.id, running);
+    });
+    return button;
+  };
+
   const renderRows = (): void => {
     clear(rows);
 
@@ -156,6 +185,8 @@ export function mountList(root: HTMLElement, api: Api): View {
         { class: 'open', href: routeHash({ view: 'console', id: instance.id }) },
         'Console',
       );
+
+      const power = powerButton(instance);
 
       const remove = el(
         'button',
@@ -195,7 +226,7 @@ export function mountList(root: HTMLElement, api: Api): View {
           el('td', { class: 'repo' }, instance.repoUrl ?? '--'),
           el('td', {}, instance.repoBranch ?? '--'),
           el('td', { title: instance.createdAt }, relativeTime(instance.createdAt)),
-          el('td', { class: 'actions' }, open, remove),
+          el('td', { class: 'actions' }, open, ...(power === undefined ? [] : [power]), remove),
         ),
       );
     }
@@ -213,6 +244,16 @@ export function mountList(root: HTMLElement, api: Api): View {
       // moment should not blank the page.
       showError(error);
     }
+  };
+
+  const power = async (id: string, running: boolean): Promise<void> => {
+    try {
+      await (running ? api.stop(id) : api.start(id));
+      clearError();
+    } catch (error) {
+      showError(error);
+    }
+    await refresh();
   };
 
   const deleteInstance = async (id: string): Promise<void> => {

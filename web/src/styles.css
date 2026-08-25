@@ -241,8 +241,13 @@ td.actions {
   color: var(--ok);
 }
 
-.status-missing,
+/* `exited` is an ordinary state now that Start brings it back; `missing` is
+   the one that needs a decision. */
 .status-exited {
+  color: var(--muted);
+}
+
+.status-missing {
   color: var(--danger);
 }
 

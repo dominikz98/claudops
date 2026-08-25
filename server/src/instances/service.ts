@@ -1,6 +1,7 @@
-import type { InstanceEnvConfig } from '../config.ts';
+import { DEFAULT_INSTANCE_LIMITS, type InstanceEnvConfig } from '../config.ts';
 import type { InstanceRepository } from '../db/instances.ts';
 import type {
+  ContainerLimits,
   ContainerSpec,
   DockerEngine,
   TerminalSession,
@@ -14,9 +15,9 @@ import {
   type ProjectTemplate,
 } from '../projects/service.ts';
 
-/** A container claudops knows about but Docker no longer has. #8 reconciles
- *  these away at startup; until then they stay visible instead of silently
- *  looking healthy. */
+/** A container claudops knows about but Docker no longer has. The startup
+ *  reconcile forgets the container id of such a row, so this is what the
+ *  instance keeps reporting until somebody deletes it. */
 export const MISSING_STATUS = 'missing';
 
 /** The tmux session `docker/base/entrypoint.sh` starts. Overridable because a
@@ -61,7 +62,8 @@ export class InstanceNotFoundError extends Error {
 }
 
 /** The row exists but no container is attached to it -- the `missing` status.
- *  There is nothing to attach a terminal to until #8 reconciles it away. */
+ *  Nothing to attach a terminal to, nothing to stop or start; the instance can
+ *  only be deleted. */
 export class ContainerMissingError extends Error {
   constructor(readonly id: string) {
     super(`instance '${id}' has no container`);
@@ -69,11 +71,33 @@ export class ContainerMissingError extends Error {
   }
 }
 
+/** One resource the reconcile wanted to remove and could not. Collected rather
+ *  than thrown: a volume somebody else is holding must not stop the pass from
+ *  cleaning up everything else. */
+export interface ReconcileFailure {
+  resource: string;
+  message: string;
+}
+
+/** What a startup reconcile did, for the log line that reports it. */
+export interface ReconcileReport {
+  /** Containers that carried the label but belonged to no instance. */
+  removedContainers: string[];
+  /** Volumes of instances that no longer exist. */
+  removedVolumes: string[];
+  /** Instances whose container is gone and who now say so. */
+  endedInstances: string[];
+  failures: ReconcileFailure[];
+}
+
 export interface InstanceServiceOptions {
   instanceEnv: InstanceEnvConfig;
   /** Where repository, branch, PAT and the image come from. */
   projects: ProjectService;
   tmuxSession?: string | undefined;
+  /** What every instance container is capped at. Defaults to
+   *  DEFAULT_INSTANCE_LIMITS, which is what the config falls back to as well. */
+  limits?: ContainerLimits | undefined;
   generateId?: () => string;
   now?: () => Date;
 }
@@ -82,6 +106,7 @@ export class InstanceService {
   private readonly instanceEnv: InstanceEnvConfig;
   private readonly projects: ProjectService;
   private readonly tmuxSession: string;
+  private readonly limits: ContainerLimits;
   private readonly generateId: () => string;
   private readonly now: () => Date;
 
@@ -93,6 +118,7 @@ export class InstanceService {
     this.instanceEnv = options.instanceEnv;
     this.projects = options.projects;
     this.tmuxSession = options.tmuxSession ?? DEFAULT_TMUX_SESSION;
+    this.limits = options.limits ?? DEFAULT_INSTANCE_LIMITS;
     this.generateId = options.generateId ?? shortId;
     this.now = options.now ?? (() => new Date());
   }
@@ -171,7 +197,98 @@ export class InstanceService {
     if (record.containerId !== null) {
       await this.engine.removeContainer(record.containerId);
     }
+
+    // The container took its anonymous volumes with it. This is the second
+    // half: a volume that carries the instance label without hanging off that
+    // container -- one left behind by a `docker rm` without `-v`, or by a
+    // container that was already gone -- would otherwise outlive the instance
+    // with nothing left to name it.
+    for (const volume of await this.volumesOf(id)) {
+      await this.engine.removeVolume(volume);
+    }
+
     this.repository.delete(id);
+  }
+
+  /**
+   * Stops the container without touching the instance. The workspace, the tmux
+   * session and its scrollback are in the container's filesystem and come back
+   * with `start` -- what is lost is whatever was only in memory, so Claude is
+   * started again by the entrypoint rather than resumed.
+   */
+  async stop(id: string): Promise<InstanceView> {
+    await this.engine.stopContainer(this.containerOf(id));
+    return this.get(id);
+  }
+
+  async start(id: string): Promise<InstanceView> {
+    await this.engine.startContainer(this.containerOf(id));
+    return this.get(id);
+  }
+
+  /**
+   * Brings Docker and the database back into agreement, once, at startup.
+   *
+   * Three kinds of leftover exist, all of them from something that died between
+   * two steps -- a killed server, a `docker rm` by hand, a create that failed
+   * after the container was up:
+   *
+   * - a labelled container no instance points at: removed, with its volumes
+   * - a labelled volume whose instance no longer exists: removed
+   * - an instance whose container Docker does not have: told so, by forgetting
+   *   the container id -- the row stays, because it is somebody's instance and
+   *   deleting rows behind their back is not cleanup
+   *
+   * Nothing here runs periodically. Docker is asked for the state on every
+   * request anyway, so a reconcile in between would only race with the user.
+   */
+  async reconcile(): Promise<ReconcileReport> {
+    const report: ReconcileReport = {
+      removedContainers: [],
+      removedVolumes: [],
+      endedInstances: [],
+      failures: [],
+    };
+
+    const records = this.repository.list();
+    const knownInstances = new Set(records.map((record) => record.id));
+    // Keyed by container id: a container whose label names an instance that
+    // points at a *different* container is an orphan too -- a create that was
+    // rolled back and run again leaves exactly that.
+    const claimed = new Map<string, string>();
+    for (const record of records) {
+      if (record.containerId !== null) claimed.set(record.containerId, record.id);
+    }
+
+    const live = new Set<string>();
+    for (const container of await this.engine.listManagedContainers()) {
+      const owner = claimed.get(container.containerId);
+      if (owner !== undefined && owner === container.instanceId) {
+        live.add(container.containerId);
+        continue;
+      }
+
+      await this.attempt(report, `container ${container.containerId}`, async () => {
+        await this.engine.removeContainer(container.containerId);
+        report.removedContainers.push(container.containerId);
+      });
+    }
+
+    for (const record of records) {
+      if (record.containerId === null || live.has(record.containerId)) continue;
+      if (this.repository.detachContainer(record.id)) report.endedInstances.push(record.id);
+    }
+
+    for (const volume of await this.engine.listManagedVolumes()) {
+      if (volume.instanceId !== undefined && knownInstances.has(volume.instanceId)) continue;
+
+      await this.attempt(report, `volume ${volume.name}`, async () => {
+        await this.engine.removeVolume(volume.name);
+        report.removedVolumes.push(volume.name);
+      });
+    }
+
+    return report;
   }
 
   /**
@@ -180,11 +297,7 @@ export class InstanceService {
    * what makes a reconnect find its scrollback and its running Claude again.
    */
   async openTerminal(id: string, size?: TerminalSize): Promise<TerminalSession> {
-    const record = this.repository.get(id);
-    if (record === undefined) throw new InstanceNotFoundError(id);
-    if (record.containerId === null) throw new ContainerMissingError(id);
-
-    return this.engine.attachTerminal(record.containerId, {
+    return this.engine.attachTerminal(this.containerOf(id), {
       // `attach`, not `new -A`: the session belongs to the entrypoint, and
       // creating one here would produce a console nobody is watching over.
       //
@@ -196,6 +309,41 @@ export class InstanceService {
       size,
       closeInput: TMUX_DETACH,
     });
+  }
+
+  /** The container of an instance that has to have one. Everything that talks
+   *  to a running container goes through here, so "no such instance" and "no
+   *  container" are one decision rather than four. */
+  private containerOf(id: string): string {
+    const record = this.repository.get(id);
+    if (record === undefined) throw new InstanceNotFoundError(id);
+    if (record.containerId === null) throw new ContainerMissingError(id);
+    return record.containerId;
+  }
+
+  private async volumesOf(instanceId: string): Promise<string[]> {
+    const volumes = await this.engine.listManagedVolumes();
+    return volumes
+      .filter((volume) => volume.instanceId === instanceId)
+      .map((volume) => volume.name);
+  }
+
+  /** Runs one removal and records a failure rather than aborting the pass:
+   *  a volume somebody else is holding must not keep the rest of the leftovers
+   *  on the disk. */
+  private async attempt(
+    report: ReconcileReport,
+    resource: string,
+    work: () => Promise<void>,
+  ): Promise<void> {
+    try {
+      await work();
+    } catch (error) {
+      report.failures.push({
+        resource,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   private async containerStates(): Promise<Map<string, string>> {
@@ -215,6 +363,7 @@ export class InstanceService {
       image: template.image,
       env: this.envFor(template),
       labels: instanceLabels(id),
+      limits: this.limits,
     };
   }
 

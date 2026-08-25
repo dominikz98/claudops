@@ -1,15 +1,15 @@
 # Operations
 
-Running claudops day to day. Automatic recycling and resource limits are still
-to come (#8).
+Running claudops day to day.
 
 ## The web UI
 
 <http://localhost:8080> -- the same port as the API. The instance list refreshes
 itself every three seconds with the status Docker reports; **Console** opens the
-tmux session of an instance, **Delete** asks twice and then takes the container
-with it. A project whose image is not built yet cannot be picked in the create
-form -- the option says which state it is in.
+tmux session of an instance, **Stop** and **Start** put its container down and
+up again without touching the instance, and **Delete** asks twice and then takes
+the container and its volumes with it. A project whose image is not built yet
+cannot be picked in the create form -- the option says which state it is in.
 
 **Projects** in the top right manages the templates instances are created from.
 Each row carries the state of its image, with **Rebuild** and **Build log** next
@@ -73,8 +73,8 @@ The two lists should agree. Where they do not, the status says which way:
 | Status | Meaning |
 | --- | --- |
 | `running` | Normal. |
-| `exited` | The container stopped -- tmux session ended, or somebody ran `docker stop`. The instance still exists and can be deleted. |
-| `missing` | The server has a row but Docker has no container. Either a create failed halfway, or the container was removed by hand. Deleting the instance clears the row. |
+| `exited` | The container is stopped -- somebody pressed **Stop**, the tmux session ended, or `docker stop` was run by hand. **Start** brings it back with its workspace. |
+| `missing` | The server has a row and Docker has no container. Either the container was removed by hand, or a create failed halfway. Only **Delete** is left; the next restart's reconcile is what sets this status in the first place. |
 
 A container in `docker ps` that is *not* in the instance list was started by
 hand. It carries no `claudops.instance` label, so nothing below will find it.
@@ -120,25 +120,37 @@ docker rmi claudops-project-<id>
 Check nothing points at it first: an instance created from that project is still
 running on it.
 
-## Stop and remove
+## Stop, start and remove
+
+Stopping keeps the instance and everything in its container:
 
 ```bash
-curl -s -X DELETE localhost:8080/instances/<id>     # container and row, in that order
+curl -s -X POST localhost:8080/instances/<id>/stop
+curl -s -X POST localhost:8080/instances/<id>/start
 ```
 
-This removes the container's anonymous volumes too, so uncommitted work in the
-workspace is gone.
+A stop takes about a second -- SIGTERM, and the entrypoint shuts tmux down
+cleanly. If it takes ten, SIGTERM is not being handled and Docker had to kill the
+container: that is a bug, not a slow shutdown. `docker stop claudops-<id>` by hand
+does the same thing; the list follows either way, because the status comes from
+Docker.
 
-Only the container, keeping the instance:
+A start runs the entrypoint again. The workspace, the clone and the git state are
+where they were; the tmux session and Claude are new, and the clone step finds the
+repository already there. What was only in memory is gone -- an unsaved Claude
+conversation included.
+
+Removing takes the container with it:
 
 ```bash
-docker stop claudops-<id>     # SIGTERM, the entrypoint shuts tmux down cleanly
+curl -s -X DELETE localhost:8080/instances/<id>     # container, volumes, row
 ```
 
-A stop takes about a second. If it takes ten, SIGTERM is not being handled and
-Docker had to kill the container -- that is a bug, not a slow shutdown. The
-instance then lists as `exited`; there is no restart endpoint yet, so getting it
-running again means deleting it and creating a new one.
+That includes the container's anonymous volumes and any volume carrying the
+instance's label, so uncommitted work in the workspace is gone for good.
+
+A stopped instance is the cheap state: it holds disk, but no CPU and no memory.
+Deleting is for an instance you are finished with.
 
 ## The console over the WebSocket
 
@@ -241,20 +253,50 @@ encrypted with a different key than the one the server has now -- a rotated or
 lost `CLAUDOPS_SECRET_KEY`. Nothing else breaks: enter the token again on the
 project (or remove it) and the next instance starts.
 
+**Stop or start answers 409 `container_missing`.** The instance is listed as
+`missing`: there is a row and no container, so there is nothing to stop or start.
+Delete it and create a new one.
+
+**An instance was killed and shows as `exited` with code 137.** That is the OOM
+killer: the container went over its memory limit.
+`docker inspect -f '{{.State.OOMKilled}}' claudops-<id>` confirms it. Either the
+work needs more than the limit -- raise `CLAUDOPS_INSTANCE_MEMORY` and create the
+instance again -- or something in it is running away.
+
 **`DELETE /projects/<id>` answers 409.** Instances still point at that project,
 running or exited. The message says how many; delete those first. A project is
 never deleted out from under an instance.
 
 ## Resource limits
 
-Not enforced yet. Until #8 lands, the server starts containers without limits, so
-an instance can use as much CPU and memory as the NUC has -- create them one at a
-time when you are trying things out. A hand-started container can be capped in
-the meantime:
+Every instance is created with a ceiling: two CPUs and four gigabytes of memory
+by default, with swap capped at the memory limit so a container that runs away is
+killed instead of paging the whole NUC to a standstill.
 
 ```bash
-docker run -d --cpus 2 --memory 4g ... claudops-base
+docker inspect -f '{{.HostConfig.NanoCpus}} {{.HostConfig.Memory}}' claudops-<id>
+docker stats                        # what they are actually using, live
 ```
+
+`2000000000` NanoCpus is two cores; `4294967296` is four gigabytes. Both come
+from the server's environment and apply to containers created after a restart:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `CLAUDOPS_INSTANCE_CPUS` | `2` | As `docker run --cpus`: a ceiling on CPU time, not a pinning to particular cores. |
+| `CLAUDOPS_INSTANCE_MEMORY` | `4g` | `512m`, `1.5g` or a plain byte count. Below `6m` the server refuses to start. |
+
+An existing container keeps the limits it was created with -- Docker can change
+them in place, claudops does not:
+
+```bash
+docker update --cpus 4 --memory 8g claudops-<id>    # until that container is gone
+```
+
+Three instances at four gigabytes each on a 16 GB NUC is the sizing this default
+assumes: they are not all busy at once, and the server itself needs room. Lower
+the numbers before adding a fourth, and stop the instances nobody is using -- a
+stopped container costs nothing but disk.
 
 ## The database
 
@@ -283,22 +325,44 @@ docker ps -a --filter label=claudops.instance
 
 ## Cleaning up leftovers
 
-The normal path is `DELETE /instances/<id>`. Until the startup reconcile exists
-(#8), two cases still need hands:
+The normal path is `DELETE /instances/<id>`. Everything else is cleaned up by the
+reconcile that runs once every time the server starts:
 
-- an instance listed as `missing` -- delete it, which clears the row
-- a container with the label but no instance, from a create that died between
-  the two steps
+| What it finds | What it does |
+| --- | --- |
+| A container carrying `claudops.instance` that no instance points at | Removes it, with its volumes |
+| A volume whose instance does not exist any more | Removes it |
+| An instance whose container Docker does not have | Keeps the row, forgets the container, sets the status to `missing` |
+
+So the answer to "the server was killed and there are containers nobody wants" is
+to restart the server and look again. What it did is one log line:
+
+```
+INFO: startup reconcile  removedContainers=[...] removedVolumes=[...] endedInstances=[...]
+```
+
+A leftover it could not remove -- a volume another container still has mounted --
+is a warning next to it and is tried again on the next restart. If Docker is
+unreachable at startup the pass is skipped entirely and says so; nothing else
+about the server depends on it.
+
+The row of a `missing` instance is deliberately kept: it is somebody's instance,
+and only its container is gone. Delete it when you are sure, which is also what
+clears any volume it still owns.
+
+By hand, the label is what to look for -- and the check to run before removing
+anything, because a running instance means somebody has a Claude session in it:
 
 ```bash
 docker ps -a --filter label=claudops.instance
 docker volume ls --filter label=claudops.instance
+docker images --filter label=claudops.project
 ```
 
-Check the list before removing anything -- a running instance means somebody has a
-Claude session open in it.
+Project images are the one thing the reconcile does not touch: deleting a project
+removes its image, and an image left behind after a failed delete is `docker rmi`
+material -- check that no instance still runs on it first.
 
 ## Not there yet
 
-Egress firewall and UI login (#9), automatic recycling and limits (#8). Restarting
-an instance is not an endpoint either; delete and create.
+Egress firewall and UI login (#9).

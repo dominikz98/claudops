@@ -119,6 +119,29 @@ export function imagesFor(projectId: string): string[] {
     .filter((line) => line !== '');
 }
 
+/** Volumes claudops owns for one instance, by label -- what has to be empty
+ *  after a delete. */
+export function volumesFor(instanceId: string): string[] {
+  return docker('volume', 'ls', '--filter', `label=claudops.instance=${instanceId}`, '-q')
+    .split('\n')
+    .filter((line) => line !== '');
+}
+
+/** The resource limits a container was created with. `docker inspect` is where
+ *  issue #8 says they have to be visible, so this is read the same way an
+ *  operator would read it. */
+export function hostConfigOf(containerId: string): {
+  NanoCpus: number;
+  Memory: number;
+  MemorySwap: number;
+} {
+  return JSON.parse(docker('inspect', '-f', '{{json .HostConfig}}', containerId)) as {
+    NanoCpus: number;
+    Memory: number;
+    MemorySwap: number;
+  };
+}
+
 /** Every environment variable of a container, as `KEY=value` lines. What the
  *  server handed the container is only visible from out here. */
 export function containerEnv(containerId: string): string[] {

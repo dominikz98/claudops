@@ -112,6 +112,29 @@ describe('InstanceRepository', () => {
     expect(repository.get('abc123')?.containerId).toBe('container-1');
   });
 
+  it('forgets a container that is gone, and says whether it had one', () => {
+    repository.insert(newInstance);
+    repository.attachContainer('abc123', 'container-1');
+
+    expect(repository.detachContainer('abc123')).toBe(true);
+    expect(repository.get('abc123')?.containerId).toBeNull();
+    // The row survives -- it is somebody's instance, and only the container
+    // behind it is gone.
+    expect(repository.detachContainer('abc123')).toBe(false);
+    expect(repository.get('abc123')).toBeDefined();
+  });
+
+  it('frees the container id for reuse once it is detached', () => {
+    repository.insert(newInstance);
+    repository.insert({ ...newInstance, id: 'def456' });
+    repository.attachContainer('abc123', 'container-1');
+    repository.detachContainer('abc123');
+
+    // Docker reuses ids after a prune, and the unique index would otherwise
+    // keep the next instance from ever taking that one.
+    expect(() => repository.attachContainer('def456', 'container-1')).not.toThrow();
+  });
+
   it('keeps a repo-less instance', () => {
     repository.insert({ ...newInstance, repoUrl: null, repoBranch: null });
 

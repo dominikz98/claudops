@@ -11,8 +11,9 @@ import {
   type ImageBuildSpec,
   type TerminalSession,
   type TerminalSize,
+  type VolumeSummary,
 } from '../src/docker/engine.ts';
-import { instanceIdFromLabels } from '../src/docker/labels.ts';
+import { instanceIdFromLabels, instanceLabels } from '../src/docker/labels.ts';
 
 /**
  * The container side of a fake TTY: what the bridge writes shows up in
@@ -86,12 +87,21 @@ interface FakeContainer {
   state: string;
 }
 
+interface FakeVolume {
+  name: string;
+  labels: Record<string, string>;
+}
+
 /**
  * In-memory stand-in for the Docker Engine. Same contract as DockerodeEngine,
  * which is why the service and route tests need no daemon.
  */
 export class FakeDockerEngine implements DockerEngine {
   readonly containers = new Map<string, FakeContainer>();
+  /** Nothing creates one today -- `runContainer` mounts no volume, exactly like
+   *  the real engine. A test puts one here to play the leftover a hand-run
+   *  container or a `docker rm` without `-v` leaves behind. */
+  readonly volumes = new Map<string, FakeVolume>();
   readonly knownImages = new Set<string>(['claudops-base']);
 
   /** Set to make every call behave as if the daemon were down. */
@@ -102,6 +112,9 @@ export class FakeDockerEngine implements DockerEngine {
   failNextAttach: Error | undefined;
   /** Set to make the next buildImage fail with exactly this error. */
   failNextBuild: Error | undefined;
+  /** Volumes whose removal refuses -- what a volume another container still has
+   *  mounted looks like. */
+  readonly failVolumeRemoval = new Set<string>();
   /** Every build that was asked for, in order -- the tags, args and labels a
    *  test asserts on. */
   readonly builds: ImageBuildSpec[] = [];
@@ -144,6 +157,41 @@ export class FakeDockerEngine implements DockerEngine {
     this.guard();
     // Missing is not an error -- delete stays idempotent.
     this.containers.delete(containerId);
+    return Promise.resolve();
+  }
+
+  async stopContainer(containerId: string): Promise<void> {
+    this.guard();
+    const container = this.containers.get(containerId);
+    if (container === undefined) throw new ContainerNotFoundError(containerId);
+    // Already stopped is not an error, exactly like Docker's 304.
+    container.state = 'exited';
+    return Promise.resolve();
+  }
+
+  async startContainer(containerId: string): Promise<void> {
+    this.guard();
+    const container = this.containers.get(containerId);
+    if (container === undefined) throw new ContainerNotFoundError(containerId);
+    container.state = 'running';
+    return Promise.resolve();
+  }
+
+  async listManagedVolumes(): Promise<VolumeSummary[]> {
+    this.guard();
+    return Promise.resolve(
+      [...this.volumes.values()]
+        .filter((volume) => instanceIdFromLabels(volume.labels) !== undefined)
+        .map((volume) => ({ name: volume.name, instanceId: instanceIdFromLabels(volume.labels) })),
+    );
+  }
+
+  async removeVolume(name: string): Promise<void> {
+    this.guard();
+    if (this.failVolumeRemoval.has(name)) {
+      throw new Error(`volume is in use - ${name}`);
+    }
+    this.volumes.delete(name);
     return Promise.resolve();
   }
 
@@ -244,8 +292,35 @@ export class FakeDockerEngine implements DockerEngine {
         image: 'someone-else',
         env: {},
         labels: {},
+        limits: { cpus: 1, memoryBytes: 1024 * 1024 * 1024 },
       },
       state: 'running',
+    });
+  }
+
+  /** A container carrying the claudops label that no instance points at -- what
+   *  a create that died between the two steps, or a server that was killed,
+   *  leaves on the host. */
+  addOrphanContainer(containerId: string, instanceId: string): void {
+    this.containers.set(containerId, {
+      containerId,
+      spec: {
+        instanceId,
+        name: `claudops-${instanceId}`,
+        image: 'claudops-project-gone',
+        env: {},
+        labels: instanceLabels(instanceId),
+        limits: { cpus: 1, memoryBytes: 1024 * 1024 * 1024 },
+      },
+      state: 'running',
+    });
+  }
+
+  /** A labelled volume, with or without an instance behind it. */
+  addVolume(name: string, instanceId?: string): void {
+    this.volumes.set(name, {
+      name,
+      labels: instanceId === undefined ? {} : instanceLabels(instanceId),
     });
   }
 

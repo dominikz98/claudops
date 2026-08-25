@@ -40,3 +40,7 @@ Format and maintenance rules: skill `domain-knowledge`.
 - [A project's PAT is encrypted at rest, an instance's is not stored at all](project-pat-encrypted-at-rest.md) - why the one secret in the database is allowed there
 - [Foreign keys are off unless openDatabase opened the file](sqlite-fk-needs-the-pragma-in-tests.md) - the delete a test sees succeed and production refuses
 - [In WAL mode a fresh row is in the -wal file, not in the .db](wal-keeps-fresh-rows-out-of-the-db-file.md) - the grep that could not fail
+- [`docker rm -v` is only half of a delete](delete-must-sweep-volumes-by-label.md) - why the label sweep exists although nothing creates a volume
+- [A memory limit without a swap limit is a memory limit of twice that](memory-limit-needs-a-swap-limit.md) - the instance that pages the NUC instead of dying
+- [better-sqlite3 13 segfaults on Node below 22.14](better-sqlite3-needs-node-22-14.md) - a test gate that is red for no reason of yours
+- [A free port on Windows can still be a forbidden one](windows-reserves-tcp-port-ranges.md) - EACCES on a port nothing is listening on

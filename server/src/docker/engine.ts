@@ -8,12 +8,24 @@ import type { Duplex } from 'node:stream';
  * the same contract. `dockerode-engine.ts` is the real one.
  */
 
+/**
+ * What one instance may use of the host. The NUC runs several of them next to
+ * the server itself, so an unbounded container is one runaway build away from
+ * taking the box down with it.
+ */
+export interface ContainerLimits {
+  /** Fractional CPUs, exactly as `docker run --cpus` takes them. */
+  cpus: number;
+  memoryBytes: number;
+}
+
 export interface ContainerSpec {
   instanceId: string;
   name: string;
   image: string;
   env: Record<string, string>;
   labels: Record<string, string>;
+  limits: ContainerLimits;
 }
 
 /** A container as the Docker API reports it. */
@@ -23,6 +35,14 @@ export interface ContainerSummary {
   /** Raw Docker state: created, running, exited, paused, restarting, dead. */
   state: string;
   status: string;
+}
+
+/** A volume as the Docker API reports it. `instanceId` is `undefined` for one
+ *  that carries the label without a value -- a volume somebody labelled by
+ *  hand. */
+export interface VolumeSummary {
+  name: string;
+  instanceId: string | undefined;
 }
 
 /** Terminal geometry as the client reports it, in character cells. */
@@ -135,8 +155,19 @@ export interface DockerEngine {
   /** Removes the container including its anonymous volumes. Missing is not an
    *  error -- delete has to stay idempotent. */
   removeContainer(containerId: string): Promise<void>;
+  /** Stops the container. Already stopped is not an error. Throws
+   *  ContainerNotFoundError for one Docker no longer has. */
+  stopContainer(containerId: string): Promise<void>;
+  /** Starts a stopped container again. Already running is not an error. */
+  startContainer(containerId: string): Promise<void>;
   /** Every container carrying the instance label, running or not. */
   listManagedContainers(): Promise<ContainerSummary[]>;
+  /** Every volume carrying the instance label. What the startup reconcile
+   *  needs to tell a leftover workspace from a foreign volume. */
+  listManagedVolumes(): Promise<VolumeSummary[]>;
+  /** Removes a volume by name. Missing is not an error, for the same reason
+   *  removeContainer's is not. */
+  removeVolume(name: string): Promise<void>;
   /** Attaches a TTY exec to a running container. Throws
    *  ContainerNotFoundError or ContainerNotRunningError. */
   attachTerminal(containerId: string, options: AttachTerminalOptions): Promise<TerminalSession>;

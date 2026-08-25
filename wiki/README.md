@@ -17,8 +17,10 @@ in [server/README.md](../server/README.md).
 ## Current state
 
 A project holds a repository, a branch, its credential and an environment that the
-server prebuilds as its own image; an instance is created from it, driven and
-deleted from a browser page, and its console survives a refresh. Everything else
+server prebuilds as its own image; an instance is created from it, driven, stopped
+and deleted from a browser page, its console survives a refresh, it runs under a
+CPU and memory ceiling, and what a restart or a hand on the NUC leaves behind is
+cleaned up at the next server start. Everything else
 is planned and marked with its issue number on the pages below. The component status table lives in the
 [root README](../README.md#state) -- kept in one place so the two cannot drift
 apart.

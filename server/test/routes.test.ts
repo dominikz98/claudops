@@ -195,6 +195,50 @@ describe('instance REST API', () => {
     });
   });
 
+  describe('POST /instances/:id/stop and /start', () => {
+    const post = (id: string, action: string) =>
+      app.inject({ method: 'POST', url: `/instances/${id}/${action}` });
+
+    it('stops an instance and answers with its new status', async () => {
+      const { id, containerId } = (await create({ name: 'demo', projectId })).json<{
+        id: string;
+        containerId: string;
+      }>();
+
+      const response = await post(id, 'stop');
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json<{ status: string }>()).toMatchObject({ id, status: 'exited' });
+      // Stopped, not removed -- that is the whole point of the endpoint.
+      expect(engine.containers.has(containerId)).toBe(true);
+    });
+
+    it('starts it again', async () => {
+      const { id } = (await create({ name: 'demo', projectId })).json<{ id: string }>();
+      await post(id, 'stop');
+
+      expect((await post(id, 'start')).json<{ status: string }>().status).toBe('running');
+    });
+
+    it('answers 404 for an unknown instance', async () => {
+      expect((await post('nope', 'stop')).statusCode).toBe(404);
+      expect((await post('nope', 'start')).statusCode).toBe(404);
+    });
+
+    it('answers 409 for an instance whose container is gone', async () => {
+      const { id, containerId } = (await create({ name: 'demo', projectId })).json<{
+        id: string;
+        containerId: string;
+      }>();
+      engine.forget(containerId);
+
+      const response = await post(id, 'start');
+
+      expect(response.statusCode).toBe(409);
+      expect(response.json<{ error: string }>().error).toBe('container_missing');
+    });
+  });
+
   describe('GET /health', () => {
     it('is ok while Docker answers', async () => {
       const response = await app.inject({ method: 'GET', url: '/health' });
@@ -218,5 +262,115 @@ describe('instance REST API', () => {
 
   it('answers 404 for an unknown route', async () => {
     expect((await app.inject({ method: 'GET', url: '/nope' })).statusCode).toBe(404);
+  });
+});
+
+/**
+ * The startup reconcile, from the outside: the same database and the same
+ * Docker host, a second server on top of them. That is what a restart of the
+ * NUC's server is, and the leftovers below are what a killed one leaves.
+ */
+describe('a restart reconciles Docker against the database', () => {
+  let db: Database.Database;
+  let engine: FakeDockerEngine;
+  let app: FastifyInstance;
+
+  const boot = async (): Promise<FastifyInstance> => {
+    const next = buildApp({
+      db,
+      engine,
+      baseImage: 'claudops-base',
+      instanceEnv: {
+        claudeOauthToken: undefined,
+        gitUserName: undefined,
+        gitUserEmail: undefined,
+      },
+      cipher: testCipher(),
+      logLevel: 'silent',
+    });
+    await next.ready();
+    return next;
+  };
+
+  beforeEach(async () => {
+    db = new Database(':memory:');
+    migrate(db);
+    engine = new FakeDockerEngine();
+    app = await boot();
+  });
+
+  afterEach(async () => {
+    await app.close();
+  });
+
+  /** The reconcile is not awaited by `ready` -- the server must not wait for
+   *  Docker to start listening -- so the assertions poll for its result. */
+  const settled = async (done: () => boolean): Promise<void> => {
+    for (let attempt = 0; attempt < 100; attempt++) {
+      if (done()) return;
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+    throw new Error('the startup reconcile never got there');
+  };
+
+  it('ends in a consistent state after containers were removed and orphaned by hand', async () => {
+    const projectId = await createTestProject(app);
+    const { id, containerId } = (
+      await app.inject({ method: 'POST', url: '/instances', payload: { name: 'demo', projectId } })
+    ).json<{ id: string; containerId: string }>();
+
+    // Two kinds of damage at once: the instance's container removed with
+    // `docker rm`, and a labelled container left behind by a create that died
+    // before its row was updated.
+    engine.forget(containerId);
+    engine.addOrphanContainer('container-orphan', 'id-never-recorded');
+    engine.addVolume('claudops-id-never-recorded-workspace', 'id-never-recorded');
+    engine.addVolume('someone-elses-data');
+
+    await app.close();
+    app = await boot();
+
+    await settled(() => !engine.containers.has('container-orphan'));
+    await settled(() => engine.volumes.size === 1);
+
+    // The instance is still listed, and says what is true about it.
+    const listed = (
+      await app.inject({ method: 'GET', url: '/instances' })
+    ).json<{ instances: { id: string; status: string; containerId: string | null }[] }>().instances;
+    expect(listed).toHaveLength(1);
+    expect(listed[0]).toMatchObject({ id, status: 'missing', containerId: null });
+    // A volume that is nobody's business stays.
+    expect([...engine.volumes.keys()]).toEqual(['someone-elses-data']);
+  });
+
+  it('leaves a healthy instance running across the restart', async () => {
+    const projectId = await createTestProject(app);
+    const { id, containerId } = (
+      await app.inject({ method: 'POST', url: '/instances', payload: { name: 'demo', projectId } })
+    ).json<{ id: string; containerId: string }>();
+
+    await app.close();
+    app = await boot();
+    // Nothing to clean up, so nothing observable happens -- give the pass a
+    // chance to run and then check it did not touch anything.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(engine.containers.has(containerId)).toBe(true);
+    expect(
+      (await app.inject({ method: 'GET', url: `/instances/${id}` })).json<{ status: string }>()
+        .status,
+    ).toBe('running');
+  });
+
+  it('starts anyway when Docker is unreachable', async () => {
+    engine.unavailable = true;
+
+    await app.close();
+    app = await boot();
+
+    // The reconcile is best effort; the server has to be usable without it.
+    expect((await app.inject({ method: 'GET', url: '/health' })).statusCode).toBe(503);
+    engine.unavailable = false;
+    expect((await app.inject({ method: 'GET', url: '/instances' })).statusCode).toBe(200);
   });
 });

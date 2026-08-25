@@ -107,6 +107,10 @@ export interface Api {
   get(id: string): Promise<Instance>;
   create(input: CreateInstanceInput): Promise<Instance>;
   remove(id: string): Promise<void>;
+  /** Stops the container and keeps the instance. Answers with the status
+   *  Docker reports afterwards. */
+  stop(id: string): Promise<Instance>;
+  start(id: string): Promise<Instance>;
   listProjects(): Promise<Project[]>;
   createProject(input: CreateProjectInput): Promise<Project>;
   updateProject(id: string, input: UpdateProjectInput): Promise<Project>;
@@ -183,6 +187,14 @@ export function createApi(fetchImpl: typeof fetch = globalThis.fetch.bind(global
 
     remove(id: string): Promise<void> {
       return remove(`/instances/${encodeURIComponent(id)}`);
+    },
+
+    stop(id: string): Promise<Instance> {
+      return request<Instance>(`/instances/${encodeURIComponent(id)}/stop`, { method: 'POST' });
+    },
+
+    start(id: string): Promise<Instance> {
+      return request<Instance>(`/instances/${encodeURIComponent(id)}/start`, { method: 'POST' });
     },
 
     async listProjects(): Promise<Project[]> {

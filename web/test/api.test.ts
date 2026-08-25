@@ -105,6 +105,37 @@ describe('api client', () => {
     expect(calls[0]?.init?.method).toBe('DELETE');
   });
 
+  describe('stop and start', () => {
+    it('posts to the instance and answers with its new state', async () => {
+      const { fetch, calls } = fakeFetch(() => json({ ...instance, status: 'exited' }));
+
+      expect((await createApi(fetch).stop('abc123')).status).toBe('exited');
+      expect(calls[0]?.url).toBe('/instances/abc123/stop');
+      expect(calls[0]?.init?.method).toBe('POST');
+      // No body: what should happen is in the path.
+      expect(calls[0]?.init?.body).toBeUndefined();
+    });
+
+    it('starts by the same route, with the id escaped', async () => {
+      const { fetch, calls } = fakeFetch(() => json(instance));
+
+      await createApi(fetch).start('a/b');
+
+      expect(calls[0]?.url).toBe('/instances/a%2Fb/start');
+    });
+
+    it('turns a refused stop into an ApiCallError', async () => {
+      const { fetch } = fakeFetch(() =>
+        json({ error: 'container_missing', message: "instance 'abc123' has no container" }, 409),
+      );
+
+      await expect(createApi(fetch).stop('abc123')).rejects.toMatchObject({
+        status: 409,
+        code: 'container_missing',
+      });
+    });
+  });
+
   describe('projects', () => {
     it('unwraps the projects envelope', async () => {
       const { fetch, calls } = fakeFetch(() => json({ projects: [project] }));

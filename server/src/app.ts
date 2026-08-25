@@ -7,12 +7,14 @@ import type { InstanceEnvConfig } from './config.ts';
 import type { Database } from './db/index.ts';
 import { InstanceRepository } from './db/instances.ts';
 import {
+  ContainerNotFoundError,
   DockerUnavailableError,
   ImageNotFoundError,
+  type ContainerLimits,
   type DockerEngine,
 } from './docker/engine.ts';
 import { instanceRoutes } from './instances/routes.ts';
-import { InstanceService } from './instances/service.ts';
+import { ContainerMissingError, InstanceService } from './instances/service.ts';
 import { ProjectRepository } from './db/projects.ts';
 import {
   defaultProjectContext,
@@ -77,6 +79,9 @@ export interface AppOptions {
    *  test. */
   images?: ProjectImages | undefined;
   instanceEnv: InstanceEnvConfig;
+  /** CPU and memory ceiling per instance. Left out, the service falls back to
+   *  the same defaults the config does. */
+  instanceLimits?: ContainerLimits | undefined;
   /** Encrypts the project PATs. Left out, the server runs but refuses to store
    *  one -- the same behaviour as a missing CLAUDOPS_SECRET_KEY. */
   cipher?: SecretCipher | undefined;
@@ -122,18 +127,39 @@ export function buildApp(options: AppOptions): FastifyInstance {
       logger: app.log,
     });
 
-  // What a restart interrupted, and what an upgrade left behind: a project from
-  // before project images has no image yet. In `onReady` rather than here, so
-  // nothing is queued for an app that never starts listening.
-  app.addHook('onReady', (done) => {
-    images.resumePending();
-    done();
-  });
-
   const service = new InstanceService(new InstanceRepository(options.db), options.engine, {
     instanceEnv: options.instanceEnv,
     projects,
     tmuxSession: options.tmuxSession,
+    limits: options.instanceLimits,
+  });
+
+  // What a restart interrupted, and what an upgrade left behind: a project from
+  // before project images has no image yet, and Docker may be holding
+  // containers and volumes of instances that no longer exist. In `onReady`
+  // rather than here, so nothing runs for an app that never starts listening.
+  app.addHook('onReady', (done) => {
+    images.resumePending();
+
+    // Not awaited, and its failure is not fatal: the server deliberately starts
+    // while Docker is down, and a leftover is a leftover for one more restart.
+    void service.reconcile().then(
+      (report) => {
+        const cleaned =
+          report.removedContainers.length + report.removedVolumes.length + report.endedInstances.length;
+        if (cleaned > 0 || report.failures.length > 0) {
+          app.log.info(report, 'startup reconcile');
+        }
+        for (const failure of report.failures) {
+          app.log.warn(failure, 'startup reconcile could not remove a leftover');
+        }
+      },
+      (error: unknown) => {
+        app.log.warn({ err: error }, 'startup reconcile skipped');
+      },
+    );
+
+    done();
   });
 
   app.setErrorHandler((error: unknown, request, reply) => {
@@ -143,6 +169,12 @@ export function buildApp(options: AppOptions): FastifyInstance {
     }
     if (error instanceof ImageNotFoundError) {
       return reply.code(422).send({ error: 'image_not_found', message: error.message });
+    }
+    // Nothing to stop or start: the row is there, the container is not. 409
+    // rather than 404 -- the instance exists, its state is what is in the way,
+    // and a restart's reconcile is what clears it.
+    if (error instanceof ContainerMissingError || error instanceof ContainerNotFoundError) {
+      return reply.code(409).send({ error: 'container_missing', message: error.message });
     }
     // Only reachable from POST /instances: the project routes answer 404 for an
     // id in their own path. An unknown reference in a body is a 422, the same

@@ -40,7 +40,9 @@ docker build -t claudops-base docker/base
 | `POST` | `/instances` | Start an instance from a project. Body: `name`, `projectId` (both required). Answers `201` with the instance. |
 | `GET` | `/instances` | All instances, each with the status Docker reports. |
 | `GET` | `/instances/:id` | One instance. `404` if unknown. |
-| `DELETE` | `/instances/:id` | Remove the container and the instance. `204`, or `404` if unknown. |
+| `POST` | `/instances/:id/stop` | Stop the container, keep the instance. Answers `200` with its new status. |
+| `POST` | `/instances/:id/start` | Start it again. `200`, `409` when the instance has no container. |
+| `DELETE` | `/instances/:id` | Remove the container, its volumes and the instance. `204`, or `404` if unknown. |
 | `GET` | `/instances/:id/terminal` | WebSocket: the instance console. See [Terminal](#terminal). |
 
 A project first, then an instance from it -- the answer to the first call carries
@@ -60,9 +62,9 @@ curl -s localhost:8080/instances \
 
 Status codes worth knowing: `400` for a body that fails validation -- including
 an unknown field, which is rejected rather than dropped -- `409` for a duplicate
-project name or a project still in use, `422` when the referenced project does
-not exist or its image is not ready, `503` while the Docker daemon is
-unreachable.
+project name, a project still in use, or an instance whose container is gone,
+`422` when the referenced project does not exist or its image is not ready,
+`503` while the Docker daemon is unreachable.
 
 ## Projects
 
@@ -156,6 +158,50 @@ On startup the server picks up what a restart interrupted: a project still marke
 back into the queue, together with everything still `pending`. That is also what
 builds the images of projects created before this existed.
 
+## Instance lifecycle
+
+An instance is a container, and the server treats it as disposable -- but not as
+unbounded and not as something that may be left lying around.
+
+**Limits.** Every container is created with a CPU and a memory ceiling,
+`CLAUDOPS_INSTANCE_CPUS` and `CLAUDOPS_INSTANCE_MEMORY`, by default two cores and
+four gigabytes. Swap is capped at the memory limit, so an instance that runs away
+is killed rather than paging the whole NUC to a standstill. Both are visible from
+outside:
+
+```bash
+docker inspect -f '{{.HostConfig.NanoCpus}} {{.HostConfig.Memory}}' claudops-<id>
+docker stats claudops-<id>
+```
+
+**Stop and start.** `POST /instances/:id/stop` stops the container and keeps
+everything in it -- the workspace, the clone, the git state. `POST
+/instances/:id/start` brings it back; the entrypoint runs again, so the tmux
+session and Claude are new, while the filesystem is where it was. What is lost is
+what was only in memory.
+
+**Delete.** `DELETE /instances/:id` removes the container with its anonymous
+volumes, then any volume still carrying `claudops.instance=<id>`, then the row.
+Nothing of that instance is left on the host.
+
+**The startup reconcile.** Docker and the database can only disagree because
+something died between two steps. Once, at startup, the server puts them back
+together:
+
+| Leftover | What happens |
+| --- | --- |
+| A container with a `claudops.instance` label that no instance points at | Removed, with its volumes |
+| A volume whose instance does not exist any more | Removed |
+| An instance whose container Docker does not have | Keeps its row, forgets the container id, reports `missing` |
+
+The row is deliberately kept: it is somebody's instance, and deleting rows behind
+their back is not cleanup. What the pass did is one log line; a removal it could
+not do is a warning next to it, and the next restart tries again. A daemon that is
+down at startup skips the whole thing -- the server runs without it.
+
+There is no periodic sweep. Docker is asked for the state on every request
+anyway, so a reconcile in between would only race with whoever is using the UI.
+
 ## Web UI
 
 The built SPA from [`web/`](../web/README.md) is served at `/`, so browser and
@@ -227,6 +273,8 @@ drives.
 | `CLAUDOPS_DOTNET_CHANNEL` | `10.0` | Channel `dotnet-install.sh` gets for the dotnet block: a version, `LTS` or `STA`. |
 | `CLAUDOPS_WEB_ROOT` | `web/dist` next to the package | Directory the web UI is served from. Without an `index.html` in it the server runs API-only. |
 | `CLAUDOPS_TMUX_SESSION` | `main` | Session the terminal attaches to. Matches `TMUX_SESSION` in the image; only a project image with its own entrypoint needs another. |
+| `CLAUDOPS_INSTANCE_CPUS` | `2` | CPU ceiling per instance, as `docker run --cpus` takes it. |
+| `CLAUDOPS_INSTANCE_MEMORY` | `4g` | Memory ceiling per instance: a byte count or a `b`/`k`/`m`/`g` suffix, at least `6m`. Swap is capped at the same value. |
 | `CLAUDOPS_SECRET_KEY` | – | 32 bytes, base64 or hex: encrypts the PAT a project stores. Without it a project can be created but not with a `gitToken`. |
 | `CLAUDOPS_LOG_LEVEL` | `info` | Fastify log level. |
 | `DOCKER_SOCKET` | platform default | `/var/run/docker.sock` on Linux, `//./pipe/docker_engine` on Windows. |
@@ -261,9 +309,9 @@ scripts/ws-probe.ts       WebSocket client for the smoke test
 
 ```bash
 pnpm test                          # vitest, no Docker needed
-./server/smoke-test.sh             # the issue #3, #6 and #7 acceptance criteria against real Docker
+./server/smoke-test.sh             # the issue #3, #6, #7 and #8 acceptance criteria against real Docker
 ./server/terminal-smoke-test.sh    # the issue #4 acceptance criteria, real container and socket
-./e2e/run.sh                       # the issue #5, #6 and #7 acceptance criteria, in a real browser
+./e2e/run.sh                       # the issue #5, #6, #7 and #8 acceptance criteria, in a real browser
 ./docker/project/smoke-test.sh     # the toolchains, really inside a project image
 ```
 
@@ -285,5 +333,4 @@ without it or the result describes the code you replaced.
 
 ## Not part of this yet
 
-- Resource limits, startup reconcile -> #8
 - Auth, egress firewall -> #9

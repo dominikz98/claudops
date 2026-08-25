@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { ConfigError, defaultDockerSocket, defaultWebRoot, loadConfig } from '../src/config.ts';
+import {
+  ConfigError,
+  DEFAULT_INSTANCE_LIMITS,
+  defaultDockerSocket,
+  defaultWebRoot,
+  loadConfig,
+  parseMemory,
+} from '../src/config.ts';
 
 describe('loadConfig', () => {
   it('falls back to defaults on an empty environment', () => {
@@ -77,6 +84,40 @@ describe('loadConfig', () => {
       gitUserEmail: 'claudops@example.invalid',
     });
     expect(JSON.stringify(config)).not.toContain('must-be-ignored');
+  });
+
+  describe('instance limits', () => {
+    it('caps an instance at two cores and four gigabytes by default', () => {
+      expect(loadConfig({}).instanceLimits).toEqual({
+        cpus: 2,
+        memoryBytes: 4 * 1024 * 1024 * 1024,
+      });
+      expect(loadConfig({}).instanceLimits).toEqual(DEFAULT_INSTANCE_LIMITS);
+    });
+
+    it('takes the memory the way docker run takes it', () => {
+      expect(parseMemory('512m')).toBe(512 * 1024 * 1024);
+      expect(parseMemory('2G')).toBe(2 * 1024 * 1024 * 1024);
+      expect(parseMemory('1.5g')).toBe(1.5 * 1024 * 1024 * 1024);
+      expect(parseMemory('1024k')).toBe(1024 * 1024);
+      expect(parseMemory('268435456')).toBe(268435456);
+      expect(parseMemory('plenty')).toBeUndefined();
+    });
+
+    it('reads both limits from the environment', () => {
+      expect(
+        loadConfig({ CLAUDOPS_INSTANCE_CPUS: '1.5', CLAUDOPS_INSTANCE_MEMORY: '512m' })
+          .instanceLimits,
+      ).toEqual({ cpus: 1.5, memoryBytes: 512 * 1024 * 1024 });
+    });
+
+    it('refuses a limit that would produce a container nobody can use', () => {
+      expect(() => loadConfig({ CLAUDOPS_INSTANCE_CPUS: '0' })).toThrow(ConfigError);
+      expect(() => loadConfig({ CLAUDOPS_INSTANCE_CPUS: 'plenty' })).toThrow(ConfigError);
+      expect(() => loadConfig({ CLAUDOPS_INSTANCE_MEMORY: '4tb' })).toThrow(ConfigError);
+      // Docker's own floor is 6 MiB, and its refusal is less clear than ours.
+      expect(() => loadConfig({ CLAUDOPS_INSTANCE_MEMORY: '1m' })).toThrow(ConfigError);
+    });
   });
 
   describe('secret key', () => {
