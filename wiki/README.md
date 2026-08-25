@@ -16,9 +16,10 @@ in [server/README.md](../server/README.md).
 
 ## Current state
 
-An instance can be started, listed and removed over REST; its console still goes
-through `docker exec`. Everything else is planned and marked with its issue
-number on the pages below. The component status table lives in the
+An instance can be started, listed and removed over REST, and its console is
+mirrored over a WebSocket. What is still missing is the browser page that talks
+to it (#5). Everything else is planned and marked with its issue number on the
+pages below. The component status table lives in the
 [root README](../README.md#state) -- kept in one place so the two cannot drift
 apart.
 

@@ -29,7 +29,8 @@ docker run -d --name claudops-demo \
   claudops-base
 ```
 
-Open the console (until the terminal bridge from #4 exists):
+Open the console on the host -- the same session the server's terminal bridge
+attaches to:
 
 ```bash
 docker exec -it claudops-demo tmux attach -t main

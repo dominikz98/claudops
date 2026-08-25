@@ -7,8 +7,8 @@ lives in the container, not in the browser tab.
 
 ## State
 
-Instances can be started, listed and removed over REST; their consoles still go
-through `docker exec`. Everything else is planned; see the
+Instances can be started, listed and removed over REST, and their consoles are
+mirrored over a WebSocket. Everything else is planned; see the
 [issues](https://github.com/dominikz98/claudops/issues) and
 [EPIC #1](https://github.com/dominikz98/claudops/issues/1).
 
@@ -16,7 +16,7 @@ through `docker exec`. Everything else is planned; see the
 | --- | --- |
 | Base image `claudops-base` | Available, smoke-tested |
 | Server (Fastify, dockerode, SQLite) | Available, smoke-tested |
-| Terminal bridge (WebSocket) | Planned (#4) |
+| Terminal bridge (WebSocket) | Available, smoke-tested |
 | Web UI (xterm.js) | Planned (#5) |
 | Projects and project images | Planned (#6, #7) |
 | Lifecycle, limits, recycling | Planned (#8) |
@@ -39,13 +39,14 @@ curl -s localhost:8080/instances \
   -d '{"name":"demo","repoUrl":"https://github.com/dominikz98/claudops.git"}'
 ```
 
-The answer carries the instance `id`; its console is one `docker exec` away:
+The answer carries the instance `id`; its console is one WebSocket away:
 
 ```bash
-docker exec -it claudops-<id> tmux attach -t main
+npx wscat -c 'ws://localhost:8080/instances/<id>/terminal?cols=120&rows=40'
 ```
 
-Detach with `Ctrl-b d`; Claude keeps running. The full walkthrough is in
+Detach with `Ctrl-b d`; Claude keeps running, and reconnecting finds the session
+and its scrollback untouched -- both live in the container. The full walkthrough is in
 [wiki/getting-started.md](wiki/getting-started.md), the API and the server's
 configuration in [server/README.md](server/README.md).
 
@@ -54,7 +55,7 @@ configuration in [server/README.md](server/README.md).
 | Path | Contains |
 | --- | --- |
 | [`docker/base/`](docker/base/) | The `claudops-base` image, its entrypoint and its smoke test |
-| [`server/`](server/README.md) | The Fastify server: instance REST, Docker access, SQLite, its smoke test |
+| [`server/`](server/README.md) | The Fastify server: instance REST, terminal bridge, Docker access, SQLite, its smoke tests |
 | [`wiki/`](wiki/README.md) | Documentation for users and colleagues: architecture, getting started, operations, glossary |
 | [`knowledge/`](knowledge/README.md) | Domain knowledge database: the non-obvious decisions and their reasons |
 | [`CLAUDE.md`](CLAUDE.md) | Project rules for Claude Code working in this repository |
@@ -79,7 +80,9 @@ pnpm lint && pnpm tsc --noEmit && pnpm test
 ```bash
 ./docker/base/smoke-test.sh
 ./server/smoke-test.sh
+./server/terminal-smoke-test.sh
 ```
 
-The unit tests need no Docker; both smoke tests do. `SKIP_BUILD=1` makes either
-of them reuse what is already built.
+The unit tests need no Docker; the smoke tests do. `SKIP_BUILD=1` makes one of
+them reuse what is already built -- which also means it tests the previous build,
+so leave it off after a code change.

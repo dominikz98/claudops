@@ -13,6 +13,7 @@ async function main(): Promise<void> {
     engine,
     baseImage: config.baseImage,
     instanceEnv: config.instanceEnv,
+    tmuxSession: config.tmuxSession,
     logLevel: config.logLevel,
   });
 

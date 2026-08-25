@@ -3,8 +3,13 @@ import Database from 'better-sqlite3';
 import type { InstanceEnvConfig } from '../src/config.ts';
 import { InstanceRepository } from '../src/db/instances.ts';
 import { migrate } from '../src/db/migrations.ts';
-import { DockerUnavailableError, ImageNotFoundError } from '../src/docker/engine.ts';
 import {
+  ContainerNotRunningError,
+  DockerUnavailableError,
+  ImageNotFoundError,
+} from '../src/docker/engine.ts';
+import {
+  ContainerMissingError,
   InstanceNotFoundError,
   InstanceService,
   MISSING_STATUS,
@@ -219,6 +224,86 @@ describe('InstanceService', () => {
 
       expect((await service.list()).map((i) => i.id)).toEqual(['id-2']);
       expect(engine.containers.has('container-2')).toBe(true);
+    });
+  });
+
+  describe('openTerminal', () => {
+    it('attaches to the existing tmux session of the instance container', async () => {
+      await service.create({ name: 'demo' });
+
+      const session = await service.openTerminal('id-1', { cols: 120, rows: 40 });
+
+      expect(engine.lastTerminal().containerId).toBe('container-1');
+      // `attach`, not `new`: the session belongs to the entrypoint.
+      expect(engine.lastTerminal().options.command).toEqual(['tmux', 'attach', '-t', 'main']);
+      expect(engine.lastTerminal().options.size).toEqual({ cols: 120, rows: 40 });
+      expect(session.stream.writable).toBe(true);
+    });
+
+    it('arms the attach with a detach sequence, since Docker cannot kill an exec', async () => {
+      await service.create({ name: 'demo' });
+
+      await service.openTerminal('id-1');
+
+      // C-b d. Without it the tmux client outlives the browser and keeps
+      // sizing the pane.
+      expect(engine.lastTerminal().options.closeInput).toEqual(Uint8Array.from([0x02, 0x64]));
+    });
+
+    it('honours a project image with its own session name', async () => {
+      const other = new InstanceService(repository, engine, {
+        baseImage: 'claudops-base',
+        instanceEnv,
+        tmuxSession: 'claude',
+        generateId: () => 'id-9',
+      });
+      await other.create({ name: 'demo' });
+
+      await other.openTerminal('id-9');
+
+      expect(engine.lastTerminal().options.command).toEqual(['tmux', 'attach', '-t', 'claude']);
+    });
+
+    it('attaches without a size when the client did not send one', async () => {
+      await service.create({ name: 'demo' });
+
+      await service.openTerminal('id-1');
+
+      expect(engine.lastTerminal().options.size).toBeUndefined();
+    });
+
+    it('rejects an unknown instance', async () => {
+      await expect(service.openTerminal('nope')).rejects.toThrow(InstanceNotFoundError);
+    });
+
+    it('rejects an instance whose row has no container', async () => {
+      repository.insert({
+        id: 'id-orphan',
+        name: 'half-created',
+        image: 'claudops-base',
+        repoUrl: null,
+        repoBranch: null,
+        createdAt: '2026-08-25T08:00:00.000Z',
+      });
+
+      await expect(service.openTerminal('id-orphan')).rejects.toThrow(ContainerMissingError);
+    });
+
+    it('passes a stopped container on as such', async () => {
+      await service.create({ name: 'demo' });
+      engine.setState('container-1', 'exited');
+
+      await expect(service.openTerminal('id-1')).rejects.toThrow(ContainerNotRunningError);
+    });
+
+    it('gives every connection its own session, so a reconnect is a new attach', async () => {
+      await service.create({ name: 'demo' });
+
+      const first = await service.openTerminal('id-1');
+      const second = await service.openTerminal('id-1');
+
+      expect(second).not.toBe(first);
+      expect(engine.terminals).toHaveLength(2);
     });
   });
 });
