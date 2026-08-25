@@ -16,6 +16,7 @@ import {
   paneSize,
   removeContainers,
 } from '../docker.ts';
+import { waitForImage } from '../project.ts';
 
 test.describe.configure({ mode: 'serial' });
 
@@ -59,6 +60,11 @@ test('an instance can be created from the browser', async () => {
     data: { name: 'e2e-console', repoUrl: 'https://github.com/dominikz98/does-not-exist.git' },
   });
   expect(project.status(), await project.text()).toBe(201);
+
+  // An instance starts from its project's image, so it cannot be created before
+  // that image exists -- the server answers 422 until it does.
+  const { id } = (await project.json()) as { id: string };
+  await waitForImage(page.request, id);
 
   await page.goto('/');
   await expect(page.getByTestId('empty')).toBeVisible();

@@ -32,7 +32,7 @@ const json = (body: unknown, status = 200): Response =>
 const instance = {
   id: 'abc123',
   name: 'demo',
-  image: 'claudops-base',
+  image: 'claudops-project-proj1',
   containerId: 'c1',
   projectId: 'proj1',
   repoUrl: null,
@@ -47,6 +47,7 @@ const project = {
   repoUrl: 'https://example.test/repo.git',
   repoBranch: 'main',
   buildingBlocks: { dotnet: false, playwright: false },
+  image: { tag: 'claudops-project-proj1', status: 'ready', builtAt: '2026-08-25T10:05:00.000Z' },
   hasGitToken: true,
   instanceCount: 0,
   createdAt: '2026-08-25T10:00:00.000Z',
@@ -163,6 +164,51 @@ describe('api client', () => {
 
       expect(calls[0]?.url).toBe('/projects/a%2Fb');
       expect(calls[0]?.init?.method).toBe('DELETE');
+    });
+  });
+
+  describe('project images', () => {
+    it('reads the image state off the project', async () => {
+      const { fetch } = fakeFetch(() => json({ projects: [project] }));
+
+      const [first] = await createApi(fetch).listProjects();
+
+      expect(first?.image).toEqual({
+        tag: 'claudops-project-proj1',
+        status: 'ready',
+        builtAt: '2026-08-25T10:05:00.000Z',
+      });
+    });
+
+    it('asks for a rebuild with an empty POST', async () => {
+      const { fetch, calls } = fakeFetch(() =>
+        json({ ...project, image: { ...project.image, status: 'pending' } }, 202),
+      );
+
+      const rebuilt = await createApi(fetch).buildProject('a/b');
+
+      expect(calls[0]?.url).toBe('/projects/a%2Fb/build');
+      expect(calls[0]?.init?.method).toBe('POST');
+      // No body: what to build is the project, and that is in the path.
+      expect(calls[0]?.init?.body).toBeUndefined();
+      expect(rebuilt.image.status).toBe('pending');
+    });
+
+    it('fetches the build log from its own endpoint', async () => {
+      const { fetch, calls } = fakeFetch(() =>
+        json({ status: 'failed', builtAt: null, log: 'Step 3/3 : RUN false' }),
+      );
+
+      const log = await createApi(fetch).projectBuildLog('proj1');
+
+      expect(calls[0]?.url).toBe('/projects/proj1/build-log');
+      expect(log).toEqual({ status: 'failed', builtAt: null, log: 'Step 3/3 : RUN false' });
+    });
+
+    it('turns a refused build into an ApiCallError', async () => {
+      const { fetch } = fakeFetch(() => json({ error: 'not_found', message: 'no such route' }, 404));
+
+      await expect(createApi(fetch).buildProject('nope')).rejects.toBeInstanceOf(ApiCallError);
     });
   });
 });

@@ -36,11 +36,14 @@ one thing: every project needs its token entered again. Without a key the server
 still runs -- projects work, they just cannot hold a PAT, so private
 repositories do not.
 
-## Build the image
+## Build the base image
 
 ```bash
 docker build -t claudops-base docker/base
 ```
+
+This is the only image built by hand. The environment of each project -- the
+dotnet SDK, Playwright -- is built on top of it by the server, once per project.
 
 ## Start the server
 
@@ -75,9 +78,16 @@ misbehaves. The full variable table is in
 
 An instance is created from a project: repository, branch, environment building
 blocks and -- for a private repository -- the PAT. Open **Projects** in the top
-right, fill in name and repository, optionally a branch and a token, and press
-Create. The token is masked, stored encrypted and never shown again; the row says
-`stored` instead.
+right, fill in name and repository, optionally a branch and a token, tick the
+building blocks the repository needs, and press Create. The token is masked,
+stored encrypted and never shown again; the row says `stored` instead.
+
+The **Image** column then goes from `queued` to `building` to `ready`. That is the
+project's environment being built: `claudops-project-<id>`, the base image plus a
+layer per building block. Nothing empty is quick and nothing with a dotnet SDK and
+a Chromium is -- expect a few minutes the first time, and seconds for every
+project after it that ticks the same boxes. **Build log** shows what the daemon is
+doing, **Rebuild** starts over.
 
 The same thing over the API:
 
@@ -93,13 +103,28 @@ curl -s localhost:8080/projects \
       }'
 ```
 
-The answer carries the project `id`. `buildingBlocks` are remembered but have no
-effect yet -- they become layers of a per-project image with #7.
+The answer carries the project `id`, and an `image` that is not built yet:
+
+```json
+{ "image": { "tag": "claudops-project-a1b2c3", "status": "pending", "builtAt": null } }
+```
+
+Builds are asynchronous, so poll until it is `ready` before creating an instance:
+
+```bash
+curl -s localhost:8080/projects/<project id>          # image.status
+curl -s localhost:8080/projects/<project id>/build-log
+```
+
+A `failed` status means the build did not work; the log says why, and
+`POST /projects/<id>/build` tries again. There is no fallback -- an instance
+cannot start on an environment that was never built.
 
 ## Start an instance
 
 In the browser: back on the instance list, fill in a name, pick the project and
-press Create. The row appears with the status Docker reports.
+press Create. The row appears with the status Docker reports. A project whose
+image is not `ready` is greyed out in the picker -- it would be a `422`.
 
 The same thing over the API, with the project id from above:
 
@@ -109,11 +134,12 @@ curl -s localhost:8080/instances \
   -d '{"name":"my-instance","projectId":"<project id>"}'
 ```
 
-The answer carries the instance `id` and the `containerId`. The container clones
-the project's repository into `/workspace/<repo-name>` and starts Claude Code
-there, inside a tmux session called `main`. The instance keeps the repository and
-branch it was started with, so editing the project later does not change what a
-running instance was told to clone.
+The answer carries the instance `id` and the `containerId`. The container is
+started from the project's image, clones the project's repository into
+`/workspace/<repo-name>` and starts Claude Code there, inside a tmux session
+called `main`. The instance keeps the repository, the branch and the image it was
+started with, so editing or rebuilding the project later does not change what a
+running instance is on.
 
 ```bash
 curl -s localhost:8080/instances     # every instance with its Docker status
@@ -221,11 +247,18 @@ understands.
 
 ```bash
 ./docker/base/smoke-test.sh          # the image: clone, non-root, reattach, credentials
-./server/smoke-test.sh               # the server: create, list with status, delete
+./server/smoke-test.sh               # the server: create, list with status, delete, project images
 ./server/terminal-smoke-test.sh      # the console: I/O, reconnect, resize
 ./e2e/run.sh                         # the UI: create, drive, refresh, delete -- in a browser
+./docker/project/smoke-test.sh       # a project image: dotnet and a browser, really inside it
 pnpm test                            # unit tests, no Docker needed
 ```
+
+The three server-side scripts build project images from `docker/project-stub`, so
+they are not spent installing a toolchain their assertions never look at.
+`./docker/project/smoke-test.sh` is the one that builds the real thing, and
+`FULL_IMAGE=1 ./server/smoke-test.sh` checks `dotnet --version` inside a running
+instance. Both take minutes.
 
 `./e2e/run.sh` drives a real browser and needs Chromium once per machine:
 

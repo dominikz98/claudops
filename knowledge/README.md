@@ -23,6 +23,10 @@ Format and maintenance rules: skill `domain-knowledge`.
 - [tmux writes an underscore for every multi-byte character unless the client says UTF-8](tmux-needs-a-utf8-client.md) - Claude's TUI arrives as rows of "_"
 - [A failed clone must not kill the container](failed-clone-must-not-abort.md) - a dead container is unreachable for diagnosis
 - [Project environments are prebuilt images, not devcontainer features](project-images-not-devcontainer-features.md) - devcontainer features have no layer caching
+- [One template Dockerfile with `if`, not a generated Dockerfile per project](one-project-template-not-a-dockerfile-per-project.md) - what makes two projects share their layers
+- [A failed image build answers HTTP 200 and reports the failure in the body](docker-build-errors-arrive-in-the-stream.md) - an unread stream makes every build look successful
+- [The image status is the one piece of state the database is allowed to hold](project-image-state-lives-in-the-database.md) - a failed build leaves no Docker object to ask
+- [Playwright's browsers have to be installed to a shared path](playwright-browsers-need-a-shared-path.md) - root installs them, `claude` has to read them
 - [The dev host is Windows, the target is Linux](windows-dev-host-linux-target.md) - line endings and MSYS path rewriting bite
 - [Verify line endings with cat-file and byte counting, not with grep](verifying-line-endings.md) - grep and git show both lie about CR
 - [Git Bash loses a trailing CR from a command substitution](git-bash-drops-a-trailing-cr.md) - the keystroke that never submits

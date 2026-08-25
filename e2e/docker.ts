@@ -80,6 +80,45 @@ export function removeContainers(instanceId: string): void {
   for (const id of containersFor(instanceId)) ask('rm', '-f', id);
 }
 
+/** The image a container was started from. Proof that an instance really runs
+ *  on its project's image and not on the base one. */
+export function imageOf(containerId: string): string {
+  return docker('inspect', '-f', '{{.Config.Image}}', containerId).trim();
+}
+
+/** Reads a file out of a running container. Used for the marker
+ *  docker/project-stub writes, which is how the building blocks of a project
+ *  become observable from outside. */
+export function readFile(containerId: string, path: string): string {
+  return docker('exec', containerId, 'cat', path).trim();
+}
+
+/**
+ * Runs one command in a throwaway container off an image. `--entrypoint` because
+ * claudops-base has one, and its arguments are not a command.
+ *
+ * This is how the *content* of a rebuilt image is checked: a cached layer prints
+ * nothing, so the build log cannot prove what came out of a build -- the image
+ * can.
+ */
+export function runInImage(image: string, ...command: string[]): string {
+  return docker('run', '--rm', '--entrypoint', command[0] ?? 'true', image, ...command.slice(1))
+    .trim();
+}
+
+/** Images claudops built for a project, by label. */
+export function imagesFor(projectId: string): string[] {
+  return docker(
+    'images',
+    '--filter',
+    `label=claudops.project=${projectId}`,
+    '--format',
+    '{{.Repository}}:{{.Tag}}',
+  )
+    .split('\n')
+    .filter((line) => line !== '');
+}
+
 /** Every environment variable of a container, as `KEY=value` lines. What the
  *  server handed the container is only visible from out here. */
 export function containerEnv(containerId: string): string[] {

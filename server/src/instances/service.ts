@@ -8,7 +8,11 @@ import type {
 } from '../docker/engine.ts';
 import { containerName, instanceLabels } from '../docker/labels.ts';
 import { shortId } from '../ids.ts';
-import type { ProjectService, ProjectTemplate } from '../projects/service.ts';
+import {
+  ProjectImageNotReadyError,
+  type ProjectService,
+  type ProjectTemplate,
+} from '../projects/service.ts';
 
 /** A container claudops knows about but Docker no longer has. #8 reconciles
  *  these away at startup; until then they stay visible instead of silently
@@ -16,7 +20,7 @@ import type { ProjectService, ProjectTemplate } from '../projects/service.ts';
 export const MISSING_STATUS = 'missing';
 
 /** The tmux session `docker/base/entrypoint.sh` starts. Overridable because a
- *  project image (#7) may bring its own TMUX_SESSION. */
+ *  project image may bring its own TMUX_SESSION. */
 export const DEFAULT_TMUX_SESSION = 'main';
 
 /**
@@ -66,9 +70,8 @@ export class ContainerMissingError extends Error {
 }
 
 export interface InstanceServiceOptions {
-  baseImage: string;
   instanceEnv: InstanceEnvConfig;
-  /** Where repository, branch and PAT come from. */
+  /** Where repository, branch, PAT and the image come from. */
   projects: ProjectService;
   tmuxSession?: string | undefined;
   generateId?: () => string;
@@ -76,7 +79,6 @@ export interface InstanceServiceOptions {
 }
 
 export class InstanceService {
-  private readonly baseImage: string;
   private readonly instanceEnv: InstanceEnvConfig;
   private readonly projects: ProjectService;
   private readonly tmuxSession: string;
@@ -88,7 +90,6 @@ export class InstanceService {
     private readonly engine: DockerEngine,
     options: InstanceServiceOptions,
   ) {
-    this.baseImage = options.baseImage;
     this.instanceEnv = options.instanceEnv;
     this.projects = options.projects;
     this.tmuxSession = options.tmuxSession ?? DEFAULT_TMUX_SESSION;
@@ -101,11 +102,20 @@ export class InstanceService {
     // longer decrypts, has to fail without leaving a row or a container behind.
     const template = this.projects.template(input.projectId);
 
+    // The environment is prebuilt, so there is nothing to fall back to: a
+    // project whose image is still building or failed cannot start an instance
+    // (knowledge/project-images-not-devcontainer-features.md).
+    if (template.imageStatus !== 'ready') {
+      throw new ProjectImageNotReadyError(template.id, template.imageStatus);
+    }
+
     const id = this.generateId();
     const record = this.repository.insert({
       id,
       name: input.name,
-      image: this.baseImage,
+      // Snapshotted like the repository: which image this instance was started
+      // from stays readable after the project is rebuilt.
+      image: template.image,
       projectId: template.id,
       // A snapshot, not a reference: what the container was told to clone stays
       // readable on the instance even after the project moves on.
@@ -202,7 +212,7 @@ export class InstanceService {
     return {
       instanceId: id,
       name: containerName(id),
-      image: this.baseImage,
+      image: template.image,
       env: this.envFor(template),
       labels: instanceLabels(id),
     };

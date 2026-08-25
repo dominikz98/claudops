@@ -1,3 +1,4 @@
+import { resolve } from 'node:path';
 import { defineConfig, devices } from '@playwright/test';
 
 /**
@@ -41,6 +42,11 @@ export default defineConfig({
       CLAUDOPS_PORT: PORT,
       CLAUDOPS_DB: '.tmp/claudops.db',
       CLAUDOPS_BASE_IMAGE: process.env.CLAUDOPS_E2E_IMAGE ?? 'claudops-base:e2e',
+      // Not docker/project: the real template installs a dotnet SDK and a
+      // Chromium, which would add minutes to every run. The stub takes the same
+      // build args and writes them into the image instead, which is what these
+      // tests assert on -- docker/project/smoke-test.sh covers the layers.
+      CLAUDOPS_PROJECT_CONTEXT: resolve(import.meta.dirname, '../docker/project-stub'),
       // A project keeps its PAT encrypted, so the server needs a key. `run.sh`
       // generates one; the fallback keeps a bare `playwright test` working and
       // is a test key, not a secret -- the database it protects is thrown away

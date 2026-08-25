@@ -1,15 +1,30 @@
 /**
- * The acceptance criteria of issue #6, in the order a person would try them:
- * create a project with a PAT, create an instance from it, check that the
- * container really got the repository and the token, and that the project
- * refuses to disappear while an instance still points at it.
+ * The acceptance criteria of issues #6 and #7, in the order a person would try
+ * them: create a project with a PAT and an environment, watch its image get
+ * built, create an instance from it, check that the container really got the
+ * repository, the token and the project image, and that the project refuses to
+ * disappear while an instance still points at it.
  *
  * One browser page for the whole file, like the console spec: these steps build
  * on each other on purpose.
+ *
+ * The image is built from `e2e/build-context`, not from `docker/project` -- see
+ * the comment in playwright.config.ts. What is verified here is the
+ * orchestration; the layers themselves are docker/project/smoke-test.sh.
  */
 
 import { expect, test, type Page } from '@playwright/test';
-import { containerEnv, containersFor, removeContainers } from '../docker.ts';
+import {
+  containerEnv,
+  containersFor,
+  imageOf,
+  imagesFor,
+  readFile,
+  removeContainers,
+  runInImage,
+} from '../docker.ts';
+import { buildLogOf } from '../project.ts';
+
 
 test.describe.configure({ mode: 'serial' });
 
@@ -20,6 +35,7 @@ const BRANCH = 'feature/dz/6';
 const PAT = 'e2e-pat-must-not-appear';
 
 let page: Page;
+let projectId = '';
 let instanceId = '';
 let containerId = '';
 
@@ -54,6 +70,24 @@ test('a project can be created from the browser', async () => {
   // The form is emptied, so the PAT does not sit in the DOM afterwards.
   await expect(page.getByTestId('project-gitToken')).toHaveValue('');
   expect(await page.content()).not.toContain(PAT);
+
+  projectId = (await created.getAttribute('data-project-id')) ?? '';
+  expect(projectId).not.toBe('');
+});
+
+test('#7 AC: the image is built for the project and reported on the page', async () => {
+  const created = row().filter({ hasText: PROJECT });
+
+  // The page polls while a build is in flight, so the badge arrives at `ready`
+  // without a reload.
+  await expect(created.getByTestId('image-status')).toHaveText('ready', { timeout: 60_000 });
+  expect(imagesFor(projectId)).toEqual([`claudops-project-${projectId}:latest`]);
+
+  // The build log is reachable from the browser, not just from the API.
+  await created.getByTestId('build-log').click();
+  await expect(page.getByTestId('log')).toContainText('FROM');
+  await created.getByTestId('build-log').click();
+  await expect(page.getByTestId('log')).toHaveCount(0);
 });
 
 test('AC 2: the PAT appears in no API response', async () => {
@@ -97,6 +131,46 @@ test('AC 1: an instance created from the project gets its repo, branch and PAT',
   expect(env).toContain(`REPO_BRANCH=${BRANCH}`);
   expect(env).toContain(`GIT_TOKEN=${PAT}`);
   expect(env.filter((line) => line.startsWith('ANTHROPIC_API_KEY='))).toEqual([]);
+
+  // #7: the container runs on the project image, and the building blocks that
+  // were ticked in the form reached the build as args.
+  expect(imageOf(containerId)).toBe(`claudops-project-${projectId}`);
+  expect(readFile(containerId, '/tmp/claudops-blocks')).toBe(
+    'dotnet=1 playwright=0 channel=10.0',
+  );
+});
+
+test('#7 AC: a changed environment rebuilds the image', async () => {
+  await page.getByTestId('projects-link').click();
+  const created = row().filter({ hasText: PROJECT });
+  const builtBefore = (await buildLogOf(page.request, projectId)).builtAt;
+
+  await created.getByTestId('edit').click();
+  await page.getByTestId('block-playwright').check();
+  await page.getByTestId('project-submit').click();
+
+  // `builtAt`, not the badge: a cached rebuild is over in milliseconds, so the
+  // badge reads `ready` both before the rebuild starts and after it ended.
+  await expect
+    .poll(async () => (await buildLogOf(page.request, projectId)).builtAt, { timeout: 60_000 })
+    .not.toBe(builtBefore);
+  await expect(created.getByTestId('image-status')).toHaveText('ready', { timeout: 30_000 });
+
+  // What the tag holds now -- the proof that the changed block reached the build.
+  // Read from the image rather than from the log, because a cached layer prints
+  // nothing and this has to hold either way.
+  expect(runInImage(`claudops-project-${projectId}`, 'cat', '/tmp/claudops-blocks')).toBe(
+    'dotnet=1 playwright=1 channel=10.0',
+  );
+
+  // The running instance keeps the image it was started from -- the tag points at
+  // a new one, but a container is bound to the image it started with.
+  expect(readFile(containerId, '/tmp/claudops-blocks')).toBe(
+    'dotnet=1 playwright=0 channel=10.0',
+  );
+
+  // Back where the next test expects to start -- these build on each other.
+  await page.getByTestId('back').click();
 });
 
 test('AC 3: the project cannot be deleted while an instance points at it', async () => {
@@ -143,4 +217,6 @@ test('AC 3: with the instance gone the project can be deleted', async () => {
 
   await expect(row().filter({ hasText: PROJECT })).toHaveCount(0);
   await expect.poll(() => containersFor(instanceId), { timeout: 15_000 }).toEqual([]);
+  // #7: the image goes with the project rather than staying behind unreferenced.
+  await expect.poll(() => imagesFor(projectId), { timeout: 15_000 }).toEqual([]);
 });

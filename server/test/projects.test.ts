@@ -4,7 +4,7 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.ts';
 import { migrate } from '../src/db/migrations.ts';
 import { FakeDockerEngine } from './fake-engine.ts';
-import { createTestProject, TEST_REPO_URL, testCipher } from './fixtures.ts';
+import { createTestProject, TEST_REPO_URL, testCipher, waitForImage } from './fixtures.ts';
 
 const PAT = 'ghp_pat-secret';
 
@@ -14,6 +14,7 @@ interface ProjectBody {
   repoUrl: string;
   repoBranch: string | null;
   buildingBlocks: { dotnet: boolean; playwright: boolean };
+  image: { tag: string; status: string; builtAt: string | null };
   hasGitToken: boolean;
   instanceCount: number;
   createdAt: string;
@@ -338,6 +339,166 @@ describe('project REST API', () => {
       engine.setState(instance.containerId, 'exited');
 
       expect((await app.inject({ method: 'DELETE', url: `/projects/${id}` })).statusCode).toBe(409);
+    });
+  });
+  describe('the project image', () => {
+    const buildLog = async (id: string) =>
+      (await app.inject({ method: 'GET', url: `/projects/${id}/build-log` })).json<{
+        status: string;
+        builtAt: string | null;
+        log: string;
+      }>();
+
+    const build = (id: string) => app.inject({ method: 'POST', url: `/projects/${id}/build` });
+
+    it('answers the create with an image that is not built yet', async () => {
+      const body = (await post({ name: 'fresh', repoUrl: TEST_REPO_URL })).json<ProjectBody>();
+
+      // The build takes minutes for a real environment, so the answer is the
+      // state to watch rather than the finished image.
+      expect(body.image).toMatchObject({ tag: `claudops-project-${body.id}`, status: 'pending' });
+      expect(body.image.builtAt).toBeNull();
+    });
+
+    it('builds it right after the create', async () => {
+      const id = await createTestProject(app, { buildingBlocks: { dotnet: true } });
+
+      const project = (await app.inject({ method: 'GET', url: `/projects/${id}` }))
+        .json<ProjectBody>();
+      expect(project.image.status).toBe('ready');
+      expect(project.image.builtAt).not.toBeNull();
+      expect(engine.builds).toHaveLength(1);
+      expect(engine.builds[0]).toMatchObject({
+        tag: `claudops-project-${id}`,
+        buildArgs: { WITH_DOTNET: '1', WITH_PLAYWRIGHT: '0', BASE_IMAGE: 'claudops-base' },
+      });
+    });
+
+    it('hands out the build log on its own endpoint', async () => {
+      const id = await createTestProject(app);
+
+      const log = await buildLog(id);
+
+      expect(log.status).toBe('ready');
+      expect(log.log).toContain('FROM claudops-base');
+      // Not in the project itself: a log runs to tens of kilobytes and the list
+      // asks for every project at once.
+      expect(JSON.stringify(await list())).not.toContain('FROM claudops-base');
+    });
+
+    it('rebuilds when the building blocks change', async () => {
+      const id = await createTestProject(app);
+
+      const response = await patch(id, { buildingBlocks: { playwright: true } });
+      expect(response.json<ProjectBody>().image.status).toBe('pending');
+
+      await waitForImage(app, id);
+      expect(engine.builds).toHaveLength(2);
+      expect(engine.builds[1]?.buildArgs).toMatchObject({ WITH_PLAYWRIGHT: '1' });
+    });
+
+    it('does not rebuild when the same blocks are sent again', async () => {
+      const id = await createTestProject(app, { buildingBlocks: { dotnet: true } });
+
+      // What the UI does on every save: it posts the whole form back.
+      const response = await patch(id, { buildingBlocks: { dotnet: true, playwright: false } });
+
+      expect(response.json<ProjectBody>().image.status).toBe('ready');
+      expect(engine.builds).toHaveLength(1);
+    });
+
+    it('does not rebuild for a rename or a new token', async () => {
+      const id = await createTestProject(app);
+
+      await patch(id, { name: 'renamed' });
+      await patch(id, { gitToken: PAT });
+
+      expect(engine.builds).toHaveLength(1);
+      // The tag follows the id, so a rename leaves the image where it is.
+      const project = (await app.inject({ method: 'GET', url: `/projects/${id}` }))
+        .json<ProjectBody>();
+      expect(project.image).toMatchObject({ tag: `claudops-project-${id}`, status: 'ready' });
+    });
+
+    it('takes an explicit rebuild and answers 202', async () => {
+      const id = await createTestProject(app);
+
+      const response = await build(id);
+
+      expect(response.statusCode).toBe(202);
+      expect(response.json<ProjectBody>().image.status).toBe('pending');
+      await waitForImage(app, id);
+      expect(engine.builds).toHaveLength(2);
+    });
+
+    it('records a failed build and blocks instance creation with it', async () => {
+      engine.failNextBuild = new Error('pull access denied for claudops-base');
+      const created = (await post({ name: 'broken', repoUrl: TEST_REPO_URL }))
+        .json<ProjectBody>();
+
+      await waitForImage(app, created.id, 'failed');
+
+      const log = await buildLog(created.id);
+      expect(log.status).toBe('failed');
+      expect(log.log).toContain('pull access denied');
+
+      const refused = await addInstance('i1', created.id);
+      expect(refused.statusCode).toBe(422);
+      expect(refused.json<{ error: string }>().error).toBe('project_image_not_ready');
+      expect(refused.json<{ status: string }>().status).toBe('failed');
+    });
+
+    it('is the way out of a failed build', async () => {
+      engine.failNextBuild = new Error('no space left on device');
+      const created = (await post({ name: 'retry-me', repoUrl: TEST_REPO_URL }))
+        .json<ProjectBody>();
+      await waitForImage(app, created.id, 'failed');
+
+      await build(created.id);
+      await waitForImage(app, created.id);
+
+      expect((await addInstance('i1', created.id)).statusCode).toBe(201);
+    });
+
+    it('refuses an instance while the image is still building', async () => {
+      // A real dotnet build occupies this state for minutes; here it is 50 ms.
+      engine.buildDelayMs = 50;
+      const created = (await post({ name: 'slow', repoUrl: TEST_REPO_URL }))
+        .json<ProjectBody>();
+
+      const refused = await addInstance('i1', created.id);
+
+      expect(refused.statusCode).toBe(422);
+      expect(refused.json<{ error: string }>().error).toBe('project_image_not_ready');
+      expect(refused.json<{ status: string }>().status).toBe('building');
+
+      // Let the build finish, so it does not run into the app being closed.
+      engine.buildDelayMs = 0;
+      await waitForImage(app, created.id);
+    });
+
+    it('removes the image when the project is deleted', async () => {
+      const id = await createTestProject(app);
+
+      await app.inject({ method: 'DELETE', url: `/projects/${id}` });
+
+      expect(engine.removedImages).toEqual([`claudops-project-${id}`]);
+    });
+
+    it('deletes the project even when the image cannot be removed', async () => {
+      const id = await createTestProject(app);
+      engine.unavailable = true;
+
+      // The row is already gone at that point; a leftover tag must not turn a
+      // successful delete into a 500.
+      expect((await app.inject({ method: 'DELETE', url: `/projects/${id}` })).statusCode).toBe(204);
+    });
+
+    it('answers 404 for the build and the log of an unknown project', async () => {
+      expect((await build('nope')).statusCode).toBe(404);
+      expect(
+        (await app.inject({ method: 'GET', url: '/projects/nope/build-log' })).statusCode,
+      ).toBe(404);
     });
   });
 });

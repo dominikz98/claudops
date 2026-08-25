@@ -12,6 +12,8 @@ async function main(): Promise<void> {
     db,
     engine,
     baseImage: config.baseImage,
+    projectContext: config.projectContext,
+    dotnetChannel: config.dotnetChannel,
     instanceEnv: config.instanceEnv,
     cipher: config.cipher,
     webRoot: config.webRoot,

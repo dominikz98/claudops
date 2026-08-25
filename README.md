@@ -7,9 +7,10 @@ lives in the container, not in the browser tab.
 
 ## State
 
-Projects hold a repository, a branch and its credential; instances are created
-from them, driven and deleted from a browser page on the server's own port, and a
-console survives a refresh. Everything else is planned; see the
+Projects hold a repository, a branch, its credential and an environment that is
+prebuilt as an image; instances are created from them, driven and deleted from a
+browser page on the server's own port, and a console survives a refresh.
+Everything else is planned; see the
 [issues](https://github.com/dominikz98/claudops/issues) and
 [EPIC #1](https://github.com/dominikz98/claudops/issues/1).
 
@@ -20,7 +21,7 @@ console survives a refresh. Everything else is planned; see the
 | Terminal bridge (WebSocket) | Available, smoke-tested |
 | Web UI (xterm.js) | Available, end-to-end tested |
 | Projects (repo, branch, PAT) | Available, end-to-end tested |
-| Project images from building blocks | Planned (#7) |
+| Project images from building blocks | Available, smoke-tested |
 | Lifecycle, limits, recycling | Planned (#8) |
 | Auth, egress firewall, UI login | Planned (#9) |
 
@@ -37,9 +38,10 @@ CLAUDOPS_SECRET_KEY="$(node -e 'console.log(require("node:crypto").randomBytes(3
 node server/dist/index.js
 ```
 
-Then <http://localhost:8080>: create a project on the **Projects** page, name an
-instance, pick that project, press Create, press Console. The same thing over the
-API, which is what the page uses and nothing else needs:
+Then <http://localhost:8080>: create a project on the **Projects** page and wait
+for its image to say `ready` -- that is the environment its instances run in --
+then name an instance, pick the project, press Create, press Console. The same
+thing over the API, which is what the page uses and nothing else needs:
 
 ```bash
 curl -s localhost:8080/projects \

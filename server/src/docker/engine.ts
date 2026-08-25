@@ -65,10 +65,39 @@ export interface TerminalSession {
   close(): void;
 }
 
+/** What one `docker build` needs. No build-context contents here: the template
+ *  in docker/project has no COPY, so the context is the Dockerfile and nothing
+ *  else. */
+export interface ImageBuildSpec {
+  /** Tag the result gets, e.g. `claudops-project-<id>`. */
+  tag: string;
+  /** Directory handed to the daemon as the build context. */
+  contextDir: string;
+  /** Dockerfile inside `contextDir`. */
+  dockerfile: string;
+  buildArgs: Record<string, string>;
+  labels: Record<string, string>;
+}
+
 export class ImageNotFoundError extends Error {
   constructor(readonly image: string) {
     super(`image '${image}' not found -- build it before starting instances`);
     this.name = 'ImageNotFoundError';
+  }
+}
+
+/**
+ * The build ran and the daemon refused it -- a missing base image, a failing
+ * install step. `detail` is what Docker said, which is the only useful part of
+ * a build that did not work.
+ */
+export class ImageBuildFailedError extends Error {
+  constructor(
+    readonly tag: string,
+    readonly detail: string,
+  ) {
+    super(`building image '${tag}' failed: ${detail}`);
+    this.name = 'ImageBuildFailedError';
   }
 }
 
@@ -111,4 +140,13 @@ export interface DockerEngine {
   /** Attaches a TTY exec to a running container. Throws
    *  ContainerNotFoundError or ContainerNotRunningError. */
   attachTerminal(containerId: string, options: AttachTerminalOptions): Promise<TerminalSession>;
+  /**
+   * Builds an image and streams the daemon's output through `onLog` as it
+   * arrives, so a caller can persist the log of a build that then fails.
+   * Resolves when the image is tagged, throws ImageBuildFailedError otherwise.
+   */
+  buildImage(spec: ImageBuildSpec, onLog: (chunk: string) => void): Promise<void>;
+  /** Removes an image by tag. Missing is not an error -- the same reasoning as
+   *  removeContainer: cleanup has to stay idempotent. */
+  removeImage(tag: string): Promise<void>;
 }

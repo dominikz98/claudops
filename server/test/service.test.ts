@@ -15,7 +15,9 @@ import {
   MISSING_STATUS,
 } from '../src/instances/service.ts';
 import { ProjectRepository } from '../src/db/projects.ts';
+import { projectImageTag } from '../src/docker/labels.ts';
 import {
+  ProjectImageNotReadyError,
   ProjectNotFoundError,
   ProjectService,
   type CreateProjectInput,
@@ -43,13 +45,19 @@ describe('InstanceService', () => {
   /** Ids come back from create, so they stay whatever the service generated;
    *  the counter only keeps the unique name unique. */
   let projectCount = 0;
+  /** A project whose image is built. Instances start from that image, so
+   *  everything below would be blocked by a project still on `pending`. */
   const addProject = (input: Partial<CreateProjectInput> = {}): string => {
     projectCount += 1;
-    return projects.create({
+    const id = projects.create({
       name: `project-${String(projectCount)}`,
       repoUrl: TEST_REPO_URL,
       ...input,
     }).id;
+
+    projectRepository.setImageState(id, 'ready', '', '2026-08-25T07:00:00.000Z');
+    engine.knownImages.add(projectImageTag(id));
+    return id;
   };
 
   beforeEach(() => {
@@ -61,7 +69,6 @@ describe('InstanceService', () => {
     engine = new FakeDockerEngine();
     ids = ['id-1', 'id-2', 'id-3'];
     service = new InstanceService(repository, engine, {
-      baseImage: 'claudops-base',
       instanceEnv,
       projects,
       generateId: () => ids.shift() ?? 'exhausted',
@@ -77,7 +84,9 @@ describe('InstanceService', () => {
       expect(instance).toMatchObject({
         id: 'id-1',
         name: 'demo',
-        image: 'claudops-base',
+        // The project's image, not the base one: that is where its environment
+        // lives.
+        image: projectImageTag(projectId),
         containerId: 'container-1',
         projectId,
         status: 'running',
@@ -85,7 +94,7 @@ describe('InstanceService', () => {
       });
       expect(engine.specFor('id-1')).toMatchObject({
         name: 'claudops-id-1',
-        image: 'claudops-base',
+        image: projectImageTag(projectId),
         labels: { 'claudops.instance': 'id-1' },
       });
       expect(repository.get('id-1')?.containerId).toBe('container-1');
@@ -132,7 +141,6 @@ describe('InstanceService', () => {
 
     it('omits variables that were not configured', async () => {
       const bare = new InstanceService(repository, engine, {
-        baseImage: 'claudops-base',
         instanceEnv: {
           claudeOauthToken: undefined,
           gitUserName: undefined,
@@ -187,9 +195,34 @@ describe('InstanceService', () => {
     });
 
     it('leaves nothing behind when the image is missing', async () => {
+      // The project says `ready` but Docker no longer has the tag -- somebody
+      // ran `docker rmi`. Docker is still the truth about what exists.
       engine.knownImages.clear();
 
       await expect(service.create({ name: 'demo', projectId })).rejects.toThrow(ImageNotFoundError);
+      expect(repository.list()).toEqual([]);
+    });
+
+    it('refuses a project whose image is not built yet', async () => {
+      const id = addProject({ name: 'still-building' });
+      projectRepository.setImageState(id, 'building', null);
+
+      await expect(service.create({ name: 'demo', projectId: id })).rejects.toThrow(
+        ProjectImageNotReadyError,
+      );
+      // Nothing was written and nothing was started: the check comes before
+      // both.
+      expect(repository.list()).toEqual([]);
+      expect(engine.containers.size).toBe(0);
+    });
+
+    it('refuses a project whose image failed to build', async () => {
+      const id = addProject({ name: 'broken' });
+      projectRepository.setImageState(id, 'failed', 'Step 3/3 : RUN false');
+
+      await expect(service.create({ name: 'demo', projectId: id })).rejects.toThrow(
+        /failed to build/,
+      );
       expect(repository.list()).toEqual([]);
     });
 
@@ -330,7 +363,6 @@ describe('InstanceService', () => {
 
     it('honours a project image with its own session name', async () => {
       const other = new InstanceService(repository, engine, {
-        baseImage: 'claudops-base',
         instanceEnv,
         projects,
         tmuxSession: 'claude',
@@ -365,7 +397,7 @@ describe('InstanceService', () => {
       repository.insert({
         id: 'id-orphan',
         name: 'half-created',
-        image: 'claudops-base',
+        image: 'claudops-project-gone',
         projectId: null,
         repoUrl: null,
         repoBranch: null,

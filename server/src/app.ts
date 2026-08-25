@@ -14,8 +14,14 @@ import {
 import { instanceRoutes } from './instances/routes.ts';
 import { InstanceService } from './instances/service.ts';
 import { ProjectRepository } from './db/projects.ts';
+import {
+  defaultProjectContext,
+  ProjectImageBuilder,
+  type ProjectImages,
+} from './projects/images.ts';
 import { projectRoutes } from './projects/routes.ts';
 import {
+  ProjectImageNotReadyError,
   ProjectInUseError,
   ProjectNameTakenError,
   ProjectNotFoundError,
@@ -53,10 +59,23 @@ function asHttpError(error: unknown): HttpError {
  *  cap keeps a rogue client from making the server buffer without bound. */
 const MAX_WS_PAYLOAD = 1024 * 1024;
 
+/** Mirrors the config default; buildApp is also called without a full config. */
+const DEFAULT_DOTNET_CHANNEL = '10.0';
+
 export interface AppOptions {
   db: Database;
   engine: DockerEngine;
+  /** What a project image is built `FROM`. Instances start from their project's
+   *  image, which this server builds. */
   baseImage: string;
+  /** Directory holding the project template Dockerfile. Defaults to
+   *  `docker/project` next to this package. */
+  projectContext?: string | undefined;
+  /** Channel for the dotnet building block. */
+  dotnetChannel?: string | undefined;
+  /** Only the tests replace this, to keep real image builds out of a unit
+   *  test. */
+  images?: ProjectImages | undefined;
   instanceEnv: InstanceEnvConfig;
   /** Encrypts the project PATs. Left out, the server runs but refuses to store
    *  one -- the same behaviour as a missing CLAUDOPS_SECRET_KEY. */
@@ -87,12 +106,31 @@ export function buildApp(options: AppOptions): FastifyInstance {
     },
   });
 
-  const projects = new ProjectService(new ProjectRepository(options.db), {
+  const projectRepository = new ProjectRepository(options.db);
+  const projects = new ProjectService(projectRepository, {
     cipher: options.cipher ?? createCipher(undefined),
   });
 
+  // Built here rather than handed in, because the logger it reports through is
+  // this app's. A test can still pass its own.
+  const images =
+    options.images ??
+    new ProjectImageBuilder(projects, projectRepository, options.engine, {
+      contextDir: options.projectContext ?? defaultProjectContext(),
+      baseImage: options.baseImage,
+      dotnetChannel: options.dotnetChannel ?? DEFAULT_DOTNET_CHANNEL,
+      logger: app.log,
+    });
+
+  // What a restart interrupted, and what an upgrade left behind: a project from
+  // before project images has no image yet. In `onReady` rather than here, so
+  // nothing is queued for an app that never starts listening.
+  app.addHook('onReady', (done) => {
+    images.resumePending();
+    done();
+  });
+
   const service = new InstanceService(new InstanceRepository(options.db), options.engine, {
-    baseImage: options.baseImage,
     instanceEnv: options.instanceEnv,
     projects,
     tmuxSession: options.tmuxSession,
@@ -111,6 +149,13 @@ export function buildApp(options: AppOptions): FastifyInstance {
     // reading as a base image that was never built.
     if (error instanceof ProjectNotFoundError) {
       return reply.code(422).send({ error: 'project_not_found', message: error.message });
+    }
+    // 422, the same reading as a base image that was never built: the request
+    // was understood, the environment it needs does not exist yet.
+    if (error instanceof ProjectImageNotReadyError) {
+      return reply
+        .code(422)
+        .send({ error: 'project_image_not_ready', message: error.message, status: error.status });
     }
     if (error instanceof ProjectInUseError) {
       return reply.code(409).send({ error: 'project_in_use', message: error.message });
@@ -166,7 +211,7 @@ export function buildApp(options: AppOptions): FastifyInstance {
   // the upgrade handling and `ws`, the bridge in src/terminal does the piping.
   void app.register(websocketPlugin, { options: { maxPayload: MAX_WS_PAYLOAD } });
 
-  void app.register(projectRoutes, { service: projects });
+  void app.register(projectRoutes, { service: projects, images });
   void app.register(instanceRoutes, { service });
   void app.register(terminalRoutes, { service, bridge: options.terminalBridge });
 

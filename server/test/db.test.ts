@@ -56,7 +56,30 @@ describe('migrations', () => {
       'git_token',
       'created_at',
       'updated_at',
+      // Migration 3, appended: the image state.
+      'image_status',
+      'image_log',
+      'image_built_at',
     ]);
+  });
+
+  it('leaves a project from before project images needing a build', () => {
+    const db = new Database(':memory:');
+    // Stop one short of the current schema and write a project the old way, so
+    // this is a real upgrade rather than a fresh file.
+    migrate(db);
+    db.prepare(
+      `INSERT INTO projects
+         (id, name, repo_url, repo_branch, block_dotnet, block_playwright,
+          git_token, created_at, updated_at)
+       VALUES ('old', 'legacy', 'https://host/x.git', NULL, 0, 0, NULL, 'then', 'then')`,
+    ).run();
+
+    expect(new ProjectRepository(db).get('old')?.image).toEqual({
+      status: 'pending',
+      log: null,
+      builtAt: null,
+    });
   });
 });
 
@@ -66,7 +89,7 @@ describe('InstanceRepository', () => {
   const newInstance = {
     id: 'abc123',
     name: 'demo',
-    image: 'claudops-base',
+    image: 'claudops-project-p1',
     projectId: null,
     repoUrl: 'https://github.com/dominikz98/claudops.git',
     repoBranch: 'main',
@@ -139,6 +162,7 @@ describe('ProjectRepository', () => {
     repoBranch: 'main',
     buildingBlocks: { dotnet: true, playwright: false },
     sealedGitToken: 'v1:sealed-blob',
+    image: { status: 'pending', log: null, builtAt: null },
     createdAt: '2026-08-25T08:00:00.000Z',
     updatedAt: '2026-08-25T08:00:00.000Z',
   };
@@ -222,13 +246,69 @@ describe('ProjectRepository', () => {
     expect(projects.delete('proj-1')).toBe(false);
   });
 
+  describe('the image state', () => {
+    beforeEach(() => {
+      projects.insert(newProject);
+    });
+
+    it('records a finished build without touching updatedAt', () => {
+      projects.setImageState('proj-1', 'ready', 'the log', '2026-08-25T09:00:00.000Z');
+
+      expect(projects.get('proj-1')).toMatchObject({
+        image: { status: 'ready', log: 'the log', builtAt: '2026-08-25T09:00:00.000Z' },
+        // A build is the server talking to itself; it is not an edit of the
+        // project, so this stays where the last real change left it.
+        updatedAt: '2026-08-25T08:00:00.000Z',
+      });
+    });
+
+    it('keeps the previous builtAt when a rebuild fails', () => {
+      projects.setImageState('proj-1', 'ready', '', '2026-08-25T09:00:00.000Z');
+      projects.setImageState('proj-1', 'failed', 'the reason');
+
+      expect(projects.get('proj-1')?.image).toEqual({
+        status: 'failed',
+        log: 'the reason',
+        builtAt: '2026-08-25T09:00:00.000Z',
+      });
+    });
+
+    it('reports whether the row was there', () => {
+      expect(projects.setImageState('proj-1', 'building', null)).toBe(true);
+      expect(projects.setImageState('nope', 'building', null)).toBe(false);
+    });
+
+    it('drops the log when a changed environment invalidates the image', () => {
+      projects.setImageState('proj-1', 'ready', 'output of the old image');
+
+      projects.update('proj-1', {
+        buildingBlocks: { dotnet: true, playwright: true },
+        imageStatus: 'pending',
+        updatedAt: '2026-08-25T10:00:00.000Z',
+      });
+
+      expect(projects.get('proj-1')?.image).toMatchObject({ status: 'pending', log: null });
+    });
+
+    it('finds the projects waiting for a build, oldest first', () => {
+      projects.insert({ ...newProject, id: 'proj-2', name: 'later', createdAt: 'z' });
+      projects.insert({ ...newProject, id: 'proj-3', name: 'done' });
+      projects.setImageState('proj-3', 'ready', '');
+      projects.setImageState('proj-1', 'building', null);
+
+      expect(projects.idsWithImageStatus('pending')).toEqual(['proj-2']);
+      expect(projects.idsWithImageStatus('pending', 'building')).toEqual(['proj-1', 'proj-2']);
+      expect(projects.idsWithImageStatus()).toEqual([]);
+    });
+  });
+
   describe('instance counts', () => {
     let instances: InstanceRepository;
 
     const instanceOf = (id: string, projectId: string | null) => ({
       id,
       name: id,
-      image: 'claudops-base',
+      image: 'claudops-project-x',
       projectId,
       repoUrl: null,
       repoBranch: null,
@@ -273,7 +353,7 @@ describe('ProjectRepository', () => {
     new InstanceRepository(db).insert({
       id: 'i1',
       name: 'demo',
-      image: 'claudops-base',
+      image: 'claudops-project-proj-1',
       projectId: 'proj-1',
       repoUrl: null,
       repoBranch: null,

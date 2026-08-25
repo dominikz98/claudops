@@ -28,3 +28,23 @@ export function instanceIdFromLabels(
 export function containerName(instanceId: string): string {
   return `claudops-${instanceId}`;
 }
+
+/**
+ * Project images carry `claudops.project=<id>`. Same reasoning as the instance
+ * label one level up: without it an image left behind by a deleted project is
+ * indistinguishable from one somebody built by hand.
+ */
+export const PROJECT_LABEL = 'claudops.project';
+
+export function projectLabels(projectId: string): Record<string, string> {
+  return { [PROJECT_LABEL]: projectId };
+}
+
+/** Filter for "every image claudops built for a project". */
+export const projectImageFilter = { label: [PROJECT_LABEL] };
+
+/** Tag of a project's image. Keyed on the id rather than the name, so renaming
+ *  a project does not orphan its image. */
+export function projectImageTag(projectId: string): string {
+  return `claudops-project-${projectId}`;
+}

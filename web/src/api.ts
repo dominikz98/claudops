@@ -30,10 +30,30 @@ export interface CreateInstanceInput {
   projectId: string;
 }
 
-/** The optional layers a project image gets in #7. Stored today, built there. */
+/** The optional layers a project image is built with. */
 export interface BuildingBlocks {
   dotnet: boolean;
   playwright: boolean;
+}
+
+/** Where the project's image stands. `ready` is the only state an instance can
+ *  be created from -- the environment is prebuilt, so there is nothing to fall
+ *  back to. */
+export type ImageStatus = 'pending' | 'building' | 'ready' | 'failed';
+
+export interface ProjectImage {
+  /** The tag, whether or not it exists yet. */
+  tag: string;
+  status: ImageStatus;
+  builtAt: string | null;
+}
+
+/** `GET /projects/:id/build-log`. Its own request because a build log runs to
+ *  tens of kilobytes and the project list asks for all of them at once. */
+export interface BuildLog {
+  status: ImageStatus;
+  builtAt: string | null;
+  log: string;
 }
 
 /** `ProjectView` in server/src/projects/service.ts. The PAT appears only as
@@ -44,6 +64,7 @@ export interface Project {
   repoUrl: string;
   repoBranch: string | null;
   buildingBlocks: BuildingBlocks;
+  image: ProjectImage;
   hasGitToken: boolean;
   instanceCount: number;
   createdAt: string;
@@ -90,6 +111,10 @@ export interface Api {
   createProject(input: CreateProjectInput): Promise<Project>;
   updateProject(id: string, input: UpdateProjectInput): Promise<Project>;
   removeProject(id: string): Promise<void>;
+  /** Asks for a rebuild. Answers before the build has run -- watch
+   *  `image.status`. */
+  buildProject(id: string): Promise<Project>;
+  projectBuildLog(id: string): Promise<BuildLog>;
 }
 
 interface ErrorBody {
@@ -191,6 +216,15 @@ export function createApi(fetchImpl: typeof fetch = globalThis.fetch.bind(global
 
     removeProject(id: string): Promise<void> {
       return remove(`/projects/${encodeURIComponent(id)}`);
+    },
+
+    buildProject(id: string): Promise<Project> {
+      // 202: the server took the request, the build happens afterwards.
+      return request<Project>(`/projects/${encodeURIComponent(id)}/build`, { method: 'POST' });
+    },
+
+    projectBuildLog(id: string): Promise<BuildLog> {
+      return request<BuildLog>(`/projects/${encodeURIComponent(id)}/build-log`);
     },
   };
 }

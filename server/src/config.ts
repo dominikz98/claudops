@@ -1,4 +1,5 @@
 import { resolve } from 'node:path';
+import { defaultProjectContext } from './projects/images.ts';
 import { createCipher, parseSecretKey, type SecretCipher } from './secrets/cipher.ts';
 
 /**
@@ -21,8 +22,13 @@ export interface ServerConfig {
   port: number;
   logLevel: string;
   databaseFile: string;
-  /** Image instances are started from. #7 replaces this per project. */
+  /** What a project image is built `FROM`. Instances themselves start from
+   *  their project's image, never from this one. */
   baseImage: string;
+  /** Directory holding the project template Dockerfile. */
+  projectContext: string;
+  /** Channel dotnet-install.sh gets for the dotnet building block. */
+  dotnetChannel: string;
   /** Directory the built web UI is served from. */
   webRoot: string;
   /** The tmux session the terminal bridge attaches to. Matches TMUX_SESSION in
@@ -45,6 +51,10 @@ export interface ServerConfig {
 export class ConfigError extends Error {}
 
 const DEFAULT_PORT = 8080;
+
+/** Current LTS. A project that needs another one is a `CLAUDOPS_DOTNET_CHANNEL`
+ *  away, so this is a default rather than a decision. */
+const DEFAULT_DOTNET_CHANNEL = '10.0';
 
 /**
  * Where `@claudops/web` puts its build. Resolved from this module's own
@@ -109,6 +119,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     logLevel: optional(env, 'CLAUDOPS_LOG_LEVEL') ?? 'info',
     databaseFile: optional(env, 'CLAUDOPS_DB') ?? 'data/claudops.db',
     baseImage: optional(env, 'CLAUDOPS_BASE_IMAGE') ?? 'claudops-base',
+    projectContext: optional(env, 'CLAUDOPS_PROJECT_CONTEXT') ?? defaultProjectContext(),
+    dotnetChannel: optional(env, 'CLAUDOPS_DOTNET_CHANNEL') ?? DEFAULT_DOTNET_CHANNEL,
     webRoot: optional(env, 'CLAUDOPS_WEB_ROOT') ?? defaultWebRoot(),
     tmuxSession: optional(env, 'CLAUDOPS_TMUX_SESSION') ?? 'main',
     dockerSocket,
