@@ -36,7 +36,7 @@ logs a warning and serves the API only.
 | Route | Page |
 | --- | --- |
 | `#/` | Instance list: create from a project, status, delete. Polls `GET /instances` every 3 s. |
-| `#/projects` | Projects: create, edit, delete the templates instances come from. No polling. |
+| `#/projects` | Projects: create, edit, delete the templates instances come from, and watch their images being built. Polls only while a build is running. |
 | `#/i/<id>` | The console of one instance, over `GET /instances/<id>/terminal`. |
 
 Routes live in the hash on purpose: `/instances/<id>` and `/projects` are already
@@ -47,9 +47,20 @@ because a delete takes the container and everything uncommitted in it. A project
 whose instances still exist cannot be deleted at all; the banner shows what the
 server said.
 
-The instance form is a name and a project picker: repository, branch and
-credential belong to the project. With no projects yet the picker says so and
-links to the other page.
+The instance form is a name and a project picker: repository, branch, credential
+and environment belong to the project. A project whose image is not `ready` is
+offered but disabled, with its state in the option text -- the server would answer
+`422`, and reading why in the picker beats reading it in a banner. With no usable
+project the Create button is off and the hint below says which of the two problems
+it is.
+
+The projects page shows each project's image as a badge -- `queued`, `building`,
+`ready`, `failed` -- with **Rebuild** and **Build log** next to it; the log opens
+in a row of its own, fetched from `GET /projects/:id/build-log` rather than carried
+in the list, because it runs to tens of kilobytes. This page deliberately does not
+poll, since nothing but this page changes a project -- except while an image is
+being built, which is the server changing it, so then it refreshes every two
+seconds and stops again when the last build is done.
 
 The git token field is a password input on the projects page, is never sent back
 by the server, and is left empty when a project is opened for editing -- an empty
@@ -77,7 +88,7 @@ src/router.ts             hash routes
 src/api.ts                the REST client, with an injectable fetch
 src/terminal/session.ts   the WebSocket: frames, close codes, geometry
 src/views/list.ts         instance list and create form
-src/views/projects.ts     projects: form, edit mode, table
+src/views/projects.ts     projects: form, edit mode, table, image state and build log
 src/views/console.ts      xterm.js, fit addon, status line
 src/dom.ts                the three lines of DOM plumbing the views share
 ```

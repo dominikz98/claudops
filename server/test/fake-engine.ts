@@ -8,6 +8,7 @@ import {
   type ContainerSpec,
   type ContainerSummary,
   type DockerEngine,
+  type ImageBuildSpec,
   type TerminalSession,
   type TerminalSize,
 } from '../src/docker/engine.ts';
@@ -99,6 +100,18 @@ export class FakeDockerEngine implements DockerEngine {
   failNextRun: Error | undefined;
   /** Set to make the next attachTerminal fail with exactly this error. */
   failNextAttach: Error | undefined;
+  /** Set to make the next buildImage fail with exactly this error. */
+  failNextBuild: Error | undefined;
+  /** Every build that was asked for, in order -- the tags, args and labels a
+   *  test asserts on. */
+  readonly builds: ImageBuildSpec[] = [];
+  /** Tags handed to removeImage. */
+  readonly removedImages: string[] = [];
+  /** What a build "prints". Enough to tell a stored log from an empty one. */
+  buildOutput = ['Step 1/1 : FROM claudops-base\n', 'Successfully tagged\n'];
+  /** Keeps a build running long enough to observe the `building` state, which a
+   *  real dotnet or Playwright build occupies for minutes. */
+  buildDelayMs = 0;
   /** Widens the window between the upgrade and the attach, where a client that
    *  sends immediately would lose its frames. */
   attachDelayMs = 0;
@@ -171,6 +184,36 @@ export class FakeDockerEngine implements DockerEngine {
     const session = new FakeTerminalSession(containerId, options);
     this.terminals.push(session);
     return Promise.resolve(session);
+  }
+
+  async buildImage(spec: ImageBuildSpec, onLog: (chunk: string) => void): Promise<void> {
+    this.guard();
+    this.builds.push(spec);
+
+    // Output before the failure, like the real one: a build that breaks halfway
+    // still has a log worth keeping.
+    for (const chunk of this.buildOutput) onLog(chunk);
+
+    if (this.buildDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, this.buildDelayMs));
+    }
+
+    if (this.failNextBuild !== undefined) {
+      const error = this.failNextBuild;
+      this.failNextBuild = undefined;
+      throw error;
+    }
+
+    // What makes the next runContainer find it.
+    this.knownImages.add(spec.tag);
+    return Promise.resolve();
+  }
+
+  async removeImage(tag: string): Promise<void> {
+    this.guard();
+    this.removedImages.push(tag);
+    this.knownImages.delete(tag);
+    return Promise.resolve();
   }
 
   /** Test helpers -------------------------------------------------------- */

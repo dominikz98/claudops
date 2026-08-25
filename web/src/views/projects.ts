@@ -2,21 +2,40 @@
  * Projects: the templates instances are created from -- repository, branch,
  * environment building blocks and the PAT for a private repository.
  *
- * No polling here, unlike the instance list: a project changes only when
- * somebody on this page changes it, and a poll would fight the form for the
- * fields being typed into. The PAT is write-only -- the server answers with
- * `hasGitToken` and never with the value, so this page can show that one is
- * stored but never what it is.
+ * Mostly unpolled, unlike the instance list: a project changes when somebody on
+ * this page changes it, and a poll would fight the form for the fields being
+ * typed into. The exception is a running image build -- that one is the server
+ * changing the project, so the page refreshes while any build is in flight and
+ * stops again once they are all done.
+ *
+ * The PAT is write-only: the server answers with `hasGitToken` and never with
+ * the value, so this page can show that one is stored but never what it is.
  */
 
-import { ApiCallError, type Api, type BuildingBlocks, type Project } from '../api.ts';
+import {
+  ApiCallError,
+  type Api,
+  type BuildingBlocks,
+  type ImageStatus,
+  type Project,
+} from '../api.ts';
 import { clear, el } from '../dom.ts';
 import { routeHash } from '../router.ts';
 import type { View } from './view.ts';
 
+/** How often the list is re-read while an image is being built. Slower than the
+ *  instance list: a build takes minutes, not seconds. */
+const BUILD_POLL_MS = 2000;
+
 function describe(error: unknown): string {
   if (error instanceof ApiCallError) return `${error.code}: ${error.message}`;
   return error instanceof Error ? error.message : String(error);
+}
+
+/** What the badge says. `pending` is a build that has been asked for but has
+ *  not started, which reads the same way from here. */
+function imageLabel(status: ImageStatus): string {
+  return status === 'pending' ? 'queued' : status;
 }
 
 interface Field {
@@ -30,6 +49,11 @@ export function mountProjects(root: HTMLElement, api: Api): View {
   let editing: Project | undefined;
   /** The id whose delete button is currently asking "are you sure". */
   let confirming: string | undefined;
+  /** The project whose build log is open, and the log itself once it arrives. */
+  let showingLog: string | undefined;
+  let logText = '';
+  /** Set while a build is in flight, cleared as soon as none is. */
+  let poll: ReturnType<typeof setTimeout> | undefined;
   let destroyed = false;
 
   const banner = el('p', { class: 'banner', hidden: 'hidden', 'data-testid': 'banner' });
@@ -93,7 +117,7 @@ export function mountProjects(root: HTMLElement, api: Api): View {
     el(
       'fieldset',
       { class: 'blocks' },
-      el('legend', {}, 'Environment (built with #7)'),
+      el('legend', {}, 'Environment'),
       dotnet.wrapper,
       playwright.wrapper,
     ),
@@ -150,16 +174,72 @@ export function mountProjects(root: HTMLElement, api: Api): View {
     name.input.focus();
   };
 
-  const refresh = async (): Promise<void> => {
+  /** Keeps the timer running exactly as long as something is being built. */
+  const scheduleWhileBuilding = (): void => {
+    const building = projects.some(
+      (project) => project.image.status === 'building' || project.image.status === 'pending',
+    );
+
+    if (!building || destroyed) {
+      if (poll !== undefined) clearTimeout(poll);
+      poll = undefined;
+      return;
+    }
+    if (poll !== undefined) return;
+
+    poll = setTimeout(() => {
+      poll = undefined;
+      void refresh();
+    }, BUILD_POLL_MS);
+  };
+
+  async function refresh(): Promise<void> {
     try {
       projects = await api.listProjects();
       if (destroyed) return;
       clearError();
       renderRows();
+      scheduleWhileBuilding();
     } catch (error) {
       if (destroyed) return;
       showError(error);
     }
+  }
+
+  const rebuild = async (id: string): Promise<void> => {
+    try {
+      await api.buildProject(id);
+      clearError();
+    } catch (error) {
+      showError(error);
+    }
+    await refresh();
+  };
+
+  const toggleLog = async (id: string): Promise<void> => {
+    if (showingLog === id) {
+      showingLog = undefined;
+      logText = '';
+      renderRows();
+      return;
+    }
+
+    showingLog = id;
+    logText = 'loading…';
+    renderRows();
+
+    try {
+      const { log } = await api.projectBuildLog(id);
+      if (destroyed || showingLog !== id) return;
+      // A build that never ran has no log; saying so beats an empty box.
+      logText = log === '' ? 'No build output yet.' : log;
+      clearError();
+    } catch (error) {
+      if (destroyed) return;
+      logText = '';
+      showError(error);
+    }
+    renderRows();
   };
 
   const save = async (): Promise<void> => {
@@ -234,7 +314,7 @@ export function mountProjects(root: HTMLElement, api: Api): View {
         el(
           'tr',
           { 'data-testid': 'empty' },
-          el('td', { colspan: '7' }, 'No projects yet. Create one above.'),
+          el('td', { colspan: '8' }, 'No projects yet. Create one above.'),
         ),
       );
       return;
@@ -268,6 +348,24 @@ export function mountProjects(root: HTMLElement, api: Api): View {
         void deleteProject(project.id);
       });
 
+      const status = project.image.status;
+
+      const rebuildButton = el(
+        'button',
+        { type: 'button', class: 'secondary', 'data-testid': 'rebuild' },
+        status === 'building' ? 'Building…' : 'Rebuild',
+      );
+      // A second request during a build would only be queued behind the first.
+      if (status === 'building') rebuildButton.setAttribute('disabled', 'disabled');
+      rebuildButton.addEventListener('click', () => void rebuild(project.id));
+
+      const logButton = el(
+        'button',
+        { type: 'button', class: 'secondary', 'data-testid': 'build-log' },
+        showingLog === project.id ? 'Hide log' : 'Build log',
+      );
+      logButton.addEventListener('click', () => void toggleLog(project.id));
+
       const chosen = [
         project.buildingBlocks.dotnet ? 'dotnet' : undefined,
         project.buildingBlocks.playwright ? 'playwright' : undefined,
@@ -283,13 +381,34 @@ export function mountProjects(root: HTMLElement, api: Api): View {
           el('td', {}, chosen.length === 0 ? '--' : chosen.join(', ')),
           el(
             'td',
+            {},
+            el(
+              'span',
+              { class: `badge ${status}`, 'data-testid': 'image-status', title: project.image.tag },
+              imageLabel(status),
+            ),
+          ),
+          el(
+            'td',
             { 'data-testid': 'project-token' },
             project.hasGitToken ? 'stored' : '--',
           ),
           el('td', { 'data-testid': 'project-instances' }, String(project.instanceCount)),
-          el('td', { class: 'actions' }, edit, remove),
+          el('td', { class: 'actions' }, edit, rebuildButton, logButton, remove),
         ),
       );
+
+      // Its own row rather than a cell: a build log is wide and the table is
+      // not, and this keeps the columns from being pushed around by it.
+      if (showingLog === project.id) {
+        rows.append(
+          el(
+            'tr',
+            { class: 'log-row', 'data-testid': 'log-row' },
+            el('td', { colspan: '8' }, el('pre', { 'data-testid': 'log' }, logText)),
+          ),
+        );
+      }
     }
   }
 
@@ -328,6 +447,7 @@ export function mountProjects(root: HTMLElement, api: Api): View {
           el('th', {}, 'Repository'),
           el('th', {}, 'Branch'),
           el('th', {}, 'Environment'),
+          el('th', {}, 'Image'),
           el('th', {}, 'Token'),
           el('th', {}, 'Instances'),
           el('th', {}, ''),
@@ -343,6 +463,8 @@ export function mountProjects(root: HTMLElement, api: Api): View {
   return {
     destroy: () => {
       destroyed = true;
+      if (poll !== undefined) clearTimeout(poll);
+      poll = undefined;
     },
   };
 }

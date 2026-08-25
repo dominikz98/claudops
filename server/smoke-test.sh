@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
-# Smoke test for claudops-server: checks the acceptance criteria from issues #3
-# and #6 against a real Docker daemon and a real server process.
+# Smoke test for claudops-server: checks the acceptance criteria from issues #3,
+# #6 and #7 against a real Docker daemon and a real server process.
 #
 #   ./server/smoke-test.sh              # builds base image + server, then tests
 #   SKIP_BUILD=1 ./server/smoke-test.sh # uses what is already built
+#   FULL_IMAGE=1 ./server/smoke-test.sh # builds the real docker/project template
+#
+# Project images are built from docker/project-stub by default: this script is
+# about the server, and a real dotnet SDK would add minutes to every run without
+# telling it anything new. FULL_IMAGE=1 points it at docker/project instead,
+# which is what proves the toolchain arrives in an actual instance.
 #
 # Requires: docker, node, curl, and network access -- one instance really clones
 # the public claudops repository. A CLAUDE_CODE_OAUTH_TOKEN is passed through if
@@ -27,6 +33,29 @@ PUBLIC_REPO="https://github.com/dominikz98/claudops.git"
 # the server's environment without a thought.
 SECRET_KEY="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))')"
 
+if [[ -n "${FULL_IMAGE:-}" ]]; then
+  PROJECT_CONTEXT="$REPO_ROOT/docker/project"
+else
+  PROJECT_CONTEXT="$REPO_ROOT/docker/project-stub"
+fi
+PROJECT_CONTEXT_NATIVE="$(native "$PROJECT_CONTEXT")"
+# How long an image build may take before the test gives up on it.
+BUILD_TIMEOUT="${BUILD_TIMEOUT:-$([[ -n "${FULL_IMAGE:-}" ]] && echo 900 || echo 120)}"
+
+# wait_for_image <project-id> <wanted-status> -- polls until the build settles.
+# Builds are asynchronous by design: POST /projects answers `pending` and the
+# image appears later, so everything after a create has to wait here.
+wait_for_image() {
+  local id="$1" wanted="$2" seen _
+  for _ in $(seq 1 "$BUILD_TIMEOUT"); do
+    seen="$(json image.status <<<"$(body_of GET "/projects/$id")")"
+    [[ "$seen" == "$wanted" ]] && return 0
+    sleep 1
+  done
+  printf 'last seen: %s\n' "${seen:-<none>}" >&2
+  return 1
+}
+
 trap smoke_cleanup EXIT
 
 # ----------------------------------------------------------------------- build
@@ -39,6 +68,7 @@ fi
 info "Starting server on port $PORT"
 start_server "$PORT" "$DB_FILE_NATIVE" "$SERVER_LOG" \
   "CLAUDOPS_BASE_IMAGE=$IMAGE" \
+  "CLAUDOPS_PROJECT_CONTEXT=$PROJECT_CONTEXT_NATIVE" \
   "CLAUDOPS_SECRET_KEY=$SECRET_KEY" \
   'CLAUDOPS_GIT_USER_NAME=claudops' \
   'CLAUDOPS_GIT_USER_EMAIL=claudops@example.invalid'
@@ -92,6 +122,59 @@ fi
 check "The PAT is not in the server log" "0" \
   "$(grep -c "$GIT_TOKEN_PROBE" "$SERVER_LOG" | tr -d '\r')"
 
+# ------------------------------------------ #7: the project gets its own image
+info "#7: the project's image is built and reported"
+check "A fresh project reports an image that is not built yet" "pending" \
+  "$(json image.status <<<"$project_json")"
+check "The tag is derived from the project id" "claudops-project-$project_id" \
+  "$(json image.tag <<<"$project_json")"
+check "Instance creation is refused until the image exists" "422" \
+  "$(status_of POST /instances "{\"name\":\"too-early\",\"projectId\":\"$project_id\"}")"
+
+if wait_for_image "$project_id" ready; then
+  ok "The image became ready"
+else
+  bad "The image never became ready -- build log:"
+  json log <<<"$(body_of GET "/projects/$project_id/build-log")" | tail -20 | sed 's/^/        /'
+  exit 1
+fi
+
+project_json="$(body_of GET "/projects/$project_id")"
+check "builtAt is recorded" "0" "$([[ -n "$(json image.builtAt <<<"$project_json")" ]]; echo $?)"
+check "Docker has the tagged image" "1" \
+  "$(docker images -q "claudops-project-$project_id" | grep -c . | tr -d '\r')"
+check "The image carries the project label" "$project_id" \
+  "$(docker inspect -f '{{index .Config.Labels "claudops.project"}}' \
+      "claudops-project-$project_id" 2>/dev/null | tr -d '\r')"
+
+build_log="$(json log <<<"$(body_of GET "/projects/$project_id/build-log")")"
+contains "The build log was kept" "FROM" "$build_log"
+check "The log is not carried in the project itself" "0" \
+  "$(grep -c 'FROM' <<<"$project_json" | tr -d '\r')"
+
+info "#7: a rebuild without changes comes off the layer cache"
+rebuild_started=$(date +%s)
+check "POST /projects/:id/build answers 202" "202" "$(status_of POST "/projects/$project_id/build")"
+if wait_for_image "$project_id" ready; then
+  rebuild_took=$(( $(date +%s) - rebuild_started ))
+  if [[ "$rebuild_took" -le 60 ]]; then
+    ok "Rebuild finished in ${rebuild_took}s"
+  else
+    bad "Rebuild took ${rebuild_took}s -- the layer cache was missed"
+  fi
+else
+  bad "The rebuild never finished"
+fi
+
+info "#7: a PATCH that leaves the environment alone does not rebuild"
+before="$(json image.builtAt <<<"$(body_of GET "/projects/$project_id")")"
+check "PATCH of the name answers 200" "200" \
+  "$(status_of PATCH "/projects/$project_id" '{"name":"smoke-renamed"}')"
+check "The image stayed ready" "ready" \
+  "$(json image.status <<<"$(body_of GET "/projects/$project_id")")"
+check "It was not rebuilt" "$before" \
+  "$(json image.builtAt <<<"$(body_of GET "/projects/$project_id")")"
+
 # ------------------------------------------- AC 1: POST starts a real container
 info "AC 1: creating an instance from the project results in a running container"
 created="$(api POST /instances "{\"name\":\"smoke\",\"projectId\":\"$project_id\"}")"
@@ -114,7 +197,7 @@ check "Container carries claudops.instance=<id>" "$instance_id" \
   "$(docker inspect -f "{{index .Config.Labels \"claudops.instance\"}}" "$container_id" 2>/dev/null | tr -d '\r')"
 check "Container is named after the instance" "/claudops-$instance_id" \
   "$(docker inspect -f '{{.Name}}' "$container_id" 2>/dev/null | tr -d '\r')"
-check "Container runs the configured base image" "$IMAGE" \
+check "Container runs the project image, not the base one" "claudops-project-$project_id" \
   "$(docker inspect -f '{{.Config.Image}}' "$container_id" 2>/dev/null | tr -d '\r')"
 check "Instance points back at its project" "$project_id" "$(json projectId <<<"$instance_json")"
 check "Instance snapshots the branch of the project" "main" \
@@ -144,6 +227,25 @@ check "Token still not readable on disk" "0" \
 check "Token still not in the server log" "0" \
   "$(grep -c "$GIT_TOKEN_PROBE" "$SERVER_LOG" | tr -d '\r')"
 
+
+info "#7 AC 1: the environment of the project is inside the instance"
+if [[ -n "${FULL_IMAGE:-}" ]]; then
+  # The real template: the dotnet block was ticked on this project, so the SDK
+  # has to answer inside the running instance.
+  dotnet_in_instance="$(docker exec "$container_id" dotnet --version 2>&1 | tr -d '\r')"
+  if [[ "$dotnet_in_instance" == [0-9]* ]]; then
+    ok "dotnet --version in the instance reports $dotnet_in_instance"
+  else
+    bad "dotnet is not usable in the instance ($dotnet_in_instance)"
+  fi
+else
+  # The stub writes the args it was built with, which is what proves the
+  # building blocks of the project reached the build at all.
+  check "The building blocks reached the build as args" "dotnet=1 playwright=0 channel=10.0" \
+    "$(docker exec "$container_id" cat /tmp/claudops-blocks 2>/dev/null | tr -d '\r')"
+  printf '  %s\n' "(FULL_IMAGE=1 checks a real dotnet SDK in the instance instead)"
+fi
+
 # ------------------------------------ AC 1 continued: the clone really happens
 # A second project, without a PAT: the public repository refuses invalid
 # credentials, so the token probe above and a real clone cannot be the same
@@ -151,6 +253,11 @@ check "Token still not in the server log" "0" \
 info "AC 1: an instance of a public project clones the configured repo and branch"
 clone_project="$(json id <<<"$(body_of POST /projects \
   "{\"name\":\"smoke-public\",\"repoUrl\":\"$PUBLIC_REPO\",\"repoBranch\":\"main\"}")")"
+# Its image first: a project has none until the build has run, and every
+# instance starts from one.
+if ! wait_for_image "$clone_project" ready; then
+  bad "The image of the public project never became ready"
+fi
 clone_instance="$(body_of POST /instances "{\"name\":\"smoke-clone\",\"projectId\":\"$clone_project\"}")"
 clone_id="$(json id <<<"$clone_instance")"
 clone_container="$(json containerId <<<"$clone_instance")"
@@ -231,14 +338,15 @@ duplicate='{"name":"twice","repoUrl":"https://host/r.git"}'
 check "First one is created" "201" "$(status_of POST /projects "$duplicate")"
 check "Second one is a conflict" "409" "$(status_of POST /projects "$duplicate")"
 
-# A second server, without an image and without a secret key, is the only way to
-# see both a real Docker 404 and the keyless behaviour -- the unit tests can only
-# fake them.
-info "A missing base image is reported as 422, and a missing key refuses the PAT"
+# A second server, whose base image does not exist, is the only way to see a
+# build that really fails -- the unit tests can only fake one. It has no secret
+# key either, which is the other thing that cannot be faked from in-process.
+info "#7 AC 3: a failed build is visible on the project and blocks instance start"
 second_port=$((PORT + 1))
 second_base="http://127.0.0.1:$second_port"
 start_server "$second_port" "$WORK_DIR_NATIVE/no-image.db" "$WORK_DIR/no-image.log" \
-  'CLAUDOPS_BASE_IMAGE=claudops-does-not-exist:0'
+  'CLAUDOPS_BASE_IMAGE=claudops-does-not-exist:0' \
+  "CLAUDOPS_PROJECT_CONTEXT=$PROJECT_CONTEXT_NATIVE"
 wait_for_health "$second_base"
 
 BASE="$second_base"
@@ -251,10 +359,29 @@ check "A project without a PAT is still created" "201" \
 
 no_image_project="$(json id <<<"$(body_of POST /projects \
   '{"name":"no-image","repoUrl":"https://host/r.git"}')")"
-check "POST against a missing image answers 422" "422" \
-  "$(status_of POST /instances "{\"name\":\"no-image\",\"projectId\":\"$no_image_project\"}")"
+
+if wait_for_image "$no_image_project" failed; then
+  ok "The project reports its build as failed"
+else
+  bad "The build of a project on a missing base image did not end up as failed"
+fi
+
+failed_log="$(body_of GET "/projects/$no_image_project/build-log")"
+check "The failure is readable through the API" "failed" "$(json status <<<"$failed_log")"
+if [[ -n "$(json log <<<"$failed_log")" ]]; then
+  ok "The build log says what happened"
+else
+  bad "The failed build kept no log"
+fi
+
+refused="$(api POST /instances "{\"name\":\"no-image\",\"projectId\":\"$no_image_project\"}")"
+check "POST /instances against a failed image answers 422" "422" "$(head -1 <<<"$refused")"
+check "The refusal names the image, not the project" "project_image_not_ready" \
+  "$(json error <<<"$(tail -n +2 <<<"$refused")")"
 check "No instance was recorded for the failed create" "" \
   "$(json instances.0.id <<<"$(body_of GET /instances)")"
+check "An explicit rebuild is accepted and fails again" "202" \
+  "$(status_of POST "/projects/$no_image_project/build")"
 BASE="http://127.0.0.1:$PORT"
 
 check "Server survived the whole run" "0" "$(kill -0 "$server_pid" 2>/dev/null; echo $?)"

@@ -34,7 +34,9 @@ docker build -t claudops-base docker/base
 | `GET` | `/projects` | All projects, each with `hasGitToken` and `instanceCount`. |
 | `GET` | `/projects/:id` | One project. `404` if unknown. |
 | `PATCH` | `/projects/:id` | Change a project. Every field optional; see [Projects](#projects). |
-| `DELETE` | `/projects/:id` | Remove a project. `204`, `404` if unknown, `409` while instances point at it. |
+| `POST` | `/projects/:id/build` | Rebuild the project image. Answers `202` -- the build runs afterwards. |
+| `GET` | `/projects/:id/build-log` | `{ status, builtAt, log }` of the last build. |
+| `DELETE` | `/projects/:id` | Remove a project and its image. `204`, `404` if unknown, `409` while instances point at it. |
 | `POST` | `/instances` | Start an instance from a project. Body: `name`, `projectId` (both required). Answers `201` with the instance. |
 | `GET` | `/instances` | All instances, each with the status Docker reports. |
 | `GET` | `/instances/:id` | One instance. `404` if unknown. |
@@ -58,8 +60,8 @@ curl -s localhost:8080/instances \
 
 Status codes worth knowing: `400` for a body that fails validation -- including
 an unknown field, which is rejected rather than dropped -- `409` for a duplicate
-project name or a project still in use, `422` when the base image is not built or
-the referenced project does not exist, `503` while the Docker daemon is
+project name or a project still in use, `422` when the referenced project does
+not exist or its image is not ready, `503` while the Docker daemon is
 unreachable.
 
 ## Projects
@@ -79,8 +81,7 @@ environment building blocks and the PAT for a private repository. `POST
 }
 ```
 
-`buildingBlocks` are stored now and built into a project image with #7; until
-then every instance starts from `CLAUDOPS_BASE_IMAGE`.
+`buildingBlocks` become the project's image -- see [Project images](#project-images).
 
 The PAT is write-only. It is encrypted with `CLAUDOPS_SECRET_KEY` before it is
 stored, and no response ever carries it -- a project reports `hasGitToken`
@@ -102,6 +103,58 @@ An instance keeps a snapshot of the repository and branch it was started with, s
 editing a project afterwards does not rewrite what a running instance was told to
 clone. Deleting a project answers `409 project_in_use` for as long as any instance
 references it, running or exited -- the message says how many.
+
+## Project images
+
+A project's environment is a prebuilt image, `claudops-project-<id>`: the template
+in [`docker/project`](../docker/project/README.md) on top of
+`CLAUDOPS_BASE_IMAGE`, with one layer per building block. Instances start from it,
+never from the base image.
+
+Builds are asynchronous. `POST /projects` answers `201` right away with
+
+```json
+{ "image": { "tag": "claudops-project-a1b2c3", "status": "pending", "builtAt": null } }
+```
+
+and the build happens behind it -- a dotnet SDK plus a Chromium takes minutes, and
+no HTTP request should hold that open. The four states:
+
+| Status | Meaning |
+| --- | --- |
+| `pending` | Queued: a fresh project, changed building blocks, or a rebuild somebody asked for. |
+| `building` | A build is running. Builds run one at a time. |
+| `ready` | The image exists. The only state `POST /instances` accepts. |
+| `failed` | The build did not work. The build log says why. |
+
+`POST /instances` against anything but `ready` answers
+`422 project_image_not_ready` and carries the status, because there is nothing to
+fall back to -- the environment is prebuilt, not installed at container start. A
+project that reports `ready` but whose tag somebody removed with `docker rmi`
+fails with `422 image_not_found` instead: what exists is still Docker's answer,
+not the database's.
+
+Changing the building blocks invalidates the image and starts a rebuild. Renaming
+a project or replacing its PAT does not -- neither changes the image, and the tag
+follows the id rather than the name. Deleting a project removes its image too,
+best effort: a tag that could not be removed is logged rather than turned into a
+failed delete.
+
+An explicit rebuild, which is also the only way out of `failed` -- no build clears
+that on its own, so a broken Dockerfile is not retried in a loop:
+
+```bash
+curl -s -X POST localhost:8080/projects/<id>/build
+curl -s localhost:8080/projects/<id>/build-log
+```
+
+The stored log is capped at the last 64 KiB, with a line saying what was dropped.
+The tail is where the failing step is, and the database is not a log server.
+
+On startup the server picks up what a restart interrupted: a project still marked
+`building` is a leftover -- no build survives the process that ran it -- and goes
+back into the queue, together with everything still `pending`. That is also what
+builds the images of projects created before this existed.
 
 ## Web UI
 
@@ -169,7 +222,9 @@ drives.
 | `CLAUDOPS_HOST` | `0.0.0.0` | Listen address. |
 | `CLAUDOPS_PORT` | `8080` | Listen port. |
 | `CLAUDOPS_DB` | `data/claudops.db` | SQLite file. Created together with its directory. |
-| `CLAUDOPS_BASE_IMAGE` | `claudops-base` | Image instances are started from. Per-project images arrive with #7. |
+| `CLAUDOPS_BASE_IMAGE` | `claudops-base` | What a project image is built `FROM`. Instances start from their project's image. |
+| `CLAUDOPS_PROJECT_CONTEXT` | `docker/project` next to the package | Build context for project images. The tests point this at `docker/project-stub`. |
+| `CLAUDOPS_DOTNET_CHANNEL` | `10.0` | Channel `dotnet-install.sh` gets for the dotnet block: a version, `LTS` or `STA`. |
 | `CLAUDOPS_WEB_ROOT` | `web/dist` next to the package | Directory the web UI is served from. Without an `index.html` in it the server runs API-only. |
 | `CLAUDOPS_TMUX_SESSION` | `main` | Session the terminal attaches to. Matches `TMUX_SESSION` in the image; only a project image with its own entrypoint needs another. |
 | `CLAUDOPS_SECRET_KEY` | – | 32 bytes, base64 or hex: encrypts the PAT a project stores. Without it a project can be created but not with a `gitToken`. |
@@ -188,6 +243,7 @@ src/docker/engine.ts      the port: everything the server needs from Docker
 src/docker/dockerode-engine.ts   the real implementation
 src/secrets/cipher.ts     AES-256-GCM for the one secret that is stored
 src/projects/service.ts   projects: CRUD, the PAT, the in-use check
+src/projects/images.ts    the image builds: queue, status, log, startup sweep
 src/projects/routes.ts    REST endpoints and their schemas
 src/instances/service.ts  orchestration: rows, containers, status join, attach
 src/instances/routes.ts   REST endpoints and their schemas
@@ -205,10 +261,16 @@ scripts/ws-probe.ts       WebSocket client for the smoke test
 
 ```bash
 pnpm test                          # vitest, no Docker needed
-./server/smoke-test.sh             # the issue #3 and #6 acceptance criteria against real Docker
+./server/smoke-test.sh             # the issue #3, #6 and #7 acceptance criteria against real Docker
 ./server/terminal-smoke-test.sh    # the issue #4 acceptance criteria, real container and socket
-./e2e/run.sh                       # the issue #5 and #6 acceptance criteria, in a real browser
+./e2e/run.sh                       # the issue #5, #6 and #7 acceptance criteria, in a real browser
+./docker/project/smoke-test.sh     # the toolchains, really inside a project image
 ```
+
+The three server-side scripts build project images from `docker/project-stub`, so
+a run is not spent installing a dotnet SDK the assertions never look at.
+`FULL_IMAGE=1 ./server/smoke-test.sh` uses the real template instead and checks
+`dotnet --version` inside a running instance -- that one takes minutes.
 
 `smoke-test.sh` needs network access: one of its instances really clones the
 public claudops repository, which is how "the project's branch is what gets
@@ -223,6 +285,5 @@ without it or the result describes the code you replaced.
 
 ## Not part of this yet
 
-- Per-project images, built from the building blocks -> #7
 - Resource limits, startup reconcile -> #8
 - Auth, egress firewall -> #9

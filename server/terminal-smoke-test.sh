@@ -18,6 +18,22 @@ BASE="http://127.0.0.1:$PORT"
 SERVER_LOG="$WORK_DIR/server.log"
 PROBE_OUT="$WORK_DIR/probe.out"
 PROBE_ERR="$WORK_DIR/probe.err"
+# Not docker/project: this script is about the console, and a real dotnet SDK
+# would add minutes to it. The stub takes the same build args and installs
+# nothing.
+PROJECT_CONTEXT_NATIVE="$(native "$REPO_ROOT/docker/project-stub")"
+BUILD_TIMEOUT="${BUILD_TIMEOUT:-120}"
+
+# A project's image is built asynchronously, and an instance cannot start before
+# it is there.
+wait_for_image() {
+  local id="$1" _
+  for _ in $(seq 1 "$BUILD_TIMEOUT"); do
+    [[ "$(json image.status <<<"$(body_of GET "/projects/$id")")" == "ready" ]] && return 0
+    sleep 1
+  done
+  return 1
+}
 
 trap smoke_cleanup EXIT
 
@@ -42,7 +58,8 @@ fi
 # ---------------------------------------------------------------------- server
 info "Starting server on port $PORT"
 start_server "$PORT" "$WORK_DIR_NATIVE/claudops.db" "$SERVER_LOG" \
-  "CLAUDOPS_BASE_IMAGE=$IMAGE"
+  "CLAUDOPS_BASE_IMAGE=$IMAGE" \
+  "CLAUDOPS_PROJECT_CONTEXT=$PROJECT_CONTEXT_NATIVE"
 
 if wait_for_health "$BASE"; then
   ok "Server is up and Docker is reachable"
@@ -58,6 +75,10 @@ project_id="$(json id <<<"$(body_of POST /projects \
   '{"name":"terminal","repoUrl":"https://github.com/dominikz98/does-not-exist.git"}')")"
 if [[ -z "$project_id" ]]; then
   bad "Could not create the project the instance needs"
+  exit 1
+fi
+if ! wait_for_image "$project_id"; then
+  bad "The project image never became ready"
   exit 1
 fi
 

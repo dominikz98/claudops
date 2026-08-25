@@ -1,4 +1,5 @@
 import type { FastifyPluginCallback, FastifyPluginOptions } from 'fastify';
+import type { ProjectImages } from './images.ts';
 import {
   ProjectNotFoundError,
   type CreateProjectInput,
@@ -54,16 +55,22 @@ const idParamsSchema = {
 
 export interface ProjectRoutesOptions extends FastifyPluginOptions {
   service: ProjectService;
+  /** Where a build is asked for. The service itself stays free of Docker: it
+   *  only ever writes `pending`, and a `pending` answer is the signal. */
+  images: ProjectImages;
 }
 
 export const projectRoutes: FastifyPluginCallback<ProjectRoutesOptions> = (app, options, done) => {
-  const { service } = options;
+  const { service, images } = options;
 
   app.post<{ Body: CreateProjectInput }>(
     '/projects',
     { schema: { body: createBodySchema } },
     async (request, reply) => {
       const project = service.create(request.body);
+      // Started, not awaited: a dotnet plus Playwright build takes minutes and
+      // the caller gets `image.status: "pending"` to watch instead.
+      images.request(project.id);
       return reply.code(201).header('location', `/projects/${project.id}`).send(project);
     },
   );
@@ -90,7 +97,43 @@ export const projectRoutes: FastifyPluginCallback<ProjectRoutesOptions> = (app, 
     { schema: { params: idParamsSchema, body: updateBodySchema } },
     async (request, reply) => {
       try {
-        return service.update(request.params.id, request.body);
+        const project = service.update(request.params.id, request.body);
+        // Changed building blocks put the image back to `pending`; a rename or a
+        // new PAT does not, because neither changes the image.
+        if (project.image.status === 'pending') images.request(project.id);
+        return project;
+      } catch (error) {
+        if (error instanceof ProjectNotFoundError) return reply.callNotFound();
+        throw error;
+      }
+    },
+  );
+
+  /** An explicit rebuild -- and the only way out of `failed`, which no build
+   *  clears on its own. `202`: accepted, not finished. */
+  app.post<{ Params: { id: string } }>(
+    '/projects/:id/build',
+    { schema: { params: idParamsSchema } },
+    async (request, reply) => {
+      try {
+        const project = service.requeueImage(request.params.id);
+        images.request(project.id);
+        return await reply.code(202).send(project);
+      } catch (error) {
+        if (error instanceof ProjectNotFoundError) return reply.callNotFound();
+        throw error;
+      }
+    },
+  );
+
+  /** Its own endpoint rather than a field on the project: a build log runs to
+   *  tens of kilobytes, and the project list asks for every project at once. */
+  app.get<{ Params: { id: string } }>(
+    '/projects/:id/build-log',
+    { schema: { params: idParamsSchema } },
+    async (request, reply) => {
+      try {
+        return service.buildLog(request.params.id);
       } catch (error) {
         if (error instanceof ProjectNotFoundError) return reply.callNotFound();
         throw error;
@@ -104,6 +147,9 @@ export const projectRoutes: FastifyPluginCallback<ProjectRoutesOptions> = (app, 
     async (request, reply) => {
       try {
         service.delete(request.params.id);
+        // After the row, and best effort: the image is hygiene, and a tag that
+        // stayed behind must not turn a successful delete into a 500.
+        await images.remove(request.params.id);
         return await reply.code(204).send();
       } catch (error) {
         if (error instanceof ProjectNotFoundError) return reply.callNotFound();

@@ -8,9 +8,14 @@ to come (#8).
 <http://localhost:8080> -- the same port as the API. The instance list refreshes
 itself every three seconds with the status Docker reports; **Console** opens the
 tmux session of an instance, **Delete** asks twice and then takes the container
-with it. **Projects** in the top right manages the templates instances are
-created from; that page does not poll, because nothing but this page changes a
-project.
+with it. A project whose image is not built yet cannot be picked in the create
+form -- the option says which state it is in.
+
+**Projects** in the top right manages the templates instances are created from.
+Each row carries the state of its image, with **Rebuild** and **Build log** next
+to it. The page normally does not poll, because nothing but this page changes a
+project; while a build is running it refreshes every two seconds, because then the
+server does.
 
 There is no login yet (#9), so anyone who can reach the port can start and delete
 instances and type into every console. Keep it on a trusted network or behind a
@@ -41,8 +46,10 @@ state, not a hypothetical one.
 
 ```bash
 curl -s localhost:8080/projects                     # the templates, with their instance counts
+curl -s localhost:8080/projects/<id>/build-log      # the output of its last image build
 curl -s localhost:8080/instances                    # what the server knows, with live status
 docker ps --filter label=claudops.instance          # what Docker has
+docker images --filter label=claudops.project       # the project images claudops built
 docker logs claudops-<id>                           # entrypoint output: clone, session start
 docker exec claudops-<id> tmux list-sessions        # is the session alive
 docker exec claudops-<id> tmux list-clients -t main # who is watching the console
@@ -71,6 +78,47 @@ The two lists should agree. Where they do not, the status says which way:
 
 A container in `docker ps` that is *not* in the instance list was started by
 hand. It carries no `claudops.instance` label, so nothing below will find it.
+
+## Project images
+
+The environment of a project is a prebuilt image, `claudops-project-<id>`. The
+server builds it when the project is created and whenever its building blocks
+change, and an instance cannot start before it is there.
+
+```bash
+curl -s localhost:8080/projects | grep -o '"status":"[a-z]*"'   # pending / building / ready / failed
+```
+
+| Status | What to do |
+| --- | --- |
+| `pending` | Nothing -- it is queued. Builds run one at a time. |
+| `building` | Wait. A dotnet SDK plus a Chromium is a few minutes on the first build. |
+| `ready` | Instances can be created. |
+| `failed` | Read the build log, fix the cause, rebuild. |
+
+```bash
+curl -s localhost:8080/projects/<id>/build-log      # { status, builtAt, log }
+curl -s -X POST localhost:8080/projects/<id>/build  # 202, rebuilds
+```
+
+A rebuild of an unchanged environment is seconds -- it comes off the layer cache.
+The first build of a project with dotnet and Playwright is a few minutes and a few
+hundred megabytes. Two projects with the same blocks share those layers.
+
+Nothing rebuilds by itself except at startup, where a project left in `building`
+by a killed server goes back into the queue. A `failed` build stays failed on
+purpose: retrying a broken Dockerfile on every start would be a loop.
+
+Deleting a project removes its image as well. An image left behind -- from a delete
+where Docker was unreachable, say -- carries the label:
+
+```bash
+docker images --filter label=claudops.project
+docker rmi claudops-project-<id>
+```
+
+Check nothing points at it first: an instance created from that project is still
+running on it.
 
 ## Stop and remove
 
@@ -154,9 +202,24 @@ has expired. Mint a new one with `claude setup-token`.
 **The container exits right after start.** The tmux session ended, which is what
 the entrypoint watches for. `docker logs` shows the last line before the exit.
 
-**`POST /instances` answers 422.** The base image is not built, or
-`CLAUDOPS_BASE_IMAGE` names a tag that does not exist. `docker images
-claudops-base` says which.
+**`POST /instances` answers 422 `project_image_not_ready`.** The project's image
+is not built yet, is still building, or its build failed -- the answer carries
+which. There is no fallback to installing the environment at container start, so
+this is a wait or a fix, not a warning. `GET /projects/<id>/build-log` says what
+happened.
+
+**`POST /instances` answers 422 `image_not_found`.** The project says its image is
+`ready` but Docker does not have the tag -- somebody ran `docker rmi`, or the
+Docker root was wiped. `POST /projects/<id>/build` puts it back.
+
+**A project image build fails with `pull access denied` or `not found`.** The base
+image is missing: `docker build -t claudops-base docker/base`, or
+`CLAUDOPS_BASE_IMAGE` names a tag that does not exist. The build never reaches a
+registry -- `claudops-base` is local only.
+
+**A project image build fails inside the dotnet or Playwright step.** The build
+needs network access for `dot.net` and the Playwright download host. The log names
+the step; a proxy or an offline NUC is the usual cause.
 
 **`POST /instances` answers 503.** The Docker daemon is not reachable. No
 instance was created -- the server rolls the row back rather than leaving a
@@ -197,13 +260,17 @@ docker run -d --cpus 2 --memory 4g ... claudops-base
 
 Projects and instance metadata live in the SQLite file named by `CLAUDOPS_DB`, by
 default `data/claudops.db` next to wherever the server was started. It holds
-identity, no status -- and one secret: the PAT of each project, encrypted with
-`CLAUDOPS_SECRET_KEY`. The file on its own is therefore no use to anyone; the key
-is what makes it readable, so keep the two apart in a backup.
+identity, no status -- with one exception, the state and log of each project's last
+image build, because a build that failed leaves no Docker object to ask -- and one
+secret: the PAT of each project, encrypted with `CLAUDOPS_SECRET_KEY`. The file on
+its own is therefore no use to anyone; the key is what makes it readable, so keep
+the two apart in a backup.
 
 Deleting the file loses the projects, and the names and creation times of running
 instances -- but not the instances: their containers keep running and are still
-findable by label.
+findable by label. The project images stay on the host too; without their projects
+nothing references them, so they are `docker rmi` material
+(`docker images --filter label=claudops.project`).
 
 Rotating the key is not a migration: the sealed PATs simply stop opening. Enter
 them again on each project, and instance creation works from the next attempt.
@@ -233,7 +300,5 @@ Claude session open in it.
 
 ## Not there yet
 
-Egress firewall and UI login (#9), automatic recycling and limits (#8), and
-per-project images built from the building blocks (#7) -- the flags are stored,
-every instance still starts from `claudops-base`. Restarting an instance is not an
-endpoint either; delete and create.
+Egress firewall and UI login (#9), automatic recycling and limits (#8). Restarting
+an instance is not an endpoint either; delete and create.

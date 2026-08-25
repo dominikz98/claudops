@@ -4,11 +4,13 @@ import {
   ContainerNotFoundError,
   ContainerNotRunningError,
   DockerUnavailableError,
+  ImageBuildFailedError,
   ImageNotFoundError,
   type AttachTerminalOptions,
   type ContainerSpec,
   type ContainerSummary,
   type DockerEngine,
+  type ImageBuildSpec,
   type TerminalSession,
   type TerminalSize,
 } from './engine.ts';
@@ -41,6 +43,74 @@ function isGone(error: unknown): boolean {
  *  cols/rows -- swapping these two is a silent one-character-off bug. */
 function consoleSize(size: TerminalSize): [number, number] {
   return [size.rows, size.cols];
+}
+
+/** One line of the build response body. Everything is optional -- the daemon
+ *  mixes progress, output and failure into the same stream. */
+interface BuildEvent {
+  stream?: unknown;
+  status?: unknown;
+  error?: unknown;
+  errorDetail?: { message?: unknown };
+}
+
+/** The error text of a build event, or `undefined` for an ordinary line. */
+function buildFailure(event: BuildEvent): string | undefined {
+  if (typeof event.errorDetail?.message === 'string') return event.errorDetail.message;
+  if (typeof event.error === 'string') return event.error;
+  return undefined;
+}
+
+/**
+ * Reads a build response to its end, handing every line of output to `onLog`,
+ * and returns the failure the daemon reported -- or `undefined` when the build
+ * got through.
+ *
+ * A failed build still answers HTTP 200: the reason arrives as a JSON line
+ * inside the body, so a caller that only awaits the request sees every build
+ * succeed (knowledge/docker-build-errors-arrive-in-the-stream.md).
+ */
+async function drainBuildLog(
+  stream: NodeJS.ReadableStream,
+  onLog: (chunk: string) => void,
+): Promise<string | undefined> {
+  let failure: string | undefined;
+
+  const handle = (line: string): void => {
+    if (line === '') return;
+
+    let event: BuildEvent;
+    try {
+      event = JSON.parse(line) as BuildEvent;
+    } catch {
+      // Not every line is JSON once a proxy sits in between -- keep it anyway,
+      // it is still the most informative thing available.
+      onLog(`${line}\n`);
+      return;
+    }
+
+    if (typeof event.stream === 'string') onLog(event.stream);
+    else if (typeof event.status === 'string') onLog(`${event.status}\n`);
+
+    const detail = buildFailure(event);
+    if (detail !== undefined) {
+      // The first failure is the cause; anything after it is fallout.
+      failure ??= detail;
+      onLog(`${detail}\n`);
+    }
+  };
+
+  // The body is newline-delimited JSON, and a line can straddle two chunks.
+  let pending = '';
+  for await (const chunk of stream as unknown as AsyncIterable<Buffer | string>) {
+    pending += chunk.toString();
+    const lines = pending.split('\n');
+    pending = lines.pop() ?? '';
+    for (const line of lines) handle(line.trim());
+  }
+  handle(pending.trim());
+
+  return failure;
 }
 
 /** How long the attached process gets to exit on its own after `closeInput`
@@ -175,6 +245,44 @@ export class DockerodeEngine implements DockerEngine {
       return new DockerodeTerminalSession(stream, exec, options.closeInput);
     } catch (error) {
       throw this.translateAttach(error, containerId);
+    }
+  }
+
+  async buildImage(spec: ImageBuildSpec, onLog: (chunk: string) => void): Promise<void> {
+    let stream: NodeJS.ReadableStream;
+    try {
+      // dockerode tars the context itself -- it ships tar-fs, so this needs no
+      // dependency of ours and no temporary archive.
+      stream = await this.docker.buildImage(
+        { context: spec.contextDir, src: [spec.dockerfile] },
+        {
+          t: spec.tag,
+          dockerfile: spec.dockerfile,
+          buildargs: spec.buildArgs,
+          labels: spec.labels,
+          // Intermediate containers go away; the layer cache stays, which is
+          // what makes an unchanged rebuild seconds rather than minutes.
+          rm: true,
+          // Without this the daemon would try to pull claudops-base from a
+          // registry, where it has never existed.
+          pull: false,
+        },
+      );
+    } catch (error) {
+      throw this.translate(error);
+    }
+
+    const failure = await drainBuildLog(stream, onLog);
+    if (failure !== undefined) throw new ImageBuildFailedError(spec.tag, failure);
+  }
+
+  async removeImage(tag: string): Promise<void> {
+    try {
+      await this.docker.getImage(tag).remove({ force: true });
+    } catch (error) {
+      // Gone already is the outcome we wanted.
+      if (isGone(error)) return;
+      throw this.translate(error);
     }
   }
 

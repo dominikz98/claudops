@@ -4,7 +4,9 @@ Shared base image for all Claude Code instances. On start the container clones a
 repository and runs Claude Code inside a tmux session, which the claudops server
 attaches to later via `docker exec ... tmux attach`.
 
-Project images (issue #7) build on top of it via `FROM claudops-base`.
+Project images build on top of it via `FROM claudops-base` -- see
+[`../project/README.md`](../project/README.md). This is the only image built by
+hand; the per-project ones are built by the server.
 
 ## Build
 
@@ -85,4 +87,4 @@ build.
 
 - Egress firewall (`init-firewall.sh`, `NET_ADMIN`) and UI login -> issue #9
 - CPU/RAM limits and recycling -> issue #8
-- dotnet/Playwright building blocks -> issue #7
+- dotnet/Playwright building blocks -> [`../project`](../project/README.md)

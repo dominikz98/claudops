@@ -91,18 +91,46 @@ export function mountList(root: HTMLElement, api: Api): View {
   };
 
   /** Renders the picker and, when there is nothing to pick, says so instead of
-   *  offering an empty dropdown. */
+   *  offering an empty dropdown.
+   *
+   *  A project whose image is not built yet is shown but not selectable: the
+   *  server would answer 422, and reading why on the option beats reading it in
+   *  a banner after submitting. */
   const renderProjects = (): void => {
     clear(projectSelect);
     for (const project of projects) {
-      projectSelect.append(el('option', { value: project.id }, project.name));
+      const ready = project.image.status === 'ready';
+      projectSelect.append(
+        el(
+          'option',
+          { value: project.id, ...(ready ? {} : { disabled: 'disabled' }) },
+          ready ? project.name : `${project.name} (image ${project.image.status})`,
+        ),
+      );
     }
 
-    const none = projects.length === 0;
-    if (none) submit.setAttribute('disabled', 'disabled');
-    else submit.removeAttribute('disabled');
-    if (none) projectHint.removeAttribute('hidden');
-    else projectHint.setAttribute('hidden', 'hidden');
+    const usable = projects.some((project) => project.image.status === 'ready');
+    if (usable) submit.removeAttribute('disabled');
+    else submit.setAttribute('disabled', 'disabled');
+
+    // A disabled Create needs a reason next to it, and "no projects" and "no
+    // built image yet" are different problems with different fixes.
+    if (usable) {
+      projectHint.setAttribute('hidden', 'hidden');
+      return;
+    }
+
+    clear(projectHint);
+    projectHint.append(
+      projects.length === 0 ? 'No projects yet -- ' : 'No project image is built yet -- ',
+      el(
+        'a',
+        { href: routeHash({ view: 'projects' }) },
+        projects.length === 0 ? 'create one first' : 'watch the build',
+      ),
+      '.',
+    );
+    projectHint.removeAttribute('hidden');
   };
 
   const projectName = (id: string | null): string =>

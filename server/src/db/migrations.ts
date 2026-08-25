@@ -44,6 +44,19 @@ const MIGRATIONS: readonly string[] = [
    );
    ALTER TABLE instances ADD COLUMN project_id TEXT REFERENCES projects (id);
    CREATE INDEX instances_project_id ON instances (project_id);`,
+
+  // 3 -- the project image. The deliberate exception to "Docker holds the
+  // state, this file holds the identity": a build that failed leaves no Docker
+  // object behind to ask, so its status and its log exist nowhere else. What
+  // Docker still owns is whether the image is there -- an instance start fails
+  // with ImageNotFoundError regardless of what this column says.
+  //
+  // 'pending' as the default is what makes an upgrade work: every project that
+  // existed before this migration has no image yet and gets built on the next
+  // start.
+  `ALTER TABLE projects ADD COLUMN image_status   TEXT NOT NULL DEFAULT 'pending';
+   ALTER TABLE projects ADD COLUMN image_log      TEXT;
+   ALTER TABLE projects ADD COLUMN image_built_at TEXT;`,
 ];
 
 export function schemaVersion(db: Database): number {
