@@ -13,18 +13,10 @@ knows Docker and has never seen this repository.
 
 ## Current state
 
-Only the base image exists today. Everything else is planned and marked with its
-issue number on the pages below.
-
-| Component | State |
-| --- | --- |
-| Base image `claudops-base` | Available, smoke-tested |
-| Server (REST, Docker, SQLite) | Planned (#3) |
-| Terminal bridge (WebSocket) | Planned (#4) |
-| Web UI | Planned (#5) |
-| Projects and project images | Planned (#6, #7) |
-| Lifecycle, limits, recycling | Planned (#8) |
-| Auth, egress firewall, UI login | Planned (#9) |
+Only the base image exists today; everything else is planned and marked with its
+issue number on the pages below. The component status table lives in the
+[root README](../README.md#state) -- kept in one place so the two cannot drift
+apart.
 
 The internal notes on *why* things are the way they are live in
 [knowledge/](../knowledge/README.md) and are aimed at Claude, not at users.
