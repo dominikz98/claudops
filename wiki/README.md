@@ -11,15 +11,19 @@ knows Docker and has never seen this repository.
 - [Operations](operations.md) - running it, cleaning up, troubleshooting
 - [Glossary](glossary.md) - what instance, project and bridge mean here
 
+The REST API and the server's own configuration are documented next to the code,
+in [server/README.md](../server/README.md).
+
 ## Current state
 
-Only the base image exists today. Everything else is planned and marked with its
-issue number on the pages below.
+An instance can be started, listed and removed over REST. The console still goes
+through `docker exec`; everything else is planned and marked with its issue
+number on the pages below.
 
 | Component | State |
 | --- | --- |
 | Base image `claudops-base` | Available, smoke-tested |
-| Server (REST, Docker, SQLite) | Planned (#3) |
+| Server (REST, Docker, SQLite) | Available, smoke-tested |
 | Terminal bridge (WebSocket) | Planned (#4) |
 | Web UI | Planned (#5) |
 | Projects and project images | Planned (#6, #7) |

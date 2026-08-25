@@ -1,0 +1,9 @@
+packages:
+  - server
+
+# better-sqlite3 is a native module and needs its install script; esbuild
+# (via vitest) unpacks its platform binary the same way. Everything else
+# stays blocked, which is pnpm 10's default.
+onlyBuiltDependencies:
+  - better-sqlite3
+  - esbuild

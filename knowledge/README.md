@@ -20,3 +20,6 @@ Format and maintenance rules: skill `domain-knowledge`.
 - [A failed clone must not kill the container](failed-clone-must-not-abort.md) - a dead container is unreachable for diagnosis
 - [Project environments are prebuilt images, not devcontainer features](project-images-not-devcontainer-features.md) - devcontainer features have no layer caching
 - [The dev host is Windows, the target is Linux](windows-dev-host-linux-target.md) - line endings and MSYS path rewriting bite
+- [The database holds identity, Docker holds state](database-holds-identity-docker-holds-state.md) - why there is no status column and why the row is written first
+- [Fastify silently strips unknown request fields unless told not to](fastify-strips-unknown-fields.md) - additionalProperties: false alone answers 201
+- [pnpm 10 blocks install scripts, which native modules need](pnpm-blocks-native-build-scripts.md) - better-sqlite3 fails at require time, not at install

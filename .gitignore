@@ -60,3 +60,13 @@ nunit-*.xml
 # .claude/skills and .claude/settings.json are shared.
 .claude/settings.local.json
 .mcp.json
+
+# Node / pnpm
+node_modules/
+dist/
+*.tsbuildinfo
+.pnpm-store/
+pnpm-debug.log*
+
+# claudops server runtime state (SQLite database)
+data/
