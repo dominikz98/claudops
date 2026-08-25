@@ -7,133 +7,38 @@
 #
 # Requires: docker, node, curl. A CLAUDE_CODE_OAUTH_TOKEN is passed through if
 # set, but is not required -- the container stays alive either way.
+#
+# The terminal bridge of issue #4 has its own script: ./server/terminal-smoke-test.sh
 set -uo pipefail
 
-# Otherwise Git Bash/MSYS rewrites arguments that look like absolute paths and
-# the docker checks would test nothing. No effect on Linux.
-export MSYS_NO_PATHCONV=1
-export MSYS2_ARG_CONV_EXCL='*'
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/smoke-lib.sh"
 
 IMAGE="${IMAGE:-claudops-base:smoke}"
 PORT="${PORT:-18080}"
 BASE="http://127.0.0.1:$PORT"
-
-# Two path worlds on the Windows dev host: this script runs in MSYS and sees
-# POSIX paths, while node.exe, curl.exe and docker.exe are native Windows
-# programs -- and MSYS_NO_PATHCONV above (needed for the docker arguments) turns
-# the automatic conversion off. So keep a native form of every path we hand to
-# one of them. On Linux both are the same string.
-WORK_DIR="$(mktemp -d)"
-native() { command -v cygpath >/dev/null 2>&1 && cygpath -w "$1" || printf '%s' "$1"; }
-WORK_DIR_NATIVE="$(native "$WORK_DIR")"
 
 DB_FILE="$WORK_DIR/claudops.db"
 DB_FILE_NATIVE="$WORK_DIR_NATIVE/claudops.db"
 SERVER_LOG="$WORK_DIR/server.log"
 GIT_TOKEN_PROBE="smoke-pat-must-not-appear"
 
-pass=0
-fail=0
-server_pid=""
-
-ok()   { printf '  \033[32mPASS\033[0m  %s\n' "$1"; pass=$((pass + 1)); }
-bad()  { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; fail=$((fail + 1)); }
-info() { printf '\n\033[1m%s\033[0m\n' "$1"; }
-
-# check <description> <expected> <actual>
-check() {
-  if [[ "$2" == "$3" ]]; then
-    ok "$1"
-  else
-    bad "$1 (expected: '$2', actual: '$3')"
-  fi
-}
-
-# Reading JSON with node rather than jq: node is a hard dependency of the
-# server anyway, jq is not installed on every dev host.
-json() { node -e '
-  let raw = "";
-  process.stdin.on("data", (c) => (raw += c));
-  process.stdin.on("end", () => {
-    try {
-      const value = process.argv[1]
-        .split(".")
-        .reduce((acc, key) => (acc == null ? acc : acc[key]), JSON.parse(raw));
-      process.stdout.write(value === undefined || value === null ? "" : String(value));
-    } catch {
-      process.stdout.write("");
-    }
-  });
-' "$1"; }
-
-# api <method> <path> [body] -- prints "<status>\n<body>". Everything goes
-# through stdout: handing curl.exe an -o path would need the native form.
-api() {
-  local method="$1" path="$2" body="${3:-}" raw
-  if [[ -n "$body" ]]; then
-    raw="$(curl -s -w '\n%{http_code}' \
-      -X "$method" -H 'content-type: application/json' -d "$body" "$BASE$path")"
-  else
-    raw="$(curl -s -w '\n%{http_code}' -X "$method" "$BASE$path")"
-  fi
-  # Status last on the wire, first in the output -- so callers can read either
-  # half without knowing how long the body is.
-  printf '%s\n%s' "$(tail -n1 <<<"$raw")" "$(sed '$d' <<<"$raw")"
-}
-
-status_of() { api "$@" | head -1; }
-body_of()   { api "$@" | tail -n +2; }
-
-containers_for() {
-  docker ps -a --filter "label=claudops.instance=$1" --format '{{.ID}}' | tr -d '\r'
-}
-
-cleanup() {
-  [[ -n "$server_pid" ]] && kill "$server_pid" 2>/dev/null
-  # Anything the run leaked, identified by the label that exists for exactly
-  # this purpose.
-  local leftovers
-  leftovers="$(docker ps -aq --filter 'label=claudops.instance' | tr -d '\r')"
-  [[ -n "$leftovers" ]] && docker rm -f $leftovers >/dev/null 2>&1
-  rm -rf "$WORK_DIR"
-  return 0
-}
-trap cleanup EXIT
+trap smoke_cleanup EXIT
 
 # ----------------------------------------------------------------------- build
 if [[ -z "${SKIP_BUILD:-}" ]]; then
-  info "Building base image ($IMAGE)"
-  build_context="$REPO_ROOT/docker/base"
-  command -v cygpath >/dev/null 2>&1 && build_context="$(cygpath -w "$build_context")"
-  docker build -t "$IMAGE" "$build_context" >/dev/null || { bad "docker build"; exit 1; }
-
-  info "Building server"
-  (cd "$REPO_ROOT" && pnpm --filter @claudops/server build >/dev/null) \
-    || { bad "pnpm build"; exit 1; }
+  build_base_image "$IMAGE" || { bad "docker build"; exit 1; }
+  build_server || { bad "pnpm build"; exit 1; }
 fi
 
 # ---------------------------------------------------------------------- server
 info "Starting server on port $PORT"
-(
-  cd "$SCRIPT_DIR" || exit 1
-  CLAUDOPS_HOST=127.0.0.1 \
-  CLAUDOPS_PORT="$PORT" \
-  CLAUDOPS_DB="$DB_FILE_NATIVE" \
-  CLAUDOPS_BASE_IMAGE="$IMAGE" \
-  CLAUDOPS_GIT_USER_NAME=claudops \
-  CLAUDOPS_GIT_USER_EMAIL=claudops@example.invalid \
-  exec node dist/index.js
-) >"$SERVER_LOG" 2>&1 &
-server_pid=$!
+start_server "$PORT" "$DB_FILE_NATIVE" "$SERVER_LOG" \
+  "CLAUDOPS_BASE_IMAGE=$IMAGE" \
+  'CLAUDOPS_GIT_USER_NAME=claudops' \
+  'CLAUDOPS_GIT_USER_EMAIL=claudops@example.invalid'
+server_pid="$SERVER_PID"
 
-for _ in $(seq 1 30); do
-  [[ "$(status_of GET /health)" == "200" ]] && break
-  sleep 1
-done
-if [[ "$(status_of GET /health)" == "200" ]]; then
+if wait_for_health "$BASE"; then
   ok "Server is up and Docker is reachable"
 else
   bad "Server did not become healthy -- log:"
@@ -220,29 +125,18 @@ check "GET on an unknown id answers 404" "404" "$(status_of GET /instances/does-
 # see the real Docker 404 -- the unit tests can only fake it.
 info "A missing base image is reported as 422, not swallowed"
 second_port=$((PORT + 1))
-(
-  cd "$SCRIPT_DIR" || exit 1
-  CLAUDOPS_HOST=127.0.0.1 \
-  CLAUDOPS_PORT="$second_port" \
-  CLAUDOPS_DB="$WORK_DIR_NATIVE/no-image.db" \
-  CLAUDOPS_BASE_IMAGE=claudops-does-not-exist:0 \
-  exec node dist/index.js
-) >"$WORK_DIR/no-image.log" 2>&1 &
-no_image_pid=$!
+second_base="http://127.0.0.1:$second_port"
+start_server "$second_port" "$WORK_DIR_NATIVE/no-image.db" "$WORK_DIR/no-image.log" \
+  'CLAUDOPS_BASE_IMAGE=claudops-does-not-exist:0'
+wait_for_health "$second_base"
 
-for _ in $(seq 1 30); do
-  [[ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$second_port/health")" == "200" ]] && break
-  sleep 1
-done
 check "POST against a missing image answers 422" "422" \
   "$(curl -s -o "$WORK_DIR/no-image-body" -w '%{http_code}' \
       -X POST -H 'content-type: application/json' -d '{"name":"no-image"}' \
-      "http://127.0.0.1:$second_port/instances")"
+      "$second_base/instances")"
 check "No instance was recorded for the failed create" "" \
-  "$(curl -s "http://127.0.0.1:$second_port/instances" | json instances.0.id)"
-kill "$no_image_pid" 2>/dev/null
+  "$(curl -s "$second_base/instances" | json instances.0.id)"
 
 check "Server survived the whole run" "0" "$(kill -0 "$server_pid" 2>/dev/null; echo $?)"
 
-info "Result: $pass passed, $fail failed"
-[[ "$fail" -eq 0 ]]
+report

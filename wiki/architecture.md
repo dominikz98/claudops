@@ -17,7 +17,7 @@ Container per instance: project image -> clone repo -> tmux -> claude
 | Component | Role | State |
 | --- | --- | --- |
 | `claudops-base` | Base image: Node, Claude Code CLI, git, tmux, non-root user, entrypoint | Available |
-| `claudops-server` | Fastify: REST for instances today, projects and terminal bridge to come | Instance REST available; #4, #6 open |
+| `claudops-server` | Fastify: instance REST and the terminal bridge; projects to come | Instance REST and terminal available; #6 open |
 | Web UI | Vite SPA served by the server on the same port: instance list and console | Planned (#5) |
 | SQLite | Metadata for instances; projects join it with #6 | Available |
 
@@ -27,7 +27,17 @@ Container per instance: project image -> clone repo -> tmux -> claude
 The bridge attaches to it with `docker exec` on a TTY and pipes the raw stream to
 xterm.js. That is what makes a browser refresh survivable: the session, the
 scrollback and the running Claude are in the container, not in the server or the
-browser.
+browser. Every connection is its own exec and its own tmux client, so a reconnect
+is a fresh attach rather than a replay -- the server keeps no output buffer at
+all.
+
+**Disconnecting has to be said out loud.** Docker has no way to kill an exec and
+does not close the TTY when the client goes away, so a browser tab that closes
+would leave its `tmux attach` running -- and because tmux sizes a window to its
+attached client, a forgotten 80x24 client shrinks the pane for everyone else. The
+bridge therefore sends tmux's detach sequence before dropping the stream, and
+pings every 30 seconds so a client that vanished without saying goodbye is
+noticed at all.
 
 **Environments are prebuilt images.** A project defines its environment through
 building blocks (dotnet, Playwright); the server builds a project image from them
@@ -59,6 +69,7 @@ would override the subscription and bill per token.
 ## Order of work
 
 Packages #2 to #5 produce the first walking skeleton: start an instance, use its
-console in the browser. #2 and #3 are done -- an instance can be started and
-removed over REST, the console still needs `docker exec`. #6 to #9 make it usable
-in practice. See issue #1.
+console in the browser. #2 to #4 are done -- an instance can be started and
+removed over REST and its console is on a WebSocket; what is missing is the
+browser that talks to it (#5). #6 to #9 make it usable in practice. See issue
+#1.

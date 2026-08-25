@@ -1,8 +1,7 @@
 # Getting started
 
-From nothing to a running Claude Code instance. The server does the starting
-and stopping; the console still goes through tmux until the browser console
-lands (#5).
+From nothing to a running Claude Code instance. The server starts and stops them
+and mirrors their consoles; the browser page that shows one lands with #5.
 
 ## Prerequisites
 
@@ -77,14 +76,23 @@ shows up as `exited` rather than as whatever it was when it started.
 
 ## Use the console
 
+Over the server, which is the way the browser page will do it (#5):
+
+```bash
+npx wscat -c 'ws://localhost:8080/instances/<id>/terminal?cols=120&rows=40'
+```
+
+Or directly on the host, which needs no server at all:
+
 ```bash
 docker exec -it claudops-<id> tmux attach -t main
 ```
 
 Detach with `Ctrl-b d`. Claude keeps running, and attaching again finds the
 session and the scrollback where you left them -- the same is true if your
-connection simply drops. This is the behaviour the browser console will be built
-on (#4, #5).
+connection simply drops. `cols` and `rows` are optional and only decide how the
+first redraw is painted; a real client sends a resize whenever its window
+changes.
 
 ## Remove an instance
 
@@ -123,6 +131,7 @@ into each container.
 | `CLAUDOPS_PORT` | Listen port, default `8080`. |
 | `CLAUDOPS_DB` | SQLite file, default `data/claudops.db`. |
 | `CLAUDOPS_BASE_IMAGE` | Image instances start from, default `claudops-base`. |
+| `CLAUDOPS_TMUX_SESSION` | Session the console attaches to, default `main`. |
 | `CLAUDE_CODE_OAUTH_TOKEN` | Claude Code auth, injected into every instance. |
 | `CLAUDOPS_GIT_USER_NAME`, `CLAUDOPS_GIT_USER_EMAIL` | Commit identity for instances. |
 
@@ -140,12 +149,14 @@ understands.
 ## Verify it works
 
 ```bash
-./docker/base/smoke-test.sh    # the image: clone, non-root, reattach, credentials
-./server/smoke-test.sh         # the server: create, list with status, delete
-pnpm test                      # unit tests, no Docker needed
+./docker/base/smoke-test.sh          # the image: clone, non-root, reattach, credentials
+./server/smoke-test.sh               # the server: create, list with status, delete
+./server/terminal-smoke-test.sh      # the console: I/O, reconnect, resize
+pnpm test                            # unit tests, no Docker needed
 ```
 
-`SKIP_BUILD=1` makes either smoke test reuse what is already built.
+`SKIP_BUILD=1` makes a smoke test reuse what is already built -- handy, but after
+a code change it then tests the previous build.
 
 ## Clean up
 

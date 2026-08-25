@@ -20,6 +20,9 @@ export interface ServerConfig {
   databaseFile: string;
   /** Image instances are started from. #7 replaces this per project. */
   baseImage: string;
+  /** The tmux session the terminal bridge attaches to. Matches TMUX_SESSION in
+   *  claudops-base; only a project image with its own entrypoint needs another. */
+  tmuxSession: string;
   /** `undefined` leaves the transport to dockerode, which then honours
    *  DOCKER_HOST. */
   dockerSocket: string | undefined;
@@ -65,6 +68,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     logLevel: optional(env, 'CLAUDOPS_LOG_LEVEL') ?? 'info',
     databaseFile: optional(env, 'CLAUDOPS_DB') ?? 'data/claudops.db',
     baseImage: optional(env, 'CLAUDOPS_BASE_IMAGE') ?? 'claudops-base',
+    tmuxSession: optional(env, 'CLAUDOPS_TMUX_SESSION') ?? 'main',
     dockerSocket,
     instanceEnv: {
       claudeOauthToken: optional(env, 'CLAUDE_CODE_OAUTH_TOKEN'),

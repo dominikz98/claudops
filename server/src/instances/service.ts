@@ -1,13 +1,31 @@
 import { randomBytes } from 'node:crypto';
 import type { InstanceEnvConfig } from '../config.ts';
 import type { InstanceRepository } from '../db/instances.ts';
-import type { ContainerSpec, DockerEngine } from '../docker/engine.ts';
+import type {
+  ContainerSpec,
+  DockerEngine,
+  TerminalSession,
+  TerminalSize,
+} from '../docker/engine.ts';
 import { containerName, instanceLabels } from '../docker/labels.ts';
 
 /** A container claudops knows about but Docker no longer has. #8 reconciles
  *  these away at startup; until then they stay visible instead of silently
  *  looking healthy. */
 export const MISSING_STATUS = 'missing';
+
+/** The tmux session `docker/base/entrypoint.sh` starts. Overridable because a
+ *  project image (#7) may bring its own TMUX_SESSION. */
+export const DEFAULT_TMUX_SESSION = 'main';
+
+/**
+ * `C-b d` -- tmux's default detach binding, which `docker/base/tmux.conf`
+ * leaves alone. Sent when the browser disconnects: Docker has no way to kill an
+ * exec, and a `tmux attach` that is never asked to leave keeps running with a
+ * dangling TTY and keeps sizing the pane
+ * (knowledge/docker-cannot-kill-an-exec.md).
+ */
+export const TMUX_DETACH = Uint8Array.from([0x02, 0x64]);
 
 export interface CreateInstanceInput {
   name: string;
@@ -38,9 +56,19 @@ export class InstanceNotFoundError extends Error {
   }
 }
 
+/** The row exists but no container is attached to it -- the `missing` status.
+ *  There is nothing to attach a terminal to until #8 reconciles it away. */
+export class ContainerMissingError extends Error {
+  constructor(readonly id: string) {
+    super(`instance '${id}' has no container`);
+    this.name = 'ContainerMissingError';
+  }
+}
+
 export interface InstanceServiceOptions {
   baseImage: string;
   instanceEnv: InstanceEnvConfig;
+  tmuxSession?: string | undefined;
   generateId?: () => string;
   now?: () => Date;
 }
@@ -53,6 +81,7 @@ function shortId(): string {
 export class InstanceService {
   private readonly baseImage: string;
   private readonly instanceEnv: InstanceEnvConfig;
+  private readonly tmuxSession: string;
   private readonly generateId: () => string;
   private readonly now: () => Date;
 
@@ -63,6 +92,7 @@ export class InstanceService {
   ) {
     this.baseImage = options.baseImage;
     this.instanceEnv = options.instanceEnv;
+    this.tmuxSession = options.tmuxSession ?? DEFAULT_TMUX_SESSION;
     this.generateId = options.generateId ?? shortId;
     this.now = options.now ?? (() => new Date());
   }
@@ -126,6 +156,25 @@ export class InstanceService {
       await this.engine.removeContainer(record.containerId);
     }
     this.repository.delete(id);
+  }
+
+  /**
+   * Attaches to the instance's tmux session. Every connection gets its own exec
+   * and its own tmux client; the session itself outlives all of them, which is
+   * what makes a reconnect find its scrollback and its running Claude again.
+   */
+  async openTerminal(id: string, size?: TerminalSize): Promise<TerminalSession> {
+    const record = this.repository.get(id);
+    if (record === undefined) throw new InstanceNotFoundError(id);
+    if (record.containerId === null) throw new ContainerMissingError(id);
+
+    return this.engine.attachTerminal(record.containerId, {
+      // `attach`, not `new -A`: the session belongs to the entrypoint, and
+      // creating one here would produce a console nobody is watching over.
+      command: ['tmux', 'attach', '-t', this.tmuxSession],
+      size,
+      closeInput: TMUX_DETACH,
+    });
   }
 
   private async containerStates(): Promise<Map<string, string>> {

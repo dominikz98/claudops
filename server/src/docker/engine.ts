@@ -1,3 +1,5 @@
+import type { Duplex } from 'node:stream';
+
 /**
  * The port between claudops and the Docker Engine.
  *
@@ -23,6 +25,46 @@ export interface ContainerSummary {
   status: string;
 }
 
+/** Terminal geometry as the client reports it, in character cells. */
+export interface TerminalSize {
+  cols: number;
+  rows: number;
+}
+
+export interface AttachTerminalOptions {
+  /** Argv of the process the exec runs, e.g. `tmux attach -t main`. */
+  command: string[];
+  /** Set on the exec itself rather than by a resize afterwards, so the first
+   *  redraw already arrives in the client's geometry instead of Docker's 80x24
+   *  default and then reflowing. */
+  size?: TerminalSize | undefined;
+  /**
+   * Bytes written on close to let the attached process end itself. Docker has
+   * no API to kill an exec and does not close the TTY when the hijacked stream
+   * goes away, so without this the process keeps running -- see
+   * knowledge/docker-cannot-kill-an-exec.md.
+   */
+  closeInput?: Uint8Array | undefined;
+}
+
+/**
+ * One attached TTY. The stream is a raw duplex -- with `Tty: true` Docker does
+ * not multiplex, so bytes written are keystrokes and bytes read are screen
+ * output, in both directions unframed.
+ */
+export interface TerminalSession {
+  readonly stream: Duplex;
+  /** Rejects when Docker refuses, which is what an exec that has already ended
+   *  looks like. Callers log it and carry on. */
+  resize(size: TerminalSize): Promise<void>;
+  /** The exec's exit code once it has ended, `undefined` while it still runs
+   *  or when Docker no longer knows the exec. */
+  exitCode(): Promise<number | undefined>;
+  /** Ends the session: `closeInput` first if there is one, then the stream.
+   *  Idempotent. */
+  close(): void;
+}
+
 export class ImageNotFoundError extends Error {
   constructor(readonly image: string) {
     super(`image '${image}' not found -- build it before starting instances`);
@@ -45,6 +87,13 @@ export class ContainerNotFoundError extends Error {
   }
 }
 
+export class ContainerNotRunningError extends Error {
+  constructor(readonly containerId: string) {
+    super(`container '${containerId}' is not running`);
+    this.name = 'ContainerNotRunningError';
+  }
+}
+
 function describe(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
@@ -59,4 +108,7 @@ export interface DockerEngine {
   removeContainer(containerId: string): Promise<void>;
   /** Every container carrying the instance label, running or not. */
   listManagedContainers(): Promise<ContainerSummary[]>;
+  /** Attaches a TTY exec to a running container. Throws
+   *  ContainerNotFoundError or ContainerNotRunningError. */
+  attachTerminal(containerId: string, options: AttachTerminalOptions): Promise<TerminalSession>;
 }

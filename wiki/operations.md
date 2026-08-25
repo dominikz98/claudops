@@ -22,11 +22,21 @@ curl -s localhost:8080/instances                    # what the server knows, wit
 docker ps --filter label=claudops.instance          # what Docker has
 docker logs claudops-<id>                           # entrypoint output: clone, session start
 docker exec claudops-<id> tmux list-sessions        # is the session alive
+docker exec claudops-<id> tmux list-clients -t main # who is watching the console
 docker exec claudops-<id> tmux capture-pane -p -t main:0.0   # what does Claude show right now
 ```
 
 `capture-pane` is the read-only look at the console: it prints the pane without
 attaching, so it cannot disturb a session someone else is using.
+
+`list-clients` should show one line per open console. A line with nobody on the
+other end is a leftover, and it matters: tmux sizes the window to its attached
+client, so a stale 80x24 entry shrinks the pane for whoever is actually working.
+Send it away by hand:
+
+```bash
+docker exec claudops-<id> tmux detach-client -t /dev/pts/3
+```
 
 The two lists should agree. Where they do not, the status says which way:
 
@@ -59,11 +69,41 @@ Docker had to kill the container -- that is a bug, not a slow shutdown. The
 instance then lists as `exited`; there is no restart endpoint yet, so getting it
 running again means deleting it and creating a new one.
 
+## The console over the WebSocket
+
+`/instances/<id>/terminal` mirrors the session for anyone who can reach the
+server. Any WebSocket client will do:
+
+```bash
+npx wscat -c 'ws://localhost:8080/instances/<id>/terminal?cols=120&rows=40'
+```
+
+Typing works, and so does `Ctrl-b d` -- which detaches, ends that connection and
+leaves Claude running, exactly like the `docker exec` route. The protocol and the
+close codes are in [server/README.md](../server/README.md#terminal).
+
+Two consoles on the same instance mirror each other; that is tmux, not a bug.
+Both see the same pane, and the smaller window wins the size.
+
 ## Troubleshooting
 
 **The console is empty or Claude is not running.** Attach and look. The pane runs
 Claude followed by a login shell, so if Claude exited you land in bash with the
 session still alive. `docker logs` shows whether the clone worked.
+
+**The console closes immediately.** The close code says why: `4404` no such
+instance, `4409` the container is not running (or there is no tmux session to
+attach to), `4503` the Docker daemon is unreachable. `wscat` prints the code on
+disconnect.
+
+**The console closed by itself after `Ctrl-P Ctrl-Q`.** That is Docker's own
+detach sequence for an exec, and it takes the connection down before the bytes
+reach tmux. Nothing is lost -- reconnect and the session is where it was.
+
+**The pane is suddenly 80x24 and text wraps wrongly.** Something is attached at
+that size: another console, or a leftover client from a browser that went away
+without closing the socket. `tmux list-clients` names them, `tmux detach-client`
+removes them.
 
 **The clone failed.** The container comes up anyway, on purpose -- the session
 starts in `/workspace` so you can attach and see the cause. Usual suspects: wrong
@@ -135,5 +175,5 @@ Claude session open in it.
 ## Not there yet
 
 Egress firewall and UI login (#9), automatic recycling and limits (#8), the
-browser console (#4, #5) and projects (#6, #7). Restarting an instance is not an
-endpoint either; delete and create.
+browser page for the console (#5) and projects (#6, #7). Restarting an instance
+is not an endpoint either; delete and create.

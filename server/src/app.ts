@@ -1,3 +1,4 @@
+import websocketPlugin from '@fastify/websocket';
 import Fastify, { type FastifyInstance } from 'fastify';
 import type { InstanceEnvConfig } from './config.ts';
 import type { Database } from './db/index.ts';
@@ -9,6 +10,8 @@ import {
 } from './docker/engine.ts';
 import { instanceRoutes } from './instances/routes.ts';
 import { InstanceService } from './instances/service.ts';
+import type { BridgeOptions } from './terminal/bridge.ts';
+import { terminalRoutes } from './terminal/routes.ts';
 
 interface HttpError {
   statusCode: number | undefined;
@@ -29,12 +32,19 @@ function asHttpError(error: unknown): HttpError {
   };
 }
 
+/** Keystrokes and the occasional paste -- a megabyte is already generous, and a
+ *  cap keeps a rogue client from making the server buffer without bound. */
+const MAX_WS_PAYLOAD = 1024 * 1024;
+
 export interface AppOptions {
   db: Database;
   engine: DockerEngine;
   baseImage: string;
   instanceEnv: InstanceEnvConfig;
+  tmuxSession?: string | undefined;
   logLevel?: string;
+  /** Only the tests set this, to keep the terminal heartbeat out of real time. */
+  terminalBridge?: BridgeOptions | undefined;
 }
 
 export function buildApp(options: AppOptions): FastifyInstance {
@@ -57,6 +67,7 @@ export function buildApp(options: AppOptions): FastifyInstance {
   const service = new InstanceService(new InstanceRepository(options.db), options.engine, {
     baseImage: options.baseImage,
     instanceEnv: options.instanceEnv,
+    tmuxSession: options.tmuxSession,
   });
 
   app.setErrorHandler((error: unknown, request, reply) => {
@@ -103,7 +114,12 @@ export function buildApp(options: AppOptions): FastifyInstance {
     return { status: 'ok', docker: 'ok' };
   });
 
+  // The console is a raw duplex, not JSON over HTTP: @fastify/websocket brings
+  // the upgrade handling and `ws`, the bridge in src/terminal does the piping.
+  void app.register(websocketPlugin, { options: { maxPayload: MAX_WS_PAYLOAD } });
+
   void app.register(instanceRoutes, { service });
+  void app.register(terminalRoutes, { service, bridge: options.terminalBridge });
 
   return app;
 }
