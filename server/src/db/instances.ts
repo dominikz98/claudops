@@ -1,11 +1,17 @@
 import type { Database } from 'better-sqlite3';
 
-/** An instance as it is stored -- identity only, no status and no secrets. */
+/** An instance as it is stored -- identity only, no status and no secrets.
+ *
+ *  `repoUrl` and `repoBranch` are a snapshot of what the container was given,
+ *  not a view onto the project: editing the project afterwards must not rewrite
+ *  what an already running instance was started from. `projectId` is null only
+ *  for rows created before projects existed. */
 export interface InstanceRecord {
   id: string;
   name: string;
   image: string;
   containerId: string | null;
+  projectId: string | null;
   repoUrl: string | null;
   repoBranch: string | null;
   createdAt: string;
@@ -15,6 +21,7 @@ export interface NewInstance {
   id: string;
   name: string;
   image: string;
+  projectId: string | null;
   repoUrl: string | null;
   repoBranch: string | null;
   createdAt: string;
@@ -25,6 +32,7 @@ interface InstanceRow {
   name: string;
   image: string;
   container_id: string | null;
+  project_id: string | null;
   repo_url: string | null;
   repo_branch: string | null;
   created_at: string;
@@ -36,6 +44,7 @@ function toRecord(row: InstanceRow): InstanceRecord {
     name: row.name,
     image: row.image,
     containerId: row.container_id,
+    projectId: row.project_id,
     repoUrl: row.repo_url,
     repoBranch: row.repo_branch,
     createdAt: row.created_at,
@@ -48,8 +57,9 @@ export class InstanceRepository {
   insert(instance: NewInstance): InstanceRecord {
     this.db
       .prepare(
-        `INSERT INTO instances (id, name, image, container_id, repo_url, repo_branch, created_at)
-         VALUES (@id, @name, @image, NULL, @repoUrl, @repoBranch, @createdAt)`,
+        `INSERT INTO instances
+           (id, name, image, container_id, project_id, repo_url, repo_branch, created_at)
+         VALUES (@id, @name, @image, NULL, @projectId, @repoUrl, @repoBranch, @createdAt)`,
       )
       .run(instance);
 

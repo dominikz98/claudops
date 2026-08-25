@@ -22,4 +22,17 @@ describe('hash routes', () => {
   it('points the list at a hash rather than at the API path', () => {
     expect(routeHash({ view: 'list' })).toBe('#/');
   });
+
+  it('round-trips the projects route', () => {
+    expect(parseRoute('#/projects')).toEqual({ view: 'projects' });
+    expect(routeHash({ view: 'projects' })).toBe('#/projects');
+  });
+
+  it('does not read a near miss as the projects page', () => {
+    // `/projects` is a REST resource, so only the exact hash is a page -- and
+    // anything else lands on the list rather than on a blank screen.
+    for (const hash of ['#/project', '#/projects/', '#/projects?x=1']) {
+      expect(parseRoute(hash)).toEqual({ view: 'list' });
+    }
+  });
 });

@@ -33,3 +33,6 @@ Format and maintenance rules: skill `domain-knowledge`.
 - [Hand xterm the raw bytes of a frame, never a per-frame decoded string](xterm-write-bytes-not-strings.md) - a multi-byte character can be split across two frames
 - [The web UI routes in the hash because the path belongs to the API](spa-hash-routing-avoids-the-api-namespace.md) - `/instances/<id>` is already a REST resource
 - [Playwright's browser is a separate install step](playwright-browsers-need-an-explicit-install.md) - pnpm 10 blocks the postinstall that fetches it
+- [A project's PAT is encrypted at rest, an instance's is not stored at all](project-pat-encrypted-at-rest.md) - why the one secret in the database is allowed there
+- [Foreign keys are off unless openDatabase opened the file](sqlite-fk-needs-the-pragma-in-tests.md) - the delete a test sees succeed and production refuses
+- [In WAL mode a fresh row is in the -wal file, not in the .db](wal-keeps-fresh-rows-out-of-the-db-file.md) - the grep that could not fail

@@ -6,6 +6,7 @@ import { buildApp } from '../src/app.ts';
 import { migrate } from '../src/db/migrations.ts';
 import { TerminalClose } from '../src/terminal/protocol.ts';
 import { FakeDockerEngine } from './fake-engine.ts';
+import { createTestProject, testCipher } from './fixtures.ts';
 
 interface Closed {
   code: number;
@@ -46,6 +47,7 @@ describe('terminal bridge over WebSocket', () => {
         gitUserName: undefined,
         gitUserEmail: undefined,
       },
+      cipher: testCipher(),
       logLevel: 'silent',
       // Fast enough to see several heartbeats inside a test, slow enough not to
       // flood the socket.
@@ -64,10 +66,12 @@ describe('terminal bridge over WebSocket', () => {
   });
 
   const createInstance = async (): Promise<{ id: string; containerId: string }> => {
+    // An instance comes from a project now, so the console needs one too.
+    const projectId = await createTestProject(app);
     const response = await app.inject({
       method: 'POST',
       url: '/instances',
-      payload: { name: 'demo' },
+      payload: { name: 'demo', projectId },
     });
     return response.json<{ id: string; containerId: string }>();
   };

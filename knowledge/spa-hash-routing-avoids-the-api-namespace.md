@@ -1,9 +1,9 @@
 # The web UI routes in the hash because the path belongs to the API
 
 **Fact.** The SPA and the REST API share one origin and one port. Its routes
-therefore live in the fragment -- `#/i/<id>` for a console -- and never in the
-path. `@fastify/static` is registered with `prefix: '/'` and no catch-all
-rewrite.
+therefore live in the fragment -- `#/i/<id>` for a console, `#/projects` for the
+projects page -- and never in the path. `@fastify/static` is registered with
+`prefix: '/'` and no catch-all rewrite.
 
 **Why.** The obvious history route for a console would be `/instances/<id>`,
 which is already the REST resource. Serving the SPA there would mean either
@@ -14,5 +14,7 @@ know nothing about them: every page load is `GET /`, exact API routes keep
 winning against the static wildcard, and `setNotFoundHandler` still answers
 unknown paths with JSON.
 
-**Applies to.** `server/src/app.ts`, `web/src/router.ts`. A future login (#9) or
-projects UI (#6) inherits the same constraint.
+**Applies to.** `server/src/app.ts`, `web/src/router.ts`. `#/projects` is the
+same case seen a second time: `/projects` became a REST resource in #6, so only
+the exact hash is a page and anything near it -- `#/projects/`, `#/projects?x=1`
+-- falls back to the list. A future login (#9) inherits the constraint too.

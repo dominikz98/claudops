@@ -7,6 +7,7 @@ import { createApi } from './api.ts';
 import { onRouteChange, parseRoute, type Route } from './router.ts';
 import { mountConsole } from './views/console.ts';
 import { mountList } from './views/list.ts';
+import { mountProjects } from './views/projects.ts';
 import type { View } from './views/view.ts';
 
 const root = document.querySelector<HTMLElement>('#app');
@@ -17,11 +18,17 @@ let current: View | undefined;
 
 // An arrow rather than a declaration: a hoisted function would be checked
 // against `root` before the null guard above narrowed it.
+const mount = (route: Route): View => {
+  if (route.view === 'list') return mountList(root, api);
+  if (route.view === 'projects') return mountProjects(root, api);
+  return mountConsole(root, api, route.id);
+};
+
 const render = (route: Route): void => {
   // Order matters: the outgoing view has to close its socket and stop its poll
   // before the incoming one takes the container over.
   current?.destroy();
-  current = route.view === 'list' ? mountList(root, api) : mountConsole(root, api, route.id);
+  current = mount(route);
 };
 
 onRouteChange(render);

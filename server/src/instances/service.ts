@@ -1,4 +1,3 @@
-import { randomBytes } from 'node:crypto';
 import type { InstanceEnvConfig } from '../config.ts';
 import type { InstanceRepository } from '../db/instances.ts';
 import type {
@@ -8,6 +7,8 @@ import type {
   TerminalSize,
 } from '../docker/engine.ts';
 import { containerName, instanceLabels } from '../docker/labels.ts';
+import { shortId } from '../ids.ts';
+import type { ProjectService, ProjectTemplate } from '../projects/service.ts';
 
 /** A container claudops knows about but Docker no longer has. #8 reconciles
  *  these away at startup; until then they stay visible instead of silently
@@ -29,11 +30,9 @@ export const TMUX_DETACH = Uint8Array.from([0x02, 0x64]);
 
 export interface CreateInstanceInput {
   name: string;
-  repoUrl?: string | undefined;
-  repoBranch?: string | undefined;
-  /** PAT for a private repo. Goes straight into the container environment and
-   *  is never stored or logged (knowledge/git-token-via-credential-helper.md). */
-  gitToken?: string | undefined;
+  /** Repository, branch and PAT all come from here -- an instance is created
+   *  from a project, never configured by hand. */
+  projectId: string;
 }
 
 /** What the API returns. Deliberately without any token field. */
@@ -42,6 +41,7 @@ export interface InstanceView {
   name: string;
   image: string;
   containerId: string | null;
+  projectId: string | null;
   repoUrl: string | null;
   repoBranch: string | null;
   createdAt: string;
@@ -68,19 +68,17 @@ export class ContainerMissingError extends Error {
 export interface InstanceServiceOptions {
   baseImage: string;
   instanceEnv: InstanceEnvConfig;
+  /** Where repository, branch and PAT come from. */
+  projects: ProjectService;
   tmuxSession?: string | undefined;
   generateId?: () => string;
   now?: () => Date;
 }
 
-/** Short, URL-safe and still unique enough for a handful of containers. */
-function shortId(): string {
-  return randomBytes(6).toString('hex');
-}
-
 export class InstanceService {
   private readonly baseImage: string;
   private readonly instanceEnv: InstanceEnvConfig;
+  private readonly projects: ProjectService;
   private readonly tmuxSession: string;
   private readonly generateId: () => string;
   private readonly now: () => Date;
@@ -92,19 +90,27 @@ export class InstanceService {
   ) {
     this.baseImage = options.baseImage;
     this.instanceEnv = options.instanceEnv;
+    this.projects = options.projects;
     this.tmuxSession = options.tmuxSession ?? DEFAULT_TMUX_SESSION;
     this.generateId = options.generateId ?? shortId;
     this.now = options.now ?? (() => new Date());
   }
 
   async create(input: CreateInstanceInput): Promise<InstanceView> {
+    // Read before anything is written: an unknown project, or one whose PAT no
+    // longer decrypts, has to fail without leaving a row or a container behind.
+    const template = this.projects.template(input.projectId);
+
     const id = this.generateId();
     const record = this.repository.insert({
       id,
       name: input.name,
       image: this.baseImage,
-      repoUrl: input.repoUrl ?? null,
-      repoBranch: input.repoBranch ?? null,
+      projectId: template.id,
+      // A snapshot, not a reference: what the container was told to clone stays
+      // readable on the instance even after the project moves on.
+      repoUrl: template.repoUrl,
+      repoBranch: template.repoBranch,
       createdAt: this.now().toISOString(),
     });
 
@@ -113,7 +119,7 @@ export class InstanceService {
     // a row without a container shows up as `missing` and is cleanable.
     let containerId: string;
     try {
-      containerId = await this.engine.runContainer(this.specFor(id, input));
+      containerId = await this.engine.runContainer(this.specFor(id, template));
     } catch (error) {
       this.repository.delete(id);
       throw error;
@@ -192,28 +198,31 @@ export class InstanceService {
     return states.get(containerId) ?? MISSING_STATUS;
   }
 
-  private specFor(id: string, input: CreateInstanceInput): ContainerSpec {
+  private specFor(id: string, template: ProjectTemplate): ContainerSpec {
     return {
       instanceId: id,
       name: containerName(id),
       image: this.baseImage,
-      env: this.envFor(input),
+      env: this.envFor(template),
       labels: instanceLabels(id),
     };
   }
 
   /** Exactly the variables docker/base/README.md documents. An
    *  ANTHROPIC_API_KEY is never among them -- it would override the
-   *  subscription (knowledge/auth-token-handling.md). */
-  private envFor(input: CreateInstanceInput): Record<string, string> {
+   *  subscription (knowledge/auth-token-handling.md). The PAT is handed over as
+   *  GIT_TOKEN and read by the credential helper, so it never reaches
+   *  .git/config or the console
+   *  (knowledge/git-token-via-credential-helper.md). */
+  private envFor(template: ProjectTemplate): Record<string, string> {
     const env: Record<string, string> = {};
     const set = (key: string, value: string | undefined): void => {
       if (value !== undefined && value !== '') env[key] = value;
     };
 
-    set('REPO_URL', input.repoUrl);
-    set('REPO_BRANCH', input.repoBranch);
-    set('GIT_TOKEN', input.gitToken);
+    set('REPO_URL', template.repoUrl);
+    set('REPO_BRANCH', template.repoBranch ?? undefined);
+    set('GIT_TOKEN', template.gitToken);
     set('GIT_USER_NAME', this.instanceEnv.gitUserName);
     set('GIT_USER_EMAIL', this.instanceEnv.gitUserEmail);
     set('CLAUDE_CODE_OAUTH_TOKEN', this.instanceEnv.claudeOauthToken);

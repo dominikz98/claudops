@@ -19,6 +19,31 @@ const MIGRATIONS: readonly string[] = [
    );
    CREATE UNIQUE INDEX instances_container_id ON instances (container_id)
      WHERE container_id IS NOT NULL;`,
+
+  // 2 -- projects, the template an instance is created from. `git_token` holds
+  // the sealed blob from src/secrets/cipher.ts, never a readable PAT -- the one
+  // secret in this file, and only because a template outlives its instances.
+  //
+  // `project_id` stays nullable: SQLite cannot add a NOT NULL column without a
+  // default, and rows from before this migration have no project to point at.
+  // The service requires one on create; an old row simply shows none.
+  //
+  // instances.repo_url and repo_branch stay where they are. They are a snapshot
+  // of what the container was actually given, so editing a project later cannot
+  // rewrite the history of an instance already running.
+  `CREATE TABLE projects (
+     id               TEXT PRIMARY KEY,
+     name             TEXT NOT NULL UNIQUE,
+     repo_url         TEXT NOT NULL,
+     repo_branch      TEXT,
+     block_dotnet     INTEGER NOT NULL DEFAULT 0,
+     block_playwright INTEGER NOT NULL DEFAULT 0,
+     git_token        TEXT,
+     created_at       TEXT NOT NULL,
+     updated_at       TEXT NOT NULL
+   );
+   ALTER TABLE instances ADD COLUMN project_id TEXT REFERENCES projects (id);
+   CREATE INDEX instances_project_id ON instances (project_id);`,
 ];
 
 export function schemaVersion(db: Database): number {

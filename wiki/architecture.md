@@ -19,9 +19,9 @@ Container per instance: project image -> clone repo -> tmux -> claude
 | Component | Role | State |
 | --- | --- | --- |
 | `claudops-base` | Base image: Node, Claude Code CLI, git, tmux, non-root user, entrypoint | Available |
-| `claudops-server` | Fastify: instance REST, the terminal bridge and the UI; projects to come | Instance REST, terminal and UI available; #6 open |
-| Web UI | Vite SPA served by the server on the same port: instance list and console | Available |
-| SQLite | Metadata for instances; projects join it with #6 | Available |
+| `claudops-server` | Fastify: project and instance REST, the terminal bridge and the UI | Available; per-project images are #7 |
+| Web UI | Vite SPA served by the server on the same port: projects, instance list and console | Available |
+| SQLite | Metadata for projects and instances, plus the encrypted project PATs | Available |
 
 ## Decisions worth knowing
 
@@ -50,10 +50,29 @@ would have to shadow the API or branch on the `Accept` header, and a catch-all
 call. A checkout where the UI was never built still starts: the server logs a
 warning and serves the API alone.
 
+**A project is the template, an instance is a copy of it.** Repository, branch,
+building blocks and the git credential live on the project; creating an instance
+takes a name and a project id and nothing else. What the container was told to
+clone is written onto the instance as well, as a snapshot -- so editing a project
+does not rewrite the history of an instance already running. A project cannot be
+deleted while instances still point at it; the request answers `409` with the
+count rather than leaving them without an origin.
+
+**The project PAT is the one secret in the database, and it is encrypted.**
+Everything else claudops handles passes straight through into a container and is
+forgotten. A template has to outlive its instances, so its credential is stored
+-- as an AES-256-GCM blob whose key comes from `CLAUDOPS_SECRET_KEY` and never
+touches the database. The file on disk therefore holds no readable token, which
+is what makes a copied database or a backup uninteresting. No response ever
+carries the PAT back: a project reports only whether one is set. Without a key
+the server still runs; it just refuses to store a PAT instead of keeping it in
+the clear.
+
 **Environments are prebuilt images.** A project defines its environment through
 building blocks (dotnet, Playwright); the server builds a project image from them
 once and instances start from it. devcontainer features were rejected -- they
-install at container start and cache nothing.
+install at container start and cache nothing. The flags are stored today, the
+build is #7; until then every instance starts from `claudops-base`.
 
 **Every resource is labelled.** Containers and volumes carry
 `claudops.instance=<id>`, which is what makes a complete delete and a startup
@@ -82,4 +101,6 @@ would override the subscription and bill per token.
 Packages #2 to #5 produce the first walking skeleton: start an instance, use its
 console in the browser. All four are done -- an instance can be created, driven
 and deleted from a browser page, and a refresh finds the session where it was.
-#6 to #9 make it usable in practice. See issue #1.
+#6 to #9 make it usable in practice; #6 is done, so a repository and its
+credential are configured once as a project rather than per instance. See issue
+ #1.

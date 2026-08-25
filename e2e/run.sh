@@ -18,6 +18,9 @@ source "$E2E_DIR/../server/smoke-lib.sh"
 
 IMAGE="${IMAGE:-claudops-base:e2e}"
 export CLAUDOPS_E2E_IMAGE="$IMAGE"
+# A fresh key per run: the projects created here store a PAT, and nothing needs
+# to read them again afterwards.
+export CLAUDOPS_E2E_SECRET_KEY="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))')"
 
 trap smoke_cleanup EXIT
 

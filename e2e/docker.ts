@@ -79,3 +79,11 @@ export function listClients(containerId: string, session: string): string[] {
 export function removeContainers(instanceId: string): void {
   for (const id of containersFor(instanceId)) ask('rm', '-f', id);
 }
+
+/** Every environment variable of a container, as `KEY=value` lines. What the
+ *  server handed the container is only visible from out here. */
+export function containerEnv(containerId: string): string[] {
+  return docker('inspect', '-f', '{{range .Config.Env}}{{println .}}{{end}}', containerId)
+    .split('\n')
+    .filter((line) => line !== '');
+}

@@ -41,6 +41,13 @@ export default defineConfig({
       CLAUDOPS_PORT: PORT,
       CLAUDOPS_DB: '.tmp/claudops.db',
       CLAUDOPS_BASE_IMAGE: process.env.CLAUDOPS_E2E_IMAGE ?? 'claudops-base:e2e',
+      // A project keeps its PAT encrypted, so the server needs a key. `run.sh`
+      // generates one; the fallback keeps a bare `playwright test` working and
+      // is a test key, not a secret -- the database it protects is thrown away
+      // with `.tmp` on every run.
+      CLAUDOPS_SECRET_KEY:
+        process.env.CLAUDOPS_E2E_SECRET_KEY ??
+        '2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a',
       CLAUDOPS_LOG_LEVEL: 'warn',
     },
   },

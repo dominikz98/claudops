@@ -16,9 +16,10 @@ in [server/README.md](../server/README.md).
 
 ## Current state
 
-An instance can be created, driven and deleted from a browser page, and its
-console survives a refresh. Everything else is planned and marked with its issue
-number on the pages below. The component status table lives in the
+A project holds a repository, a branch and its credential; an instance is created
+from it, driven and deleted from a browser page, and its console survives a
+refresh. Everything else is planned and marked with its issue number on the pages
+below. The component status table lives in the
 [root README](../README.md#state) -- kept in one place so the two cannot drift
 apart.
 

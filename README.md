@@ -7,8 +7,9 @@ lives in the container, not in the browser tab.
 
 ## State
 
-Instances can be created, driven and deleted from a browser page on the server's
-own port, and a console survives a refresh. Everything else is planned; see the
+Projects hold a repository, a branch and its credential; instances are created
+from them, driven and deleted from a browser page on the server's own port, and a
+console survives a refresh. Everything else is planned; see the
 [issues](https://github.com/dominikz98/claudops/issues) and
 [EPIC #1](https://github.com/dominikz98/claudops/issues/1).
 
@@ -18,7 +19,8 @@ own port, and a console survives a refresh. Everything else is planned; see the
 | Server (Fastify, dockerode, SQLite) | Available, smoke-tested |
 | Terminal bridge (WebSocket) | Available, smoke-tested |
 | Web UI (xterm.js) | Available, end-to-end tested |
-| Projects and project images | Planned (#6, #7) |
+| Projects (repo, branch, PAT) | Available, end-to-end tested |
+| Project images from building blocks | Planned (#7) |
 | Lifecycle, limits, recycling | Planned (#8) |
 | Auth, egress firewall, UI login | Planned (#9) |
 
@@ -30,16 +32,25 @@ pnpm install && pnpm build
 ```
 
 ```bash
-CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN" node server/dist/index.js
+CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN" \
+CLAUDOPS_SECRET_KEY="$(node -e 'console.log(require("node:crypto").randomBytes(32).toString("base64"))')" \
+node server/dist/index.js
 ```
 
-Then <http://localhost:8080>: name an instance, press Create, press Console. The
-same thing over the API, which is what the page uses and nothing else needs:
+Then <http://localhost:8080>: create a project on the **Projects** page, name an
+instance, pick that project, press Create, press Console. The same thing over the
+API, which is what the page uses and nothing else needs:
+
+```bash
+curl -s localhost:8080/projects \
+  -H 'content-type: application/json' \
+  -d '{"name":"claudops","repoUrl":"https://github.com/dominikz98/claudops.git"}'
+```
 
 ```bash
 curl -s localhost:8080/instances \
   -H 'content-type: application/json' \
-  -d '{"name":"demo","repoUrl":"https://github.com/dominikz98/claudops.git"}'
+  -d '{"name":"demo","projectId":"<project id>"}'
 ```
 
 The answer carries the instance `id`, and its console is one WebSocket away:

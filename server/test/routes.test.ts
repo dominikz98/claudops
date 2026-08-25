@@ -4,10 +4,13 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.ts';
 import { migrate } from '../src/db/migrations.ts';
 import { FakeDockerEngine } from './fake-engine.ts';
+import { createTestProject, TEST_REPO_URL, testCipher } from './fixtures.ts';
 
 describe('instance REST API', () => {
   let app: FastifyInstance;
   let engine: FakeDockerEngine;
+  /** The project instances are created from -- there is no other way in. */
+  let projectId: string;
 
   beforeEach(async () => {
     const db = new Database(':memory:');
@@ -22,9 +25,11 @@ describe('instance REST API', () => {
         gitUserName: undefined,
         gitUserEmail: undefined,
       },
+      cipher: testCipher(),
       logLevel: 'silent',
     });
     await app.ready();
+    projectId = await createTestProject(app, { repoBranch: 'main', gitToken: 'pat-secret' });
   });
 
   afterEach(async () => {
@@ -36,33 +41,30 @@ describe('instance REST API', () => {
 
   describe('POST /instances', () => {
     it('creates an instance and points at it', async () => {
-      const response = await create({ name: 'demo' });
+      const response = await create({ name: 'demo', projectId });
 
       expect(response.statusCode).toBe(201);
       const body = response.json<{ id: string; status: string; containerId: string }>();
-      expect(body).toMatchObject({ name: 'demo', status: 'running' });
+      expect(body).toMatchObject({ name: 'demo', status: 'running', projectId });
       expect(response.headers.location).toBe(`/instances/${body.id}`);
       expect(engine.containers.has(body.containerId)).toBe(true);
     });
 
-    it('accepts a repository and never echoes the token back', async () => {
-      const response = await create({
-        name: 'demo',
-        repoUrl: 'https://github.com/dominikz98/claudops.git',
-        repoBranch: 'main',
-        gitToken: 'pat-secret',
-      });
+    it('takes the repository from the project and never echoes its token', async () => {
+      const response = await create({ name: 'demo', projectId });
 
       expect(response.statusCode).toBe(201);
       expect(response.body).not.toContain('pat-secret');
-      expect(response.json<{ repoBranch: string }>().repoBranch).toBe('main');
+      expect(response.json<{ repoUrl: string; repoBranch: string }>()).toMatchObject({
+        repoUrl: TEST_REPO_URL,
+        repoBranch: 'main',
+      });
     });
 
-    it('rejects a request without a name', async () => {
-      const response = await create({});
-
-      expect(response.statusCode).toBe(400);
-      expect(response.json<{ error: string }>().error).toBe('invalid_request');
+    it('rejects a request without a name or without a project', async () => {
+      expect((await create({})).statusCode).toBe(400);
+      expect((await create({ name: 'demo' })).statusCode).toBe(400);
+      expect((await create({ projectId })).json<{ error: string }>().error).toBe('invalid_request');
     });
 
     it('rejects an unknown field instead of silently dropping it', async () => {
@@ -71,14 +73,34 @@ describe('instance REST API', () => {
       expect(response.statusCode).toBe(400);
     });
 
+    it('rejects the repository fields that moved to the project', async () => {
+      // A caller still on the old API has to hear about it rather than get an
+      // instance pointed at the wrong repository.
+      const response = await create({
+        name: 'demo',
+        projectId,
+        repoUrl: 'https://github.com/someone/else.git',
+        gitToken: 'pat-secret',
+      });
+
+      expect(response.statusCode).toBe(400);
+    });
+
     it('rejects an empty name', async () => {
-      expect((await create({ name: '' })).statusCode).toBe(400);
+      expect((await create({ name: '', projectId })).statusCode).toBe(400);
+    });
+
+    it('answers 422 for a project that does not exist', async () => {
+      const response = await create({ name: 'demo', projectId: 'nope' });
+
+      expect(response.statusCode).toBe(422);
+      expect(response.json<{ error: string }>().error).toBe('project_not_found');
     });
 
     it('answers 422 when the base image is not built', async () => {
       engine.knownImages.clear();
 
-      const response = await create({ name: 'demo' });
+      const response = await create({ name: 'demo', projectId });
 
       expect(response.statusCode).toBe(422);
       expect(response.json<{ error: string }>().error).toBe('image_not_found');
@@ -87,7 +109,7 @@ describe('instance REST API', () => {
     it('answers 503 while Docker is unreachable', async () => {
       engine.unavailable = true;
 
-      const response = await create({ name: 'demo' });
+      const response = await create({ name: 'demo', projectId });
 
       expect(response.statusCode).toBe(503);
       expect(response.json<{ error: string }>().error).toBe('docker_unavailable');
@@ -103,8 +125,8 @@ describe('instance REST API', () => {
     });
 
     it('lists the status Docker reports', async () => {
-      const first = (await create({ name: 'first' })).json<{ containerId: string }>();
-      await create({ name: 'second' });
+      const first = (await create({ name: 'first', projectId })).json<{ containerId: string }>();
+      await create({ name: 'second', projectId });
       engine.setState(first.containerId, 'exited');
 
       const instances = (await app.inject({ method: 'GET', url: '/instances' })).json<{
@@ -117,7 +139,7 @@ describe('instance REST API', () => {
     });
 
     it('answers 503 rather than a stale status when Docker is gone', async () => {
-      await create({ name: 'demo' });
+      await create({ name: 'demo', projectId });
       engine.unavailable = true;
 
       const response = await app.inject({ method: 'GET', url: '/instances' });
@@ -128,7 +150,7 @@ describe('instance REST API', () => {
 
   describe('GET /instances/:id', () => {
     it('returns one instance', async () => {
-      const { id } = (await create({ name: 'demo' })).json<{ id: string }>();
+      const { id } = (await create({ name: 'demo', projectId })).json<{ id: string }>();
 
       const response = await app.inject({ method: 'GET', url: `/instances/${id}` });
 
@@ -146,7 +168,7 @@ describe('instance REST API', () => {
 
   describe('DELETE /instances/:id', () => {
     it('removes the container and the instance', async () => {
-      const { id, containerId } = (await create({ name: 'demo' })).json<{
+      const { id, containerId } = (await create({ name: 'demo', projectId })).json<{
         id: string;
         containerId: string;
       }>();
@@ -166,7 +188,7 @@ describe('instance REST API', () => {
     });
 
     it('answers 404 on a second delete', async () => {
-      const { id } = (await create({ name: 'demo' })).json<{ id: string }>();
+      const { id } = (await create({ name: 'demo', projectId })).json<{ id: string }>();
 
       expect((await app.inject({ method: 'DELETE', url: `/instances/${id}` })).statusCode).toBe(204);
       expect((await app.inject({ method: 'DELETE', url: `/instances/${id}` })).statusCode).toBe(404);

@@ -79,6 +79,39 @@ describe('loadConfig', () => {
     expect(JSON.stringify(config)).not.toContain('must-be-ignored');
   });
 
+  describe('secret key', () => {
+    const key = Buffer.alloc(32, 0x03);
+
+    it('leaves the server without a cipher when no key is set', () => {
+      expect(loadConfig({}).cipher.available).toBe(false);
+    });
+
+    it('builds a working cipher from base64 and from hex', () => {
+      for (const raw of [key.toString('base64'), key.toString('hex')]) {
+        const { cipher } = loadConfig({ CLAUDOPS_SECRET_KEY: raw });
+
+        expect(cipher.available).toBe(true);
+        expect(cipher.open(cipher.seal('pat-secret'))).toBe('pat-secret');
+      }
+    });
+
+    it('refuses a key of the wrong size rather than running with a weak one', () => {
+      expect(() => loadConfig({ CLAUDOPS_SECRET_KEY: 'too-short' })).toThrow(ConfigError);
+      expect(() =>
+        loadConfig({ CLAUDOPS_SECRET_KEY: Buffer.alloc(16).toString('base64') }),
+      ).toThrow(ConfigError);
+    });
+
+    it('keeps the key material out of the config object', () => {
+      // A Buffer serialises as every one of its bytes, and this object reaches a
+      // log line eventually -- hence a cipher in the config and not a key.
+      const serialised = JSON.stringify(loadConfig({ CLAUDOPS_SECRET_KEY: key.toString('base64') }));
+
+      expect(serialised).not.toContain(key.toString('base64'));
+      expect(serialised).not.toContain('Buffer');
+    });
+  });
+
   describe('docker transport', () => {
     it('uses the platform default socket', () => {
       expect(defaultDockerSocket('linux')).toBe('/var/run/docker.sock');

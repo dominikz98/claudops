@@ -8,7 +8,9 @@ to come (#8).
 <http://localhost:8080> -- the same port as the API. The instance list refreshes
 itself every three seconds with the status Docker reports; **Console** opens the
 tmux session of an instance, **Delete** asks twice and then takes the container
-with it.
+with it. **Projects** in the top right manages the templates instances are
+created from; that page does not poll, because nothing but this page changes a
+project.
 
 There is no login yet (#9), so anyone who can reach the port can start and delete
 instances and type into every console. Keep it on a trusted network or behind a
@@ -38,6 +40,7 @@ state, not a hypothetical one.
 ## Look around
 
 ```bash
+curl -s localhost:8080/projects                     # the templates, with their instance counts
 curl -s localhost:8080/instances                    # what the server knows, with live status
 docker ps --filter label=claudops.instance          # what Docker has
 docker logs claudops-<id>                           # entrypoint output: clone, session start
@@ -162,7 +165,22 @@ half-created one behind.
 **A request answers 400 for a field that looks right.** Unknown fields are
 rejected rather than ignored, so a typo in `repoBranch` fails the request
 instead of silently starting an instance on the default branch. The message
-names the offending property.
+names the offending property. `POST /instances` in particular takes only `name`
+and `projectId` -- `repoUrl` and `gitToken` moved to the project and are a 400
+here.
+
+**`POST /projects` answers 422 `secret_key_missing`.** The server has no
+`CLAUDOPS_SECRET_KEY`, so it refuses to store a PAT rather than keeping it in the
+clear. Set the key and restart; a project without a token works either way.
+
+**`POST /instances` answers 422 `secret_undecryptable`.** The project's PAT was
+encrypted with a different key than the one the server has now -- a rotated or
+lost `CLAUDOPS_SECRET_KEY`. Nothing else breaks: enter the token again on the
+project (or remove it) and the next instance starts.
+
+**`DELETE /projects/<id>` answers 409.** Instances still point at that project,
+running or exited. The message says how many; delete those first. A project is
+never deleted out from under an instance.
 
 ## Resource limits
 
@@ -177,11 +195,20 @@ docker run -d --cpus 2 --memory 4g ... claudops-base
 
 ## The database
 
-Instance metadata lives in the SQLite file named by `CLAUDOPS_DB`, by default
-`data/claudops.db` next to wherever the server was started. It holds identity
-only -- no status, no tokens. Deleting it loses the names and creation times of
-running instances, but not the instances: their containers keep running and are
-still findable by label.
+Projects and instance metadata live in the SQLite file named by `CLAUDOPS_DB`, by
+default `data/claudops.db` next to wherever the server was started. It holds
+identity, no status -- and one secret: the PAT of each project, encrypted with
+`CLAUDOPS_SECRET_KEY`. The file on its own is therefore no use to anyone; the key
+is what makes it readable, so keep the two apart in a backup.
+
+Deleting the file loses the projects, and the names and creation times of running
+instances -- but not the instances: their containers keep running and are still
+findable by label.
+
+Rotating the key is not a migration: the sealed PATs simply stop opening. Enter
+them again on each project, and instance creation works from the next attempt.
+The database runs in WAL mode, so a fresh write is in `claudops.db-wal` until
+SQLite checkpoints it -- copy all three files or none.
 
 ```bash
 docker ps -a --filter label=claudops.instance
@@ -207,5 +234,6 @@ Claude session open in it.
 ## Not there yet
 
 Egress firewall and UI login (#9), automatic recycling and limits (#8), and
-projects (#6, #7). Restarting an instance is not an endpoint either; delete and
-create.
+per-project images built from the building blocks (#7) -- the flags are stored,
+every instance still starts from `claudops-base`. Restarting an instance is not an
+endpoint either; delete and create.

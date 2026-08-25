@@ -1,16 +1,17 @@
 import type { FastifyPluginCallback, FastifyPluginOptions } from 'fastify';
 import { InstanceNotFoundError, type CreateInstanceInput, type InstanceService } from './service.ts';
 
+// Repository, branch and PAT live on the project now. With
+// additionalProperties: false a caller still sending `gitToken` gets a 400
+// rather than a silently ignored field
+// (knowledge/fastify-strips-unknown-fields.md).
 const createBodySchema = {
   type: 'object',
-  required: ['name'],
+  required: ['name', 'projectId'],
   additionalProperties: false,
   properties: {
     name: { type: 'string', minLength: 1, maxLength: 100 },
-    repoUrl: { type: 'string', minLength: 1, maxLength: 500 },
-    repoBranch: { type: 'string', minLength: 1, maxLength: 200 },
-    // Passed through to the container, never persisted and never echoed back.
-    gitToken: { type: 'string', minLength: 1, maxLength: 500 },
+    projectId: { type: 'string', minLength: 1, maxLength: 100 },
   },
 } as const;
 

@@ -52,7 +52,16 @@ else
   exit 1
 fi
 
-instance_json="$(body_of POST /instances '{"name":"terminal"}')"
+# A project first: an instance is created from one, and this one deliberately
+# has no PAT, so the console test needs no secret key either.
+project_id="$(json id <<<"$(body_of POST /projects \
+  '{"name":"terminal","repoUrl":"https://github.com/dominikz98/does-not-exist.git"}')")"
+if [[ -z "$project_id" ]]; then
+  bad "Could not create the project the instance needs"
+  exit 1
+fi
+
+instance_json="$(body_of POST /instances "{\"name\":\"terminal\",\"projectId\":\"$project_id\"}")"
 instance_id="$(json id <<<"$instance_json")"
 container_id="$(json containerId <<<"$instance_json")"
 if [[ -n "$instance_id" && -n "$container_id" ]]; then
@@ -161,5 +170,6 @@ check "A stopped container closes with 4409" "4409" "$(close_code)"
 info "The instance can still be deleted afterwards"
 check "DELETE answers 204" "204" "$(status_of DELETE "/instances/$instance_id")"
 check "No container left for the instance" "" "$(containers_for "$instance_id")"
+check "And its project goes with it" "204" "$(status_of DELETE "/projects/$project_id")"
 
 report
