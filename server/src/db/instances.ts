@@ -70,6 +70,22 @@ export class InstanceRepository {
     this.db.prepare('UPDATE instances SET container_id = ? WHERE id = ?').run(containerId, id);
   }
 
+  /**
+   * Forgets the container of an instance whose container is gone -- what the
+   * startup reconcile writes for a row Docker has nothing to match. Still no
+   * status column: the row keeps its identity and reports `missing`, and the
+   * unique index is free again for a container id Docker may reuse.
+   *
+   * Returns whether anything changed, so the reconcile can report what it did.
+   */
+  detachContainer(id: string): boolean {
+    return (
+      this.db
+        .prepare('UPDATE instances SET container_id = NULL WHERE id = ? AND container_id IS NOT NULL')
+        .run(id).changes > 0
+    );
+  }
+
   get(id: string): InstanceRecord | undefined {
     const row = this.db.prepare('SELECT * FROM instances WHERE id = ?').get(id) as
       | InstanceRow

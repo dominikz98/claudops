@@ -8,9 +8,10 @@ lives in the container, not in the browser tab.
 ## State
 
 Projects hold a repository, a branch, its credential and an environment that is
-prebuilt as an image; instances are created from them, driven and deleted from a
-browser page on the server's own port, and a console survives a refresh.
-Everything else is planned; see the
+prebuilt as an image; instances are created from them, driven, stopped and deleted
+from a browser page on the server's own port, a console survives a refresh, each
+instance runs under a CPU and memory ceiling, and leftovers are reconciled away at
+every server start. Everything else is planned; see the
 [issues](https://github.com/dominikz98/claudops/issues) and
 [EPIC #1](https://github.com/dominikz98/claudops/issues/1).
 
@@ -22,7 +23,7 @@ Everything else is planned; see the
 | Web UI (xterm.js) | Available, end-to-end tested |
 | Projects (repo, branch, PAT) | Available, end-to-end tested |
 | Project images from building blocks | Available, smoke-tested |
-| Lifecycle, limits, recycling | Planned (#8) |
+| Lifecycle, limits, recycling | Available, end-to-end tested |
 | Auth, egress firewall, UI login | Planned (#9) |
 
 ## Quick start

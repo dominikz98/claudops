@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Smoke test for claudops-server: checks the acceptance criteria from issues #3,
-# #6 and #7 against a real Docker daemon and a real server process.
+# #6, #7 and #8 against a real Docker daemon and a real server process. #8 needs
+# two server processes on the same database -- the startup reconcile is only
+# observable across a restart.
 #
 #   ./server/smoke-test.sh              # builds base image + server, then tests
 #   SKIP_BUILD=1 ./server/smoke-test.sh # uses what is already built
@@ -128,8 +130,19 @@ check "A fresh project reports an image that is not built yet" "pending" \
   "$(json image.status <<<"$project_json")"
 check "The tag is derived from the project id" "claudops-project-$project_id" \
   "$(json image.tag <<<"$project_json")"
-check "Instance creation is refused until the image exists" "422" \
-  "$(status_of POST /instances "{\"name\":\"too-early\",\"projectId\":\"$project_id\"}")"
+# Whether this POST is early enough is a race: the stub context builds inside a
+# second, and on a fast host the image is ready before the request goes out. So
+# the assertion is on the pair -- refused while the image is not there, accepted
+# once it is -- and an instance that did slip through is removed again, because
+# every count below assumes it does not exist. The refusal itself is checked
+# without a race further down, against a project whose build really failed.
+too_early="$(api POST /instances "{\"name\":\"too-early\",\"projectId\":\"$project_id\"}")"
+if [[ "$(head -1 <<<"$too_early")" == "201" ]]; then
+  ok "The image was already built and the create was accepted"
+  status_of DELETE "/instances/$(json id <<<"$(tail -n +2 <<<"$too_early")")" >/dev/null
+else
+  check "Instance creation is refused until the image exists" "422" "$(head -1 <<<"$too_early")"
+fi
 
 if wait_for_image "$project_id" ready; then
   ok "The image became ready"
@@ -309,6 +322,114 @@ check "GET on the deleted instance answers 404" "404" \
   "$(status_of GET "/instances/$instance_id")"
 check "A second DELETE answers 404" "404" \
   "$(status_of DELETE "/instances/$instance_id")"
+
+# ------------------------------------------- #8: limits, stop/start, recycling
+info "#8 AC 3: an instance is created with a CPU and memory ceiling"
+lifecycle_json="$(body_of POST /instances "{\"name\":\"smoke-lifecycle\",\"projectId\":\"$project_id\"}")"
+life_id="$(json id <<<"$lifecycle_json")"
+life_container="$(json containerId <<<"$lifecycle_json")"
+
+if [[ -z "$life_id" || -z "$life_container" ]]; then
+  bad "Could not create the instance for the #8 checks: $lifecycle_json"
+  exit 1
+fi
+
+inspect_life() { docker inspect -f "$1" "$life_container" 2>/dev/null | tr -d '\r'; }
+
+# Two CPUs and four gigabytes, in the units the Docker API takes them.
+check "docker inspect reports the CPU limit" "2000000000" "$(inspect_life '{{.HostConfig.NanoCpus}}')"
+check "docker inspect reports the memory limit" "4294967296" "$(inspect_life '{{.HostConfig.Memory}}')"
+check "Swap is capped at the memory limit, so the host cannot be paged out" "4294967296" \
+  "$(inspect_life '{{.HostConfig.MemorySwap}}')"
+
+info "#8: an instance can be stopped and started instead of only deleted"
+check "POST /instances/:id/stop answers 200" "200" "$(status_of POST "/instances/$life_id/stop")"
+check "The instance reports exited" "exited" \
+  "$(json status <<<"$(body_of GET "/instances/$life_id")")"
+check "The container is still there -- a stop is not a delete" "false" \
+  "$(inspect_life '{{.State.Running}}')"
+check "POST /instances/:id/start answers 200" "200" "$(status_of POST "/instances/$life_id/start")"
+check "The instance runs again" "running" \
+  "$(json status <<<"$(body_of GET "/instances/$life_id")")"
+
+info "#8 AC 1: a delete leaves neither container nor volume behind"
+# A volume the container removal cannot reach on its own: `docker rm -v` takes
+# the anonymous ones, not a named one carrying the label.
+docker volume create --label "claudops.instance=$life_id" "claudops-smoke-$life_id" >/dev/null
+check "The volume is there to begin with" "claudops-smoke-$life_id" "$(volumes_for "$life_id")"
+check "DELETE answers 204" "204" "$(status_of DELETE "/instances/$life_id")"
+check "No container of the instance remains" "" "$(containers_for "$life_id")"
+check "No volume of the instance remains" "" "$(volumes_for "$life_id")"
+
+# ------------------------------------------ #8 AC 2: the restart reconciles
+# Three kinds of damage, all of them things a killed server or a hand on the
+# NUC really leaves behind.
+info "#8 AC 2: a restart with orphaned and hand-removed containers ends consistent"
+healthy_json="$(body_of POST /instances "{\"name\":\"smoke-healthy\",\"projectId\":\"$project_id\"}")"
+healthy_id="$(json id <<<"$healthy_json")"
+healthy_container="$(json containerId <<<"$healthy_json")"
+
+removed_json="$(body_of POST /instances "{\"name\":\"smoke-removed\",\"projectId\":\"$project_id\"}")"
+removed_id="$(json id <<<"$removed_json")"
+docker rm -f "$(json containerId <<<"$removed_json")" >/dev/null 2>&1
+
+# A labelled container no instance ever pointed at -- a create that died between
+# starting the container and writing its id.
+docker run -d --name claudops-smoke-orphan --label 'claudops.instance=smoke-orphan' \
+  --entrypoint sleep "$IMAGE" 300 >/dev/null
+docker volume create --label 'claudops.instance=smoke-orphan' claudops-smoke-orphan-vol >/dev/null
+
+if stop_server "$server_pid" "$BASE"; then
+  ok "The server stopped"
+else
+  bad "The server did not let go of the port"
+fi
+
+# The same environment as the first one: this is a restart, not a different
+# server.
+start_server "$PORT" "$DB_FILE_NATIVE" "$WORK_DIR/server-restart.log" \
+  "CLAUDOPS_BASE_IMAGE=$IMAGE" \
+  "CLAUDOPS_PROJECT_CONTEXT=$PROJECT_CONTEXT_NATIVE" \
+  "CLAUDOPS_SECRET_KEY=$SECRET_KEY" \
+  'CLAUDOPS_GIT_USER_NAME=claudops' \
+  'CLAUDOPS_GIT_USER_EMAIL=claudops@example.invalid'
+server_pid="$SERVER_PID"
+SERVER_LOG="$WORK_DIR/server-restart.log"
+
+if wait_for_health "$BASE"; then
+  ok "The server came back up"
+else
+  bad "The restarted server did not become healthy -- log:"
+  sed 's/^/        /' "$SERVER_LOG"
+  exit 1
+fi
+
+# The reconcile runs once at startup and is not awaited by the listen, so the
+# assertions poll rather than assume it already happened.
+reconciled=""
+for _ in $(seq 1 30); do
+  if [[ -z "$(containers_for smoke-orphan)" && -z "$(volumes_for smoke-orphan)" ]]; then
+    reconciled="yes"
+    break
+  fi
+  sleep 1
+done
+check "The orphaned container and its volume are gone" "yes" "$reconciled"
+check "The instance whose container was removed says so" "missing" \
+  "$(json status <<<"$(body_of GET "/instances/$removed_id")")"
+check "Its row survives -- only its container is gone" "$removed_id" \
+  "$(json id <<<"$(body_of GET "/instances/$removed_id")")"
+check "And it no longer points at a container" "" \
+  "$(json containerId <<<"$(body_of GET "/instances/$removed_id")")"
+check "The healthy instance was left alone" "running" \
+  "$(json status <<<"$(body_of GET "/instances/$healthy_id")")"
+check "Its container is still running" "true" \
+  "$(docker inspect -f '{{.State.Running}}' "$healthy_container" 2>/dev/null | tr -d '\r')"
+
+check "DELETE of the reconciled instance answers 204" "204" \
+  "$(status_of DELETE "/instances/$removed_id")"
+check "DELETE of the healthy instance answers 204" "204" \
+  "$(status_of DELETE "/instances/$healthy_id")"
 
 info "#6: with its instances gone, the project can be deleted"
 check "DELETE /projects answers 204" "204" "$(status_of DELETE "/projects/$project_id")"

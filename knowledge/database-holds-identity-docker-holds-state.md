@@ -13,8 +13,16 @@ half of the same argument: a container created before its row exists is
 unfindable, because the only handle on it is the label the row would have
 carried, while a row without a container is visible as `missing` and can be
 cleaned up. That asymmetry is why the rollback sits on the row and not on the
-container. `missing` also stays deliberately visible rather than being filtered
-out, because it is what the startup reconcile of #8 has to act on.
+container.
 
-**Applies to.** `server/src/db/migrations.ts`,
+**How the reconcile stays inside that rule.** "Mark an instance whose container
+is gone as ended" is not a status write: the startup pass sets `container_id` to
+NULL, which is the row admitting it has no container, and `missing` follows from
+the join as it always did. The row itself survives -- it is somebody's instance,
+and only Docker's half of it went away. Nulling the column also frees the unique
+index, so a container id Docker reuses later can be attached to the next
+instance. `stop` and `start` write nothing at all: they ask Docker and then
+report what Docker says.
+
+**Applies to.** `server/src/db/migrations.ts`, `server/src/db/instances.ts`,
 `server/src/instances/service.ts`, issues #3, #8.

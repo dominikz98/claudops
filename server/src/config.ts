@@ -1,4 +1,5 @@
 import { resolve } from 'node:path';
+import type { ContainerLimits } from './docker/engine.ts';
 import { defaultProjectContext } from './projects/images.ts';
 import { createCipher, parseSecretKey, type SecretCipher } from './secrets/cipher.ts';
 
@@ -46,11 +47,27 @@ export interface ServerConfig {
    */
   cipher: SecretCipher;
   instanceEnv: InstanceEnvConfig;
+  /** CPU and memory ceiling every instance container is created with. */
+  instanceLimits: ContainerLimits;
 }
 
 export class ConfigError extends Error {}
 
 const DEFAULT_PORT = 8080;
+
+/**
+ * Two cores and four gigabytes: enough for a `pnpm install` plus a test run,
+ * and small enough that the NUC still answers while three instances do it at
+ * once. A box with more to spare raises them.
+ */
+export const DEFAULT_INSTANCE_LIMITS: ContainerLimits = {
+  cpus: 2,
+  memoryBytes: 4 * 1024 * 1024 * 1024,
+};
+
+/** Docker refuses a memory limit below this, and the message it gives back is
+ *  less clear than the one here. */
+const MIN_MEMORY_BYTES = 6 * 1024 * 1024;
 
 /** Current LTS. A project that needs another one is a `CLAUDOPS_DOTNET_CHANNEL`
  *  away, so this is a default rather than a decision. */
@@ -90,6 +107,40 @@ function port(env: NodeJS.ProcessEnv): number {
 }
 
 /**
+ * `docker run --memory` notation: a plain byte count, or a number with a `b`,
+ * `k`, `m` or `g` suffix. Written the way an operator would write it on the
+ * command line, because that is where the number comes from.
+ */
+export function parseMemory(raw: string): number | undefined {
+  const match = /^(\d+(?:\.\d+)?)\s*([bkmg])?$/i.exec(raw.trim());
+  if (match === null) return undefined;
+
+  const factors: Record<string, number> = { b: 1, k: 1024, m: 1024 ** 2, g: 1024 ** 3 };
+  const value = Number(match[1]) * (factors[match[2]?.toLowerCase() ?? 'b'] ?? 1);
+  // Docker takes whole bytes, and `1.5g` is a legitimate way to say one.
+  return Math.floor(value);
+}
+
+function instanceLimits(env: NodeJS.ProcessEnv): ContainerLimits {
+  const rawCpus = optional(env, 'CLAUDOPS_INSTANCE_CPUS');
+  const cpus = rawCpus === undefined ? DEFAULT_INSTANCE_LIMITS.cpus : Number(rawCpus);
+  if (!Number.isFinite(cpus) || cpus <= 0) {
+    throw new ConfigError(`CLAUDOPS_INSTANCE_CPUS must be a positive number, got '${rawCpus ?? ''}'`);
+  }
+
+  const rawMemory = optional(env, 'CLAUDOPS_INSTANCE_MEMORY');
+  const memoryBytes =
+    rawMemory === undefined ? DEFAULT_INSTANCE_LIMITS.memoryBytes : parseMemory(rawMemory);
+  if (memoryBytes === undefined || memoryBytes < MIN_MEMORY_BYTES) {
+    throw new ConfigError(
+      `CLAUDOPS_INSTANCE_MEMORY must be a byte count with an optional b/k/m/g suffix, at least 6m, got '${rawMemory ?? ''}'`,
+    );
+  }
+
+  return { cpus, memoryBytes };
+}
+
+/**
  * A missing key is not a configuration error: the server starts, projects work,
  * only a PAT cannot be stored -- and the request that tries says so. A key that
  * is present but unusable is an error, because the alternative is discovering it
@@ -125,6 +176,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     tmuxSession: optional(env, 'CLAUDOPS_TMUX_SESSION') ?? 'main',
     dockerSocket,
     cipher: cipher(env),
+    instanceLimits: instanceLimits(env),
     instanceEnv: {
       claudeOauthToken: optional(env, 'CLAUDE_CODE_OAUTH_TOKEN'),
       gitUserName: optional(env, 'CLAUDOPS_GIT_USER_NAME'),

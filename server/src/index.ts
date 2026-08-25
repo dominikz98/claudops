@@ -15,6 +15,7 @@ async function main(): Promise<void> {
     projectContext: config.projectContext,
     dotnetChannel: config.dotnetChannel,
     instanceEnv: config.instanceEnv,
+    instanceLimits: config.instanceLimits,
     cipher: config.cipher,
     webRoot: config.webRoot,
     tmuxSession: config.tmuxSession,

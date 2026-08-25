@@ -91,18 +91,38 @@ waits for somebody to ask again, so a broken Dockerfile does not spin.
 
 **Every resource is labelled.** Containers and volumes carry
 `claudops.instance=<id>`, project images carry `claudops.project=<id>`. That is
-what makes a complete delete and a startup reconcile possible -- and what
-distinguishes an image claudops built from one somebody built by hand. The labels
-are set on create; the container reconcile that uses them at startup is #8.
+what makes a complete delete and the startup reconcile possible -- and what
+distinguishes an image claudops built from one somebody built by hand. Without
+the label a container that outlived its instance would be indistinguishable from
+a foreign one, and nothing could ever be removed automatically.
 
 **Docker owns the state, SQLite owns the identity.** The instance table has no
 status column. Every list request asks Docker for the state of the labelled
 containers and joins it onto the rows, so a container somebody stopped by hand
 shows as `exited` instead of as whatever the server last wrote down. An instance
-whose container is gone reports `missing` rather than disappearing, because that
-is the case #8 has to clean up. Creating goes row first, container second, and
-rolls the row back on failure -- a container without a row would have no handle
-left to find it by.
+whose container is gone reports `missing` rather than disappearing. Creating goes
+row first, container second, and rolls the row back on failure -- a container
+without a row would have no handle left to find it by.
+
+**Cleaning up is a startup pass, not a poller.** Docker and the database can only
+drift apart when something dies between two steps: a killed server, a `docker rm`
+by hand, a create that failed after its container was up. Once, at startup, the
+server removes the labelled containers and volumes no instance claims, and tells
+the instances whose containers are gone that they are gone -- keeping their rows,
+because a row is somebody's instance and deleting it behind their back is not
+cleanup. Nothing runs periodically: the state comes from Docker on every request
+anyway, so a background sweep would only race with whoever is using the UI. A
+daemon that is down at startup skips the pass; a leftover survives one more
+restart, which is cheaper than a server that refuses to start.
+
+**An instance is capped, and stopping it is cheaper than deleting it.** Every
+container is created with a CPU and a memory ceiling (two cores, four gigabytes
+by default) and with swap capped at the memory limit, so an instance that runs
+away is killed instead of paging the NUC to a standstill -- a handful of them
+share one small box with the server itself. `stop` and `start` keep the container
+and everything in it, so an instance nobody is using costs disk and nothing else;
+`delete` is for one that is finished with, and takes the container and its
+volumes.
 
 **Isolation is what permits the risk.** Claude runs with
 `--dangerously-skip-permissions`, which is only acceptable because the container
@@ -117,6 +137,7 @@ would override the subscription and bill per token.
 Packages #2 to #5 produce the first walking skeleton: start an instance, use its
 console in the browser. All four are done -- an instance can be created, driven
 and deleted from a browser page, and a refresh finds the session where it was.
-#6 to #9 make it usable in practice. #6 and #7 are done: a repository and its
-credential are configured once as a project, and that project brings its own
-prebuilt environment. See issue #1.
+#6 to #9 make it usable in practice. #6 to #8 are done: a repository and its
+credential are configured once as a project, that project brings its own prebuilt
+environment, and an instance is capped, stoppable and cleaned up after. #9 is
+what is left. See issue #1.

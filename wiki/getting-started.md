@@ -173,6 +173,22 @@ connection simply drops. `cols` and `rows` are optional and only decide how the
 first redraw is painted; a real client sends a resize whenever its window
 changes.
 
+## Pause an instance
+
+**Stop** on the row stops the container and keeps everything in it. The row stays,
+the status turns `exited`, and **Start** brings it back with its workspace, its
+clone and its git state -- only what was in memory is gone, so Claude starts
+fresh in a new tmux session. Over the API:
+
+```bash
+curl -s -X POST localhost:8080/instances/<id>/stop
+curl -s -X POST localhost:8080/instances/<id>/start
+```
+
+This is what to do with an instance you are not using: a stopped container costs
+no CPU and no memory, while a running one is allowed two cores and four
+gigabytes of the NUC (see [operations](operations.md#resource-limits)).
+
 ## Remove an instance
 
 **Delete** on the row, then the same button again to confirm. Or over the API:
@@ -181,8 +197,8 @@ changes.
 curl -s -X DELETE localhost:8080/instances/<id>
 ```
 
-The container goes with it, including its anonymous volumes -- so anything not
-pushed is gone.
+The container goes with it, including its volumes -- so anything not pushed is
+gone.
 
 A project is deleted the same way, on the Projects page -- but only once no
 instance points at it any more. While one does, the request answers `409` and the

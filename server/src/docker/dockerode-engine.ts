@@ -13,6 +13,7 @@ import {
   type ImageBuildSpec,
   type TerminalSession,
   type TerminalSize,
+  type VolumeSummary,
 } from './engine.ts';
 import { instanceIdFromLabels, managedFilter } from './labels.ts';
 
@@ -38,6 +39,20 @@ function isGone(error: unknown): boolean {
   const code = statusCode(error);
   return code === 404 || code === 409;
 }
+
+/** Docker answers 304 for a stop of a stopped container and a start of a
+ *  running one. Both are the state the caller asked for. */
+function isAlreadyInThatState(error: unknown): boolean {
+  return statusCode(error) === 304;
+}
+
+/** What `docker stop` waits before it reaches for SIGKILL. The entrypoint shuts
+ *  its tmux session down on SIGTERM, so this is a backstop rather than the
+ *  normal path -- a stop that really takes ten seconds is a bug in the image. */
+const STOP_TIMEOUT_SECONDS = 10;
+
+/** One CPU, in the unit the Docker API takes. `--cpus 2` is 2e9 NanoCpus. */
+const NANO_CPUS_PER_CPU = 1_000_000_000;
 
 /** Docker takes the console size as [height, width], the client speaks
  *  cols/rows -- swapping these two is a silent one-character-off bug. */
@@ -203,6 +218,25 @@ export class DockerodeEngine implements DockerEngine {
     }
   }
 
+  async stopContainer(containerId: string): Promise<void> {
+    try {
+      await this.docker.getContainer(containerId).stop({ t: STOP_TIMEOUT_SECONDS });
+    } catch (error) {
+      // Already stopped is the outcome the caller wanted.
+      if (isAlreadyInThatState(error)) return;
+      throw this.translate(error);
+    }
+  }
+
+  async startContainer(containerId: string): Promise<void> {
+    try {
+      await this.docker.getContainer(containerId).start();
+    } catch (error) {
+      if (isAlreadyInThatState(error)) return;
+      throw this.translate(error);
+    }
+  }
+
   async listManagedContainers(): Promise<ContainerSummary[]> {
     let containers: Docker.ContainerInfo[];
     try {
@@ -217,6 +251,34 @@ export class DockerodeEngine implements DockerEngine {
       state: info.State,
       status: info.Status,
     }));
+  }
+
+  async listManagedVolumes(): Promise<VolumeSummary[]> {
+    let response: { Volumes: Docker.VolumeInspectInfo[] };
+    try {
+      response = await this.docker.listVolumes({ filters: managedFilter });
+    } catch (error) {
+      throw this.translate(error);
+    }
+
+    // The daemon answers `"Volumes": null` when nothing matches, which the
+    // dockerode types do not admit to.
+    return (response.Volumes ?? []).map((volume) => ({
+      name: volume.Name,
+      instanceId: instanceIdFromLabels(volume.Labels),
+    }));
+  }
+
+  async removeVolume(name: string): Promise<void> {
+    try {
+      await this.docker.getVolume(name).remove();
+    } catch (error) {
+      // Gone already is the outcome we wanted. A 409 is not: it means a
+      // container still has the volume mounted, and the caller wants to hear
+      // about that rather than believe it was removed.
+      if (isNotFound(error)) return;
+      throw this.translate(error);
+    }
   }
 
   async attachTerminal(
@@ -298,8 +360,17 @@ export class DockerodeEngine implements DockerEngine {
         Tty: false,
         OpenStdin: false,
         HostConfig: {
-          // Resource limits and a restart policy belong to #8.
           AutoRemove: false,
+          // What `docker run --cpus` sets. A ceiling on CPU time per period,
+          // not a pinning: the instance may use every core, just not more than
+          // this much of them in total.
+          NanoCpus: Math.round(spec.limits.cpus * NANO_CPUS_PER_CPU),
+          Memory: spec.limits.memoryBytes,
+          // The same value as Memory is what turns swap off for this container.
+          // Left unset, Docker allows twice the limit in swap, and a container
+          // over its memory would page the whole NUC to a standstill instead of
+          // being killed.
+          MemorySwap: spec.limits.memoryBytes,
         },
       });
     } catch (error) {

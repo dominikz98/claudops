@@ -1,9 +1,10 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
-import type { InstanceEnvConfig } from '../src/config.ts';
+import { DEFAULT_INSTANCE_LIMITS, type InstanceEnvConfig } from '../src/config.ts';
 import { InstanceRepository } from '../src/db/instances.ts';
 import { migrate } from '../src/db/migrations.ts';
 import {
+  ContainerNotFoundError,
   ContainerNotRunningError,
   DockerUnavailableError,
   ImageNotFoundError,
@@ -130,6 +131,28 @@ describe('InstanceService', () => {
         projectId: id,
         repoUrl: 'https://host/one.git',
         repoBranch: 'old',
+      });
+    });
+
+    it('caps the container at the default two cores and four gigabytes', async () => {
+      await service.create({ name: 'demo', projectId });
+
+      expect(engine.specFor('id-1')?.limits).toEqual(DEFAULT_INSTANCE_LIMITS);
+    });
+
+    it('honours configured limits, so the NUC can be sized by its operator', async () => {
+      const small = new InstanceService(repository, engine, {
+        instanceEnv,
+        projects,
+        limits: { cpus: 1, memoryBytes: 512 * 1024 * 1024 },
+        generateId: () => 'id-small',
+      });
+
+      await small.create({ name: 'demo', projectId });
+
+      expect(engine.specFor('id-small')?.limits).toEqual({
+        cpus: 1,
+        memoryBytes: 512 * 1024 * 1024,
       });
     });
 
@@ -329,6 +352,203 @@ describe('InstanceService', () => {
 
       expect((await service.list()).map((i) => i.id)).toEqual(['id-2']);
       expect(engine.containers.has('container-2')).toBe(true);
+    });
+
+    it('takes the volumes of the instance with it', async () => {
+      await service.create({ name: 'demo', projectId });
+      // A volume the container removal does not reach: `-v` only takes the
+      // anonymous ones hanging off that container.
+      engine.addVolume('claudops-id-1-workspace', 'id-1');
+
+      await service.delete('id-1');
+
+      expect(engine.volumes.size).toBe(0);
+    });
+
+    it('removes the volumes even when the container is already gone', async () => {
+      await service.create({ name: 'demo', projectId });
+      engine.addVolume('claudops-id-1-workspace', 'id-1');
+      engine.forget('container-1');
+
+      await service.delete('id-1');
+
+      expect(engine.volumes.size).toBe(0);
+    });
+
+    it('leaves the volumes of other instances and of strangers alone', async () => {
+      await service.create({ name: 'first', projectId });
+      await service.create({ name: 'second', projectId });
+      engine.addVolume('claudops-id-1-workspace', 'id-1');
+      engine.addVolume('claudops-id-2-workspace', 'id-2');
+      engine.addVolume('someone-elses-data');
+
+      await service.delete('id-1');
+
+      expect([...engine.volumes.keys()]).toEqual(['claudops-id-2-workspace', 'someone-elses-data']);
+    });
+  });
+
+  describe('stop and start', () => {
+    it('stops the container and reports what Docker says afterwards', async () => {
+      await service.create({ name: 'demo', projectId });
+
+      expect(await service.stop('id-1')).toMatchObject({ id: 'id-1', status: 'exited' });
+      // The container survives the stop -- that is the difference to a delete.
+      expect(engine.containers.has('container-1')).toBe(true);
+      expect(repository.get('id-1')?.containerId).toBe('container-1');
+    });
+
+    it('starts a stopped instance again', async () => {
+      await service.create({ name: 'demo', projectId });
+      await service.stop('id-1');
+
+      expect(await service.start('id-1')).toMatchObject({ status: 'running' });
+    });
+
+    it('is idempotent in both directions, like the Docker API', async () => {
+      await service.create({ name: 'demo', projectId });
+
+      await service.stop('id-1');
+      expect(await service.stop('id-1')).toMatchObject({ status: 'exited' });
+      await service.start('id-1');
+      expect(await service.start('id-1')).toMatchObject({ status: 'running' });
+    });
+
+    it('rejects an unknown instance and one without a container', async () => {
+      await expect(service.stop('nope')).rejects.toThrow(InstanceNotFoundError);
+
+      repository.insert({
+        id: 'id-orphan',
+        name: 'half-created',
+        image: 'claudops-project-gone',
+        projectId: null,
+        repoUrl: null,
+        repoBranch: null,
+        createdAt: '2026-08-25T08:00:00.000Z',
+      });
+
+      await expect(service.start('id-orphan')).rejects.toThrow(ContainerMissingError);
+    });
+
+    it('passes a container Docker no longer has on as such', async () => {
+      await service.create({ name: 'demo', projectId });
+      engine.forget('container-1');
+
+      await expect(service.stop('id-1')).rejects.toThrow(ContainerNotFoundError);
+    });
+  });
+
+  describe('reconcile', () => {
+    it('has nothing to do on a healthy state', async () => {
+      await service.create({ name: 'demo', projectId });
+
+      expect(await service.reconcile()).toEqual({
+        removedContainers: [],
+        removedVolumes: [],
+        endedInstances: [],
+        failures: [],
+      });
+      expect(engine.containers.has('container-1')).toBe(true);
+      expect(repository.get('id-1')?.containerId).toBe('container-1');
+    });
+
+    it('removes a labelled container no instance points at', async () => {
+      // What a server killed between runContainer and attachContainer leaves.
+      engine.addOrphanContainer('container-orphan', 'id-gone');
+
+      const report = await service.reconcile();
+
+      expect(report.removedContainers).toEqual(['container-orphan']);
+      expect(engine.containers.has('container-orphan')).toBe(false);
+    });
+
+    it('removes a container whose instance points at a different one', async () => {
+      await service.create({ name: 'demo', projectId });
+      // A create that was rolled back and run again: same instance label, a
+      // container the row no longer knows about.
+      engine.addOrphanContainer('container-stale', 'id-1');
+
+      const report = await service.reconcile();
+
+      expect(report.removedContainers).toEqual(['container-stale']);
+      expect(engine.containers.has('container-1')).toBe(true);
+    });
+
+    it('leaves containers that are not claudops alone', async () => {
+      engine.addUnmanagedContainer('some-other-container');
+
+      expect((await service.reconcile()).removedContainers).toEqual([]);
+      expect(engine.containers.has('some-other-container')).toBe(true);
+    });
+
+    it('ends an instance whose container is gone instead of deleting its row', async () => {
+      await service.create({ name: 'demo', projectId });
+      engine.forget('container-1');
+
+      const report = await service.reconcile();
+
+      expect(report.endedInstances).toEqual(['id-1']);
+      // The row survives: it is somebody's instance, and only Docker's half of
+      // it went away.
+      expect(repository.get('id-1')?.containerId).toBeNull();
+      expect((await service.list())[0]?.status).toBe(MISSING_STATUS);
+    });
+
+    it('says nothing about an instance that has already been told', async () => {
+      await service.create({ name: 'demo', projectId });
+      engine.forget('container-1');
+
+      await service.reconcile();
+
+      expect((await service.reconcile()).endedInstances).toEqual([]);
+    });
+
+    it('removes the volumes of instances that no longer exist', async () => {
+      await service.create({ name: 'demo', projectId });
+      engine.addVolume('claudops-id-1-workspace', 'id-1');
+      engine.addVolume('claudops-id-gone-workspace', 'id-gone');
+      engine.addVolume('someone-elses-data');
+
+      const report = await service.reconcile();
+
+      expect(report.removedVolumes).toEqual(['claudops-id-gone-workspace']);
+      expect([...engine.volumes.keys()]).toEqual([
+        'claudops-id-1-workspace',
+        'someone-elses-data',
+      ]);
+    });
+
+    it('keeps the volume of an instance whose container is gone', async () => {
+      await service.create({ name: 'demo', projectId });
+      engine.addVolume('claudops-id-1-workspace', 'id-1');
+      engine.forget('container-1');
+
+      // The instance is still there, so its workspace is not a leftover -- its
+      // delete is what removes both.
+      expect((await service.reconcile()).removedVolumes).toEqual([]);
+      expect(engine.volumes.has('claudops-id-1-workspace')).toBe(true);
+    });
+
+    it('carries on past a removal that fails and reports it', async () => {
+      engine.addVolume('claudops-id-gone-workspace', 'id-gone');
+      engine.addVolume('claudops-id-also-gone-workspace', 'id-also-gone');
+      engine.failVolumeRemoval.add('claudops-id-gone-workspace');
+
+      const report = await service.reconcile();
+
+      expect(report.removedVolumes).toEqual(['claudops-id-also-gone-workspace']);
+      expect(report.failures).toEqual([
+        {
+          resource: 'volume claudops-id-gone-workspace',
+          message: 'volume is in use - claudops-id-gone-workspace',
+        },
+      ]);
+    });
+
+    it('fails loudly while Docker is down rather than reporting a clean host', async () => {
+      engine.unavailable = true;
+
+      await expect(service.reconcile()).rejects.toThrow(DockerUnavailableError);
     });
   });
 

@@ -92,6 +92,10 @@ containers_for() {
   docker ps -a --filter "label=claudops.instance=$1" --format '{{.ID}}' | tr -d '\r'
 }
 
+volumes_for() {
+  docker volume ls --filter "label=claudops.instance=$1" -q | tr -d '\r'
+}
+
 build_base_image() {
   local image="$1" context="$REPO_ROOT/docker/base"
   info "Building base image ($image)"
@@ -135,12 +139,27 @@ wait_for_health() {
 }
 
 # Everything the run leaked, identified by the label that exists for exactly
-# this purpose.
+# this purpose. Volumes as well as containers: a script that plays "somebody
+# left a volume behind" has to be able to clean that up again.
 remove_leftovers() {
   local leftovers
   leftovers="$(docker ps -aq --filter 'label=claudops.instance' | tr -d '\r')"
   [[ -n "$leftovers" ]] && docker rm -f $leftovers >/dev/null 2>&1
+  leftovers="$(docker volume ls -q --filter 'label=claudops.instance' | tr -d '\r')"
+  [[ -n "$leftovers" ]] && docker volume rm -f $leftovers >/dev/null 2>&1
   return 0
+}
+
+# stop_server <pid> <base-url> -- kills a server and waits for its port to go
+# quiet, so the next one on the same port really binds.
+stop_server() {
+  local pid="$1" base="$2" _
+  kill "$pid" 2>/dev/null
+  for _ in $(seq 1 15); do
+    curl -s -o /dev/null --max-time 1 "$base/health" || return 0
+    sleep 1
+  done
+  return 1
 }
 
 smoke_cleanup() {

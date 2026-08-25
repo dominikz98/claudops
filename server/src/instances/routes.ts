@@ -72,5 +72,35 @@ export const instanceRoutes: FastifyPluginCallback<InstanceRoutesOptions> = (
     },
   );
 
+  // POST rather than a PATCH of a status field: the instance table has no
+  // status to patch. Both ask Docker to do something and answer with what
+  // Docker reports afterwards
+  // (knowledge/database-holds-identity-docker-holds-state.md).
+  app.post<{ Params: { id: string } }>(
+    '/instances/:id/stop',
+    { schema: { params: idParamsSchema } },
+    async (request, reply) => {
+      try {
+        return await service.stop(request.params.id);
+      } catch (error) {
+        if (error instanceof InstanceNotFoundError) return reply.callNotFound();
+        throw error;
+      }
+    },
+  );
+
+  app.post<{ Params: { id: string } }>(
+    '/instances/:id/start',
+    { schema: { params: idParamsSchema } },
+    async (request, reply) => {
+      try {
+        return await service.start(request.params.id);
+      } catch (error) {
+        if (error instanceof InstanceNotFoundError) return reply.callNotFound();
+        throw error;
+      }
+    },
+  );
+
   done();
 };
