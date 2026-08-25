@@ -39,7 +39,14 @@ RUN chmod 0755 /usr/local/bin/entrypoint.sh /usr/local/bin/git-credential-claudo
 
 # Without TERM a `tmux attach` from a `docker exec` without -t fails with
 # "terminal does not support clear". Clients with their own TERM override this.
+#
+# LANG is what tells tmux its client can take UTF-8. Without it tmux replaces
+# every multi-byte character with an underscore on the way out, which turns
+# Claude's whole TUI into rows of "_" -- see
+# knowledge/tmux-needs-a-utf8-client.md. C.UTF-8 is built into glibc, so this
+# needs no locales package.
 ENV TERM=xterm-256color \
+    LANG=C.UTF-8 \
     WORKSPACE_DIR=/workspace \
     REPO_BRANCH=main \
     TMUX_SESSION=main \

@@ -54,6 +54,8 @@ drops.
 | `CLAUDE_ARGS` | `--dangerously-skip-permissions` | Arguments for the `claude` start. Only acceptable because of the container isolation. |
 | `WORKSPACE_DIR` | `/workspace` | Base directory for clones. |
 | `TMUX_SESSION` | `main` | Session name the bridge attaches to. |
+| `TERM` | `xterm-256color` | Without it `tmux attach` from a `docker exec` fails with "terminal does not support clear". A client with its own `TERM` overrides it. |
+| `LANG` | `C.UTF-8` | Tells tmux the attaching client can take UTF-8. Without it every multi-byte character leaves the tmux server as `_` and Claude's TUI arrives as rows of underscores. |
 
 ## Behaviour
 

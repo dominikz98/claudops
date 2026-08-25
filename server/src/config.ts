@@ -1,3 +1,5 @@
+import { resolve } from 'node:path';
+
 /**
  * Server configuration, read from the environment exactly once at startup.
  *
@@ -20,6 +22,8 @@ export interface ServerConfig {
   databaseFile: string;
   /** Image instances are started from. #7 replaces this per project. */
   baseImage: string;
+  /** Directory the built web UI is served from. */
+  webRoot: string;
   /** The tmux session the terminal bridge attaches to. Matches TMUX_SESSION in
    *  claudops-base; only a project image with its own entrypoint needs another. */
   tmuxSession: string;
@@ -32,6 +36,17 @@ export interface ServerConfig {
 export class ConfigError extends Error {}
 
 const DEFAULT_PORT = 8080;
+
+/**
+ * Where `@claudops/web` puts its build. Resolved from this module's own
+ * location rather than from the working directory, because the server is
+ * started from the repository root by hand and from `server/` by the smoke
+ * tests -- and it is two levels down either way, as `server/src` in development
+ * and as `server/dist` after a build.
+ */
+export function defaultWebRoot(here: string = import.meta.dirname): string {
+  return resolve(here, '../../web/dist');
+}
 
 /** Docker Desktop on the Windows dev host listens on a named pipe, the NUC on
  *  a unix socket. */
@@ -68,6 +83,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     logLevel: optional(env, 'CLAUDOPS_LOG_LEVEL') ?? 'info',
     databaseFile: optional(env, 'CLAUDOPS_DB') ?? 'data/claudops.db',
     baseImage: optional(env, 'CLAUDOPS_BASE_IMAGE') ?? 'claudops-base',
+    webRoot: optional(env, 'CLAUDOPS_WEB_ROOT') ?? defaultWebRoot(),
     tmuxSession: optional(env, 'CLAUDOPS_TMUX_SESSION') ?? 'main',
     dockerSocket,
     instanceEnv: {

@@ -7,8 +7,8 @@ lives in the container, not in the browser tab.
 
 ## State
 
-Instances can be started, listed and removed over REST, and their consoles are
-mirrored over a WebSocket. Everything else is planned; see the
+Instances can be created, driven and deleted from a browser page on the server's
+own port, and a console survives a refresh. Everything else is planned; see the
 [issues](https://github.com/dominikz98/claudops/issues) and
 [EPIC #1](https://github.com/dominikz98/claudops/issues/1).
 
@@ -17,7 +17,7 @@ mirrored over a WebSocket. Everything else is planned; see the
 | Base image `claudops-base` | Available, smoke-tested |
 | Server (Fastify, dockerode, SQLite) | Available, smoke-tested |
 | Terminal bridge (WebSocket) | Available, smoke-tested |
-| Web UI (xterm.js) | Planned (#5) |
+| Web UI (xterm.js) | Available, end-to-end tested |
 | Projects and project images | Planned (#6, #7) |
 | Lifecycle, limits, recycling | Planned (#8) |
 | Auth, egress firewall, UI login | Planned (#9) |
@@ -33,20 +33,24 @@ pnpm install && pnpm build
 CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN" node server/dist/index.js
 ```
 
+Then <http://localhost:8080>: name an instance, press Create, press Console. The
+same thing over the API, which is what the page uses and nothing else needs:
+
 ```bash
 curl -s localhost:8080/instances \
   -H 'content-type: application/json' \
   -d '{"name":"demo","repoUrl":"https://github.com/dominikz98/claudops.git"}'
 ```
 
-The answer carries the instance `id`; its console is one WebSocket away:
+The answer carries the instance `id`, and its console is one WebSocket away:
 
 ```bash
 npx wscat -c 'ws://localhost:8080/instances/<id>/terminal?cols=120&rows=40'
 ```
 
-Detach with `Ctrl-b d`; Claude keeps running, and reconnecting finds the session
-and its scrollback untouched -- both live in the container. The full walkthrough is in
+Detach with `Ctrl-b d`; Claude keeps running, and reconnecting -- or simply
+reloading the page -- finds the session and its scrollback untouched, because both
+live in the container. The full walkthrough is in
 [wiki/getting-started.md](wiki/getting-started.md), the API and the server's
 configuration in [server/README.md](server/README.md).
 
@@ -56,6 +60,8 @@ configuration in [server/README.md](server/README.md).
 | --- | --- |
 | [`docker/base/`](docker/base/) | The `claudops-base` image, its entrypoint and its smoke test |
 | [`server/`](server/README.md) | The Fastify server: instance REST, terminal bridge, Docker access, SQLite, its smoke tests |
+| [`web/`](web/README.md) | The Vite SPA: instance list and the xterm.js console, served by the server |
+| [`e2e/`](e2e/run.sh) | Playwright: the browser acceptance tests, against a real server and real containers |
 | [`wiki/`](wiki/README.md) | Documentation for users and colleagues: architecture, getting started, operations, glossary |
 | [`knowledge/`](knowledge/README.md) | Domain knowledge database: the non-obvious decisions and their reasons |
 | [`CLAUDE.md`](CLAUDE.md) | Project rules for Claude Code working in this repository |
@@ -81,8 +87,11 @@ pnpm lint && pnpm tsc --noEmit && pnpm test
 ./docker/base/smoke-test.sh
 ./server/smoke-test.sh
 ./server/terminal-smoke-test.sh
+./e2e/run.sh
 ```
 
-The unit tests need no Docker; the smoke tests do. `SKIP_BUILD=1` makes one of
-them reuse what is already built -- which also means it tests the previous build,
-so leave it off after a code change.
+The unit tests need no Docker; the smoke tests and the browser tests do, and
+`./e2e/run.sh` also needs Chromium once per machine
+(`pnpm --filter @claudops/e2e exec playwright install chromium`). `SKIP_BUILD=1`
+makes one of them reuse what is already built -- which also means it tests the
+previous build, so leave it off after a code change.

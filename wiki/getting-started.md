@@ -1,7 +1,6 @@
 # Getting started
 
-From nothing to a running Claude Code instance. The server starts and stops them
-and mirrors their consoles; the browser page that shows one lands with #5.
+From nothing to a running Claude Code instance, driven from the browser.
 
 ## Prerequisites
 
@@ -35,6 +34,10 @@ pnpm install
 pnpm build
 ```
 
+`pnpm build` builds the server *and* the web UI -- the server serves the UI from
+`web/dist`, so skipping it leaves you with the API alone (and a warning in the
+log).
+
 The server needs the Claude token and the commit identity for the instances it
 will start:
 
@@ -45,12 +48,18 @@ CLAUDOPS_GIT_USER_EMAIL="you@example.com" \
 node server/dist/index.js
 ```
 
-It listens on port 8080. `curl localhost:8080/health` answers `200` when Docker
-is reachable and `503` when it is not -- that is the first thing to check if
-anything below misbehaves. The full variable table is in
+It listens on port 8080. Open <http://localhost:8080> and the instance list is
+there; `curl localhost:8080/health` answers `200` when Docker is reachable and
+`503` when it is not -- that is the first thing to check if anything below
+misbehaves. The full variable table is in
 [server/README.md](../server/README.md).
 
 ## Start an instance
+
+In the browser: fill in a name, optionally a repository, branch and a PAT for a
+private one, and press Create. The row appears with the status Docker reports.
+
+The same thing over the API:
 
 ```bash
 curl -s localhost:8080/instances \
@@ -76,7 +85,12 @@ shows up as `exited` rather than as whatever it was when it started.
 
 ## Use the console
 
-Over the server, which is the way the browser page will do it (#5):
+Click **Console** on the instance. The page attaches to the tmux session in the
+container and you are in Claude Code; the status line at the top right shows the
+geometry the container is being told about. Reload the page and you land back in
+the same session, with the scrollback and whatever was running still there.
+
+Without a browser, over the server:
 
 ```bash
 npx wscat -c 'ws://localhost:8080/instances/<id>/terminal?cols=120&rows=40'
@@ -95,6 +109,8 @@ first redraw is painted; a real client sends a resize whenever its window
 changes.
 
 ## Remove an instance
+
+**Delete** on the row, then the same button again to confirm. Or over the API:
 
 ```bash
 curl -s -X DELETE localhost:8080/instances/<id>
@@ -132,6 +148,7 @@ into each container.
 | `CLAUDOPS_DB` | SQLite file, default `data/claudops.db`. |
 | `CLAUDOPS_BASE_IMAGE` | Image instances start from, default `claudops-base`. |
 | `CLAUDOPS_TMUX_SESSION` | Session the console attaches to, default `main`. |
+| `CLAUDOPS_WEB_ROOT` | Where the built UI is, default `web/dist` next to the server. |
 | `CLAUDE_CODE_OAUTH_TOKEN` | Claude Code auth, injected into every instance. |
 | `CLAUDOPS_GIT_USER_NAME`, `CLAUDOPS_GIT_USER_EMAIL` | Commit identity for instances. |
 
@@ -152,13 +169,24 @@ understands.
 ./docker/base/smoke-test.sh          # the image: clone, non-root, reattach, credentials
 ./server/smoke-test.sh               # the server: create, list with status, delete
 ./server/terminal-smoke-test.sh      # the console: I/O, reconnect, resize
+./e2e/run.sh                         # the UI: create, drive, refresh, delete -- in a browser
 pnpm test                            # unit tests, no Docker needed
 ```
 
+`./e2e/run.sh` drives a real browser and needs Chromium once per machine:
+
+```bash
+pnpm --filter @claudops/e2e exec playwright install chromium
+```
+
 `SKIP_BUILD=1` makes a smoke test reuse what is already built -- handy, but after
-a code change it then tests the previous build.
+a code change it then tests the previous build. All of them remove every
+container carrying the claudops label when they exit, so do not run one next to
+an instance you care about.
 
 ## Clean up
+
+Delete the instance in the browser, or:
 
 ```bash
 curl -s -X DELETE localhost:8080/instances/<id>

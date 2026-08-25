@@ -20,6 +20,7 @@ Format and maintenance rules: skill `domain-knowledge`.
 - [Git tokens reach the container through a credential helper](git-token-via-credential-helper.md) - keeps them out of .git/config and logs
 - [The container user is UID 1001, not 1000](container-user-uid-1001.md) - the node image already took 1000
 - [tmux attach through docker exec needs TERM in the image](tmux-attach-needs-term.md) - fails with "terminal does not support clear"
+- [tmux writes an underscore for every multi-byte character unless the client says UTF-8](tmux-needs-a-utf8-client.md) - Claude's TUI arrives as rows of "_"
 - [A failed clone must not kill the container](failed-clone-must-not-abort.md) - a dead container is unreachable for diagnosis
 - [Project environments are prebuilt images, not devcontainer features](project-images-not-devcontainer-features.md) - devcontainer features have no layer caching
 - [The dev host is Windows, the target is Linux](windows-dev-host-linux-target.md) - line endings and MSYS path rewriting bite
@@ -28,3 +29,7 @@ Format and maintenance rules: skill `domain-knowledge`.
 - [The database holds identity, Docker holds state](database-holds-identity-docker-holds-state.md) - why there is no status column and why the row is written first
 - [Fastify silently strips unknown request fields unless told not to](fastify-strips-unknown-fields.md) - additionalProperties: false alone answers 201
 - [pnpm 10 blocks install scripts, which native modules need](pnpm-blocks-native-build-scripts.md) - better-sqlite3 fails at require time, not at install
+- [The browser must send keystrokes as binary frames, never as text](terminal-input-must-be-binary.md) - a pasted JSON object would be read as a control message
+- [Hand xterm the raw bytes of a frame, never a per-frame decoded string](xterm-write-bytes-not-strings.md) - a multi-byte character can be split across two frames
+- [The web UI routes in the hash because the path belongs to the API](spa-hash-routing-avoids-the-api-namespace.md) - `/instances/<id>` is already a REST resource
+- [Playwright's browser is a separate install step](playwright-browsers-need-an-explicit-install.md) - pnpm 10 blocks the postinstall that fetches it

@@ -1,4 +1,7 @@
+import fastifyStatic from '@fastify/static';
 import websocketPlugin from '@fastify/websocket';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
 import type { InstanceEnvConfig } from './config.ts';
 import type { Database } from './db/index.ts';
@@ -41,6 +44,9 @@ export interface AppOptions {
   engine: DockerEngine;
   baseImage: string;
   instanceEnv: InstanceEnvConfig;
+  /** Directory the built web UI is served from. Left out, or pointing at a
+   *  directory without an `index.html`, the server runs API-only. */
+  webRoot?: string | undefined;
   tmuxSession?: string | undefined;
   logLevel?: string;
   /** Only the tests set this, to keep the terminal heartbeat out of real time. */
@@ -120,6 +126,19 @@ export function buildApp(options: AppOptions): FastifyInstance {
 
   void app.register(instanceRoutes, { service });
   void app.register(terminalRoutes, { service, bridge: options.terminalBridge });
+
+  // The SPA shares the port with the API. Exact routes win against the
+  // wildcard this registers, and the SPA keeps its own routes in the hash, so
+  // nothing here shadows `/instances`
+  // (knowledge/spa-hash-routing-avoids-the-api-namespace.md).
+  const webRoot = options.webRoot;
+  if (webRoot !== undefined && existsSync(join(webRoot, 'index.html'))) {
+    void app.register(fastifyStatic, { root: webRoot, prefix: '/', index: 'index.html' });
+  } else {
+    // Not fatal: an unbuilt UI is a missing convenience, not a broken server --
+    // the same reasoning that lets it start while Docker is down.
+    app.log.warn({ webRoot }, 'no built web UI found -- serving the API only');
+  }
 
   return app;
 }

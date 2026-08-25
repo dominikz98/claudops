@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ConfigError, defaultDockerSocket, loadConfig } from '../src/config.ts';
+import { ConfigError, defaultDockerSocket, defaultWebRoot, loadConfig } from '../src/config.ts';
 
 describe('loadConfig', () => {
   it('falls back to defaults on an empty environment', () => {
@@ -24,6 +24,32 @@ describe('loadConfig', () => {
       port: 9000,
       databaseFile: '/srv/claudops.db',
       baseImage: 'claudops-base:test',
+    });
+  });
+
+  describe('web root', () => {
+    it('points at the sibling web package by default', () => {
+      // Slashes rather than a path join: the point is the location relative to
+      // this package, on either platform.
+      expect(defaultWebRoot().replaceAll('\\', '/')).toMatch(/\/web\/dist$/);
+      expect(loadConfig({}).webRoot).toBe(defaultWebRoot());
+    });
+
+    it('is overridable, for a build that lives somewhere else', () => {
+      expect(loadConfig({ CLAUDOPS_WEB_ROOT: '/srv/claudops/ui' }).webRoot).toBe(
+        '/srv/claudops/ui',
+      );
+    });
+
+    it('resolves the same directory from src and from dist', () => {
+      // Anchored at the end, not compared whole: on Windows `resolve`
+      // prefixes the current drive letter.
+      expect(defaultWebRoot('/repo/server/src').replaceAll('\\', '/')).toMatch(
+        /\/repo\/web\/dist$/,
+      );
+      expect(defaultWebRoot('/repo/server/dist').replaceAll('\\', '/')).toMatch(
+        /\/repo\/web\/dist$/,
+      );
     });
   });
 

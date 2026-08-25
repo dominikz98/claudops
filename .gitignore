@@ -70,3 +70,11 @@ pnpm-debug.log*
 
 # claudops server runtime state (SQLite database)
 data/
+
+# Playwright: the temporary database of an e2e run and the traces a failed run
+# leaves behind. The [Tt]est[Rr]esult*/ pattern above does not cover
+# `test-results/` -- the hyphen is not in it.
+e2e/.tmp/
+test-results/
+playwright-report/
+.playwright/

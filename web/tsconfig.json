@@ -1,0 +1,16 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    // A bundler resolves the imports here, not Node: no extension rewriting and
+    // no CommonJS interop to think about.
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    // Vite emits the bundle; tsc only ever type-checks in this package.
+    "noEmit": true,
+    "declaration": false,
+    "sourceMap": false,
+    "types": ["vite/client"]
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts", "vite.config.ts", "vitest.config.ts"]
+}
