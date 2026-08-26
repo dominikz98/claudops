@@ -17,4 +17,8 @@
 | **claudops label** | `claudops.instance=<id>` on every resource an instance owns, `claudops.project=<id>` on a project image, so cleanup can find them all -- and tell them from anything built by hand. |
 | **Instance status** | Read from the Docker API on every request, never stored: the Docker state (`running`, `exited`, `created`, …) or `missing` when the server has a row and Docker has no container. |
 | **Instance id** | The short id the server generates. It names the container (`claudops-<id>`) and is the value of the claudops label. |
+| **Egress firewall** | The default-deny iptables/ipset ruleset a container installs on itself at start-up, before it clones anything. It reaches its whitelist and nothing else -- not the docker bridge, so not the claudops API and not its neighbours -- and it refuses to be reconfigured for the life of the container. |
+| **Whitelist** | What the egress firewall lets through: a built-in host list in the image, GitHub's published ranges, the project's own repository host, and whatever `CLAUDOPS_FIREWALL_ALLOW` adds. Re-resolved every 15 minutes, because CDN addresses rotate. |
+| **Firewall state** | The one word in `/run/claudops-firewall.state`: `active`, `failed` (sealed to loopback) or `unfiltered` (nothing could be applied, almost always a missing `NET_ADMIN`). In the last two cases Claude is not started at all. |
+| **Session cookie** | `claudops_session` -- an HMAC over an expiry, handed out by `POST /login` in exchange for `CLAUDOPS_LOGIN_SECRET`. Twelve hours, renewed while in use. There is no session store, so logging out clears the browser's cookie but revokes nothing. |
 | **NUC** | The Intel NUC running Ubuntu and Docker that hosts all of this. |

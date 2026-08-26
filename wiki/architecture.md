@@ -126,7 +126,27 @@ volumes.
 
 **Isolation is what permits the risk.** Claude runs with
 `--dangerously-skip-permissions`, which is only acceptable because the container
-is isolated and its egress is restricted to a whitelist. Planned (#9).
+is isolated and its egress is restricted to a whitelist. The container installs
+that whitelist on itself: the entrypoint runs `init-firewall.sh` before it clones
+anything, which resolves a built-in host list plus GitHub's published ranges plus
+the project's own repository host, then sets the default policy to DROP. The
+container is created with `NET_ADMIN` for it, and one `sudo` entry inside the
+image lets the unprivileged entrypoint reach `iptables`.
+
+Two properties of it are worth knowing. **The docker bridge is not on the
+whitelist**, so an instance can reach neither the claudops API on the gateway nor
+its neighbours -- the terminal bridge is a `docker exec`, not a connection into
+the container. And **the firewall is configured exactly once per container
+start**: a re-run is refused, so the agent inside cannot widen its own whitelist.
+If the firewall cannot be established, Claude is not started at all -- the
+session comes up with a plain shell so the console still works for diagnosis.
+
+**The UI is behind a shared secret.** `POST /login` exchanges
+`CLAUDOPS_LOGIN_SECRET` for a session cookie, and one `onRequest` hook gates
+every endpoint except `/health`, the login endpoints and the SPA shell itself --
+which has to be public, because it *is* the login page. The cookie is the
+credential rather than a bearer token because a browser cannot set a header on a
+WebSocket upgrade, and the console needs to authenticate too.
 
 **The Claude token is an OAuth token.** Instances get `CLAUDE_CODE_OAUTH_TOKEN`
 from `claude setup-token`. An `ANTHROPIC_API_KEY` is deliberately never set -- it
@@ -137,7 +157,8 @@ would override the subscription and bill per token.
 Packages #2 to #5 produce the first walking skeleton: start an instance, use its
 console in the browser. All four are done -- an instance can be created, driven
 and deleted from a browser page, and a refresh finds the session where it was.
-#6 to #9 make it usable in practice. #6 to #8 are done: a repository and its
+#6 to #9 make it usable in practice, and all four are done: a repository and its
 credential are configured once as a project, that project brings its own prebuilt
-environment, and an instance is capped, stoppable and cleaned up after. #9 is
-what is left. See issue #1.
+environment, an instance is capped, stoppable and cleaned up after, and #9 closes
+the two holes that were left -- egress is default-deny and the UI needs a login.
+See issue #1.

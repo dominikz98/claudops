@@ -65,11 +65,21 @@ Both are in [knowledge/playwright-browsers-need-a-shared-path.md](../../knowledg
 
 ## Inherited from claudops-base
 
-Entrypoint, tmux configuration, the git credential helper, the `claude` user and
-every environment variable in [`../base/README.md`](../base/README.md). The
-template installs as root and hands the image back to `claude` at the end, so an
-instance of a project image behaves exactly like one of the base image -- it just
-has more tools.
+Entrypoint, tmux configuration, the git credential helper, the `claude` user, the
+egress firewall and every environment variable in
+[`../base/README.md`](../base/README.md). The template installs as root and hands
+the image back to `claude` at the end, so an instance of a project image behaves
+exactly like one of the base image -- it just has more tools.
+
+Two consequences of the inherited firewall. A container off a project image needs
+`--cap-add=NET_ADMIN` just as much as one off the base image. And the **build** is
+not firewalled -- the firewall is installed at container start -- so
+`dotnet-install.sh` and `playwright install` reach whatever they need here, while
+a `dotnet restore` *inside a running instance* only reaches what the whitelist
+allows. That is why the dotnet block writes its own nuget hosts into
+`/etc/claudops/firewall-allow.d/10-dotnet.conf` rather than relying on the base
+list; a block that needs more hosts does the same, and an operator adds one-offs
+with `CLAUDOPS_FIREWALL_ALLOW`.
 
 ## Test
 

@@ -55,6 +55,7 @@ describe('project REST API', () => {
         claudeOauthToken: 'oauth-token',
         gitUserName: undefined,
         gitUserEmail: undefined,
+        firewallAllow: undefined,
       },
       cipher: testCipher(),
       logLevel: 'silent',
@@ -150,6 +151,7 @@ describe('project REST API', () => {
           claudeOauthToken: undefined,
           gitUserName: undefined,
           gitUserEmail: undefined,
+          firewallAllow: undefined,
         },
         logLevel: 'silent',
       });

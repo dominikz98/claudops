@@ -1,4 +1,5 @@
 import { resolve } from 'node:path';
+import { createSessionAuth, type SessionAuth } from './auth/session.ts';
 import type { ContainerLimits } from './docker/engine.ts';
 import { defaultProjectContext } from './projects/images.ts';
 import { createCipher, parseSecretKey, type SecretCipher } from './secrets/cipher.ts';
@@ -16,6 +17,13 @@ export interface InstanceEnvConfig {
   claudeOauthToken: string | undefined;
   gitUserName: string | undefined;
   gitUserEmail: string | undefined;
+  /**
+   * Extra hosts and CIDRs the container's egress firewall lets through, on top
+   * of its built-in list. Handed over as FIREWALL_ALLOW, which the container
+   * reads from PID 1's environment -- so it cannot be widened from inside
+   * (knowledge/container-env-reaches-a-sudo-script-through-proc-1.md).
+   */
+  firewallAllow: string | undefined;
 }
 
 export interface ServerConfig {
@@ -46,6 +54,15 @@ export interface ServerConfig {
    * that encrypts (server/src/secrets/cipher.ts).
    */
   cipher: SecretCipher;
+  /**
+   * The shared secret behind the UI, ready to verify session cookies with.
+   * Never the secret itself, for the same reason `cipher` is not the key.
+   */
+  auth: SessionAuth;
+  /** `Secure` on the session cookie. Only with TLS in front -- a browser
+   *  silently discards a Secure cookie that arrived over plain http, and the
+   *  login would appear to do nothing. */
+  secureCookie: boolean;
   instanceEnv: InstanceEnvConfig;
   /** CPU and memory ceiling every instance container is created with. */
   instanceLimits: ContainerLimits;
@@ -157,6 +174,50 @@ function cipher(env: NodeJS.ProcessEnv): SecretCipher {
   return createCipher(key);
 }
 
+/**
+ * Long enough that the brake on /login is not the only thing between a LAN and
+ * an instance console. Short enough to type once a day.
+ */
+const MIN_LOGIN_SECRET = 16;
+
+/**
+ * The shared secret behind the UI. Unlike CLAUDOPS_SECRET_KEY, a missing value
+ * is an error here: the whole point of the login is that the endpoints are
+ * unusable without it, and a server that silently runs open because somebody
+ * forgot an environment variable does not have that property. Refusing at
+ * startup is also the only failure a human sees immediately.
+ */
+function auth(env: NodeJS.ProcessEnv): SessionAuth {
+  const raw = optional(env, 'CLAUDOPS_LOGIN_SECRET');
+  if (raw === undefined) {
+    throw new ConfigError(
+      'CLAUDOPS_LOGIN_SECRET is required -- the UI and the terminal WebSocket are unusable without a login',
+    );
+  }
+  if (raw.length < MIN_LOGIN_SECRET) {
+    throw new ConfigError(
+      `CLAUDOPS_LOGIN_SECRET must be at least ${String(MIN_LOGIN_SECRET)} characters`,
+    );
+  }
+  return createSessionAuth(raw);
+}
+
+/** Hosts and CIDRs only. Validated here rather than in the container, because
+ *  the firewall script skips a word it cannot parse and the operator would
+ *  never learn the entry did nothing. */
+const FIREWALL_ALLOW_PATTERN = /^[A-Za-z0-9._\-/, \t]+$/;
+
+function firewallAllow(env: NodeJS.ProcessEnv): string | undefined {
+  const raw = optional(env, 'CLAUDOPS_FIREWALL_ALLOW');
+  if (raw === undefined) return undefined;
+  if (!FIREWALL_ALLOW_PATTERN.test(raw)) {
+    throw new ConfigError(
+      `CLAUDOPS_FIREWALL_ALLOW must be a comma- or space-separated list of hosts and CIDRs, got '${raw}'`,
+    );
+  }
+  return raw;
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   // DOCKER_HOST wins over the platform default: dockerode reads it itself, so
   // we hand it no socket path at all in that case.
@@ -176,11 +237,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     tmuxSession: optional(env, 'CLAUDOPS_TMUX_SESSION') ?? 'main',
     dockerSocket,
     cipher: cipher(env),
+    auth: auth(env),
+    secureCookie: optional(env, 'CLAUDOPS_SESSION_SECURE') === '1',
     instanceLimits: instanceLimits(env),
     instanceEnv: {
       claudeOauthToken: optional(env, 'CLAUDE_CODE_OAUTH_TOKEN'),
       gitUserName: optional(env, 'CLAUDOPS_GIT_USER_NAME'),
       gitUserEmail: optional(env, 'CLAUDOPS_GIT_USER_EMAIL'),
+      firewallAllow: firewallAllow(env),
     },
   };
 }

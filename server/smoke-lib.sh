@@ -26,6 +26,14 @@ native() { command -v cygpath >/dev/null 2>&1 && cygpath -w "$1" || printf '%s' 
 WORK_DIR="$(mktemp -d)"
 WORK_DIR_NATIVE="$(native "$WORK_DIR")"
 
+# Every endpoint but /health is behind a login (#9), so the harness needs a
+# secret and a cookie jar. Not a secret in any real sense -- the server it
+# protects lives for the length of one test run -- but it has to clear the
+# minimum length loadConfig insists on.
+SMOKE_LOGIN_SECRET="${SMOKE_LOGIN_SECRET:-smoke-test-shared-secret}"
+COOKIE_JAR="$WORK_DIR/cookies.txt"
+COOKIE_JAR_NATIVE="$(native "$COOKIE_JAR")"
+
 pass=0
 fail=0
 SERVER_PIDS=()
@@ -69,16 +77,30 @@ json() { node -e '
   });
 ' "$1"; }
 
+# log_in <base-url> -- exchanges the shared secret for a session cookie and
+# leaves it in the jar every later api() call reads. Called by wait_for_health,
+# so a test rarely needs it by hand.
+log_in() {
+  local base="$1"
+  curl -s -o /dev/null -c "$COOKIE_JAR_NATIVE" \
+    -X POST -H 'content-type: application/json' \
+    -d "{\"secret\":\"$SMOKE_LOGIN_SECRET\"}" "$base/login"
+}
+
 # api <method> <path> [body] -- prints "<status>\n<body>", against $BASE.
 # Everything goes through stdout: handing curl.exe an -o path would need the
 # native form.
+#
+# -b carries the session cookie: without a login every path but /health answers
+# 401 (#9). An empty jar is not an error here -- a test that wants to see the
+# refusal simply does not log in first.
 api() {
   local method="$1" path="$2" body="${3:-}" raw
   if [[ -n "$body" ]]; then
-    raw="$(curl -s -w '\n%{http_code}' \
+    raw="$(curl -s -w '\n%{http_code}' -b "$COOKIE_JAR_NATIVE" \
       -X "$method" -H 'content-type: application/json' -d "$body" "$BASE$path")"
   else
-    raw="$(curl -s -w '\n%{http_code}' -X "$method" "$BASE$path")"
+    raw="$(curl -s -w '\n%{http_code}' -b "$COOKIE_JAR_NATIVE" -X "$method" "$BASE$path")"
   fi
   # Status last on the wire, first in the output -- so callers can read either
   # half without knowing how long the body is.
@@ -120,6 +142,8 @@ start_server() {
   (
     cd "$SERVER_DIR" || exit 1
     export CLAUDOPS_HOST=127.0.0.1 CLAUDOPS_PORT="$port" CLAUDOPS_DB="$db"
+    # Mandatory since #9: without it the server refuses to start at all.
+    export CLAUDOPS_LOGIN_SECRET="$SMOKE_LOGIN_SECRET"
     local assignment
     for assignment in "$@"; do export "${assignment?}"; done
     exec node dist/index.js
@@ -129,10 +153,17 @@ start_server() {
 }
 
 # wait_for_health <base-url> [tries]
+#
+# /health is deliberately outside the login (#9) -- a readiness probe that needs
+# a credential is one the harness cannot use. The login happens right after it
+# answers, so every api() call afterwards carries a session.
 wait_for_health() {
   local base="$1" tries="${2:-30}" _
   for _ in $(seq 1 "$tries"); do
-    [[ "$(curl -s -o /dev/null -w '%{http_code}' "$base/health")" == "200" ]] && return 0
+    if [[ "$(curl -s -o /dev/null -w '%{http_code}' "$base/health")" == "200" ]]; then
+      log_in "$base"
+      return 0
+    fi
     sleep 1
   done
   return 1

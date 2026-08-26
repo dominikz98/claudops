@@ -3,6 +3,9 @@ import websocketPlugin from '@fastify/websocket';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
+import { sessionGate } from './auth/gate.ts';
+import { authRoutes } from './auth/routes.ts';
+import type { SessionAuth } from './auth/session.ts';
 import type { InstanceEnvConfig } from './config.ts';
 import type { Database } from './db/index.ts';
 import { InstanceRepository } from './db/instances.ts';
@@ -92,6 +95,14 @@ export interface AppOptions {
   logLevel?: string;
   /** Only the tests set this, to keep the terminal heartbeat out of real time. */
   terminalBridge?: BridgeOptions | undefined;
+  /** Gates everything but the login page, the login endpoints and /health. Left
+   *  out, the app runs open and says so -- which is what the tests that predate
+   *  the login use. The decision to refuse that in production belongs to
+   *  loadConfig, which makes CLAUDOPS_LOGIN_SECRET mandatory. */
+  auth?: SessionAuth | undefined;
+  /** `Secure` on the session cookie. Only with TLS in front: a browser drops a
+   *  Secure cookie that arrived over plain http. */
+  secureCookie?: boolean | undefined;
 }
 
 export function buildApp(options: AppOptions): FastifyInstance {
@@ -103,9 +114,16 @@ export function buildApp(options: AppOptions): FastifyInstance {
     logger: {
       level: options.logLevel ?? 'info',
       // A token in a log line is a leaked token: the console is mirrored into
-      // the browser and the log ends up on disk.
+      // the browser and the log ends up on disk. The cookie carries the session
+      // and the body of POST /login carries the shared secret, so both are
+      // credentials in exactly the same sense as the PAT.
       redact: {
-        paths: ['req.headers.authorization', 'req.body.gitToken'],
+        paths: [
+          'req.headers.authorization',
+          'req.headers.cookie',
+          'req.body.gitToken',
+          'req.body.secret',
+        ],
         censor: '[redacted]',
       },
     },
@@ -239,9 +257,22 @@ export function buildApp(options: AppOptions): FastifyInstance {
     return { status: 'ok', docker: 'ok' };
   });
 
+  // Before the routes it protects, and on the root instance rather than in each
+  // plugin: the static wildcard below and the not-found handler above need it
+  // too, and "closed unless listed" is the only default worth having.
+  const auth = options.auth;
+  const secureCookie = options.secureCookie ?? false;
+  if (auth === undefined) {
+    app.log.warn('no login configured -- every endpoint is open');
+  } else {
+    app.addHook('onRequest', sessionGate(auth, secureCookie));
+  }
+
   // The console is a raw duplex, not JSON over HTTP: @fastify/websocket brings
   // the upgrade handling and `ws`, the bridge in src/terminal does the piping.
   void app.register(websocketPlugin, { options: { maxPayload: MAX_WS_PAYLOAD } });
+
+  if (auth !== undefined) void app.register(authRoutes, { auth, secureCookie });
 
   void app.register(projectRoutes, { service: projects, images });
   void app.register(instanceRoutes, { service });

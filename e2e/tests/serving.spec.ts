@@ -1,6 +1,10 @@
 /**
  * SPA and API share one port. What is worth asserting is that they do not
  * shadow each other -- the SPA is a wildcard route and the API is not.
+ *
+ * Every request here carries the session cookie from `use.storageState`, so what
+ * these cases check is the routing, not the gate. `auth.spec.ts` is the one that
+ * takes the cookie away again.
  */
 
 import { expect, test } from '@playwright/test';
@@ -23,7 +27,7 @@ test('serves the hashed assets the page asks for', async ({ request }) => {
   expect(response.headers()['content-type']).toContain('javascript');
 });
 
-test('leaves the API in its own namespace', async ({ request }) => {
+test('leaves the authenticated API in its own namespace', async ({ request }) => {
   const instances = await request.get('/instances');
   expect(instances.status()).toBe(200);
   expect(await instances.json()).toHaveProperty('instances');

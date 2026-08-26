@@ -12,6 +12,11 @@ export default defineConfig({
       '/instances': { target: SERVER, ws: true },
       '/projects': { target: SERVER },
       '/health': { target: SERVER },
+      // Without these three `pnpm dev:web` cannot log in, and every other
+      // request answers 401.
+      '/login': { target: SERVER },
+      '/logout': { target: SERVER },
+      '/session': { target: SERVER },
     },
   },
   build: {

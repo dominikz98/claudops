@@ -21,6 +21,9 @@ export CLAUDOPS_E2E_IMAGE="$IMAGE"
 # A fresh key per run: the projects created here store a PAT, and nothing needs
 # to read them again afterwards.
 export CLAUDOPS_E2E_SECRET_KEY="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))')"
+# Same reasoning for the login (#9): the server refuses to start without one, and
+# nothing outlives this run that would need it again.
+export CLAUDOPS_E2E_LOGIN_SECRET="e2e-$(node -e 'process.stdout.write(require("node:crypto").randomBytes(16).toString("hex"))')"
 
 trap smoke_cleanup EXIT
 

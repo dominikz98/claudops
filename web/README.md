@@ -4,7 +4,7 @@ The browser side of claudops: the projects page, the instance list and one
 xterm.js console per instance. Built with Vite into `dist/`, from where the server
 serves it on its own port -- there is no second process and no second origin.
 
-Plain TypeScript, no framework. There are three views, and the only real
+Plain TypeScript, no framework. There are four views, and the only real
 dependency is `@xterm/xterm` with its fit addon.
 
 ## Run
@@ -12,13 +12,17 @@ dependency is `@xterm/xterm` with its fit addon.
 Against a server that is already up:
 
 ```bash
-pnpm --filter @claudops/server dev     # :8080
-pnpm dev:web                           # :5173, proxies /projects, /instances, /health
+CLAUDOPS_LOGIN_SECRET=a-shared-secret-long-enough pnpm --filter @claudops/server dev
+pnpm dev:web                           # :5173, proxies the API and the login
 ```
 
 The dev server proxies the API *and* the terminal upgrade (`ws: true`), so the
 console works there too. `CLAUDOPS_DEV_SERVER` points the proxy somewhere else,
-for instance at the NUC.
+for instance at the NUC. `/login`, `/logout` and `/session` are in the proxy map
+as well -- without them the page can be loaded but not logged into.
+
+The server refuses to start without `CLAUDOPS_LOGIN_SECRET`, and the first thing
+the page shows is the form asking for it.
 
 For the real thing, build it and let the server hand it out:
 
@@ -35,7 +39,8 @@ logs a warning and serves the API only.
 
 | Route | Page |
 | --- | --- |
-| `#/` | Instance list: create from a project, status, delete. Polls `GET /instances` every 3 s. |
+| `#/login` | The shared-secret form. Where the app sends you whenever any request comes back `unauthorized`, whichever page you were on. |
+| `#/` | Instance list: create from a project, status, delete, log out. Polls `GET /instances` every 3 s. |
 | `#/projects` | Projects: create, edit, delete the templates instances come from, and watch their images being built. Polls only while a build is running. |
 | `#/i/<id>` | The console of one instance, over `GET /instances/<id>/terminal`. |
 

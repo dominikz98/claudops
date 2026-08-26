@@ -10,6 +10,15 @@ import { defineConfig, devices } from '@playwright/test';
 const PORT = process.env.CLAUDOPS_E2E_PORT ?? '18091';
 const BASE_URL = `http://127.0.0.1:${PORT}`;
 
+/**
+ * The shared secret the server is started with and global-setup.ts logs in with.
+ * `run.sh` generates one per run; the fallback keeps a bare `playwright test`
+ * working. Not a secret in any real sense -- it protects a server that exists
+ * for the length of one run, against a database thrown away with `.tmp`.
+ */
+const LOGIN_SECRET = process.env.CLAUDOPS_E2E_LOGIN_SECRET ?? 'e2e-shared-secret-long-enough';
+process.env.CLAUDOPS_E2E_LOGIN_SECRET = LOGIN_SECRET;
+
 export default defineConfig({
   testDir: './tests',
   // Serial from top to bottom: the tests share one Docker daemon and one
@@ -20,9 +29,15 @@ export default defineConfig({
   // Playwright's default assumes.
   timeout: 120_000,
   reporter: [['list']],
+  // Logs in once and leaves the cookie in .tmp/auth.json for `use.storageState`
+  // below -- every endpoint but /health is behind the login now (#9).
+  globalSetup: './global-setup.ts',
   use: {
     baseURL: BASE_URL,
     trace: 'retain-on-failure',
+    // Covers the `page` fixture and the bare `request` fixture both, so a spec
+    // only has to opt *out* -- which auth.spec.ts does, with its own context.
+    storageState: '.tmp/auth.json',
   },
   projects: [{ name: 'chromium', use: devices['Desktop Chrome'] }],
   webServer: {
@@ -54,6 +69,9 @@ export default defineConfig({
       CLAUDOPS_SECRET_KEY:
         process.env.CLAUDOPS_E2E_SECRET_KEY ??
         '2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a',
+      // Mandatory since #9: without it the server refuses to start. Same shape
+      // as the key above, and global-setup.ts logs in with it.
+      CLAUDOPS_LOGIN_SECRET: LOGIN_SECRET,
       CLAUDOPS_LOG_LEVEL: 'warn',
     },
   },

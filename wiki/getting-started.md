@@ -240,6 +240,9 @@ into each container.
 | `CLAUDOPS_WEB_ROOT` | Where the built UI is, default `web/dist` next to the server. |
 | `CLAUDE_CODE_OAUTH_TOKEN` | Claude Code auth, injected into every instance. |
 | `CLAUDOPS_SECRET_KEY` | 32 bytes, base64 or hex: encrypts the PAT a project stores. |
+| `CLAUDOPS_LOGIN_SECRET` | **Required.** The shared secret the UI asks for, at least 16 characters. Without it the server refuses to start. |
+| `CLAUDOPS_SESSION_SECURE` | `1` marks the session cookie `Secure`. Only with TLS in front -- over plain HTTP a browser discards it and the login silently fails. |
+| `CLAUDOPS_FIREWALL_ALLOW` | Extra hosts and CIDRs an instance's egress firewall lets through, comma- or space-separated, on top of its built-in list. |
 | `CLAUDOPS_GIT_USER_NAME`, `CLAUDOPS_GIT_USER_EMAIL` | Commit identity for instances. |
 
 | On a project | Purpose |

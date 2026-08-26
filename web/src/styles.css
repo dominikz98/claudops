@@ -49,6 +49,12 @@ header {
   font-size: 0.875rem;
 }
 
+/* Sits next to .nav, which already took the auto margin. */
+.logout {
+  margin-left: 1rem;
+  font-size: 0.875rem;
+}
+
 .subtitle {
   color: var(--muted);
   margin: 0.25rem 0 0;

@@ -23,7 +23,12 @@ function appWith(webRoot: string | undefined): FastifyInstance {
     db,
     engine: new FakeDockerEngine(),
     baseImage: 'claudops-base',
-    instanceEnv: { claudeOauthToken: undefined, gitUserName: undefined, gitUserEmail: undefined },
+    instanceEnv: {
+      claudeOauthToken: undefined,
+      gitUserName: undefined,
+      gitUserEmail: undefined,
+      firewallAllow: undefined,
+    },
     webRoot,
     logLevel: 'silent',
   });

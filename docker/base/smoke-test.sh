@@ -16,6 +16,9 @@ export MSYS2_ARG_CONV_EXCL='*'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IMAGE="${IMAGE:-claudops-base:test}"
 CONTAINER="${CONTAINER:-claudops-smoke}"
+# A second container, started *without* --cap-add=NET_ADMIN, to check what the
+# entrypoint does when the firewall cannot come up.
+NOCAP="${CONTAINER}-nocap"
 TEST_REPO="${TEST_REPO:-https://github.com/dominikz98/claudops.git}"
 TEST_BRANCH="${TEST_BRANCH:-main}"
 REPO_DIR="/workspace/claudops"
@@ -39,7 +42,7 @@ check() {
 
 dexec() { docker exec "$CONTAINER" "$@"; }
 
-cleanup() { docker rm -f "$CONTAINER" >/dev/null 2>&1; }
+cleanup() { docker rm -f "$CONTAINER" "$NOCAP" >/dev/null 2>&1; }
 trap cleanup EXIT
 
 # ---------------------------------------------------------------- build & start
@@ -53,6 +56,7 @@ fi
 info "Starting container"
 cleanup
 docker run -d --name "$CONTAINER" \
+  --cap-add=NET_ADMIN \
   -e REPO_URL="$TEST_REPO" \
   -e REPO_BRANCH="$TEST_BRANCH" \
   -e GIT_USER_NAME="claudops" \
@@ -90,6 +94,81 @@ check "User is 'claude'" "claude" "$(dexec id -un 2>/dev/null | tr -d '\r')"
 check "UID is not 0" "1001" "$(dexec id -u 2>/dev/null | tr -d '\r')"
 check "Working directory is owned by the user" "claude" \
   "$(dexec stat -c '%U' /workspace 2>/dev/null | tr -d '\r')"
+
+# ------------------------------------------------------- AC (#9): egress firewall
+info "AC (#9): the container reaches whitelisted domains and no others"
+check "Firewall reports itself active" "active" \
+  "$(dexec head -1 /run/claudops-firewall.state 2>/dev/null | tr -d '\r')"
+check "OUTPUT policy is DROP" "DROP" \
+  "$(docker exec -u root "$CONTAINER" \
+      sh -c "iptables -n -L OUTPUT | sed -n '1s/.*policy \([A-Z]*\).*/\1/p'" 2>/dev/null | tr -d '\r')"
+check "A whitelisted GitHub host is reachable" "0" \
+  "$(dexec curl -sS --max-time 15 -o /dev/null https://api.github.com/zen >/dev/null 2>&1; echo $?)"
+check "api.anthropic.com is reachable" "0" \
+  "$(dexec curl -sS --max-time 15 -o /dev/null https://api.anthropic.com/ >/dev/null 2>&1; echo $?)"
+check "DNS still resolves" "0" \
+  "$(dexec getent ahostsv4 registry.npmjs.org >/dev/null 2>&1; echo $?)"
+
+blocked_rc="$(dexec curl -sS --max-time 5 -o /dev/null https://example.com >/dev/null 2>&1; echo $?)"
+if [[ "$blocked_rc" != "0" ]]; then
+  ok "A host that is not whitelisted is refused (curl exit $blocked_rc)"
+else
+  bad "example.com was reachable -- the firewall is not filtering"
+fi
+
+# The Anthropic reference whitelists the whole host /24, which here is the docker
+# bridge: the claudops API on the gateway and every neighbouring instance
+# (knowledge/do-not-whitelist-the-docker-bridge.md).
+gateway="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}' "$CONTAINER" | tr -d '\r')"
+check "The docker bridge gateway is not whitelisted" "1" \
+  "$(docker exec -u root "$CONTAINER" ipset test claudops-allow "$gateway" >/dev/null 2>&1; echo $?)"
+gateway_rc="$(dexec curl -sS --max-time 4 -o /dev/null "http://${gateway}:8080/" >/dev/null 2>&1; echo $?)"
+if [[ "$gateway_rc" != "0" ]]; then
+  ok "The claudops server's own port on the gateway is unreachable (curl exit $gateway_rc)"
+else
+  bad "The container reached the docker bridge gateway"
+fi
+
+info "AC (#9): the agent cannot widen its own whitelist"
+check "Re-running the firewall is refused" "3" \
+  "$(dexec sudo -n /usr/local/bin/init-firewall.sh >/dev/null 2>&1; echo $?)"
+check "The whitelist survived the refused re-run" "0" \
+  "$(dexec curl -sS --max-time 15 -o /dev/null https://api.github.com/zen >/dev/null 2>&1; echo $?)"
+check "A re-run with its own FIREWALL_ALLOW is refused too" "3" \
+  "$(docker exec -e FIREWALL_ALLOW=evil.example "$CONTAINER" \
+      sudo -n /usr/local/bin/init-firewall.sh >/dev/null 2>&1; echo $?)"
+check "sudo grants nothing but that one script" "1" \
+  "$(dexec sudo -n /bin/sh -c id >/dev/null 2>&1; echo $?)"
+check "The script takes no arguments through sudo" "1" \
+  "$(dexec sudo -n /usr/local/bin/init-firewall.sh --allow evil.example >/dev/null 2>&1; echo $?)"
+
+iptables_rc="$(dexec iptables -L >/dev/null 2>&1; echo $?)"
+if [[ "$iptables_rc" != "0" ]]; then
+  ok "The unprivileged user cannot run iptables itself (exit $iptables_rc)"
+else
+  bad "iptables works as 'claude' -- the capability leaked"
+fi
+
+info "AC (#9): without NET_ADMIN the container withholds Claude"
+docker rm -f "$NOCAP" >/dev/null 2>&1
+docker run -d --name "$NOCAP" -e REPO_URL="$TEST_REPO" "$IMAGE" >/dev/null
+for _ in $(seq 1 60); do
+  docker exec "$NOCAP" tmux has-session -t main >/dev/null 2>&1 && break
+  sleep 1
+done
+# `unfiltered`, not `failed`: setting a policy is itself an iptables call, so
+# without the capability the container cannot even be sealed -- and it says so
+# rather than claim a seal it does not have.
+check "State reports that egress is not filtered" "unfiltered" \
+  "$(docker exec "$NOCAP" head -1 /run/claudops-firewall.state 2>/dev/null | tr -d '\r')"
+check "The session still comes up for diagnosis" "0" \
+  "$(docker exec "$NOCAP" tmux has-session -t main >/dev/null 2>&1; echo $?)"
+check "Claude Code was withheld" "0" \
+  "$(docker exec "$NOCAP" pgrep -fc 'claude' 2>/dev/null | tr -d '\r')"
+check "The pane says why" "0" \
+  "$(docker exec "$NOCAP" sh -c \
+      "tmux capture-pane -p -t main | grep -q 'egress firewall did not come up'" >/dev/null 2>&1; echo $?)"
+docker rm -f "$NOCAP" >/dev/null 2>&1
 
 # ---------------------------------------------- AC: detach / reattach
 info "AC 3: tmux detach/reattach, Claude keeps running"

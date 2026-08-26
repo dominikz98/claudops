@@ -28,6 +28,19 @@ describe('hash routes', () => {
     expect(routeHash({ view: 'projects' })).toBe('#/projects');
   });
 
+  it('round-trips the login route', () => {
+    expect(parseRoute('#/login')).toEqual({ view: 'login' });
+    expect(routeHash({ view: 'login' })).toBe('#/login');
+  });
+
+  it('does not read a near miss as the login page', () => {
+    // Same reason as the projects near misses: an unrecognised hash is the list,
+    // never a blank screen.
+    for (const hash of ['#/log', '#/login/', '#/login?next=/']) {
+      expect(parseRoute(hash)).toEqual({ view: 'list' });
+    }
+  });
+
   it('does not read a near miss as the projects page', () => {
     // `/projects` is a REST resource, so only the exact hash is a page -- and
     // anything else lands on the list rather than on a blank screen.
