@@ -17,6 +17,8 @@ async function main(): Promise<void> {
     instanceEnv: config.instanceEnv,
     instanceLimits: config.instanceLimits,
     cipher: config.cipher,
+    auth: config.auth,
+    secureCookie: config.secureCookie,
     webRoot: config.webRoot,
     tmuxSession: config.tmuxSession,
     logLevel: config.logLevel,

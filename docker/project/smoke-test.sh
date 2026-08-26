@@ -105,7 +105,12 @@ info "Starting a container off the project image"
 cleanup
 # No REPO_URL: the clone is claudops-base's business and tested there. The tmux
 # session still has to come up, because the entrypoint is inherited.
-docker run -d --name "$CONTAINER" "$IMAGE" >/dev/null || { bad "docker run"; exit 1; }
+#
+# NET_ADMIN for the same reason the server grants it: without it the inherited
+# entrypoint seals the container off and withholds Claude, so this run would stop
+# resembling production. The firewall itself is tested in docker/base.
+docker run -d --name "$CONTAINER" --cap-add=NET_ADMIN "$IMAGE" >/dev/null \
+  || { bad "docker run"; exit 1; }
 
 for _ in $(seq 1 60); do
   dexec tmux has-session -t main >/dev/null 2>&1 && break
@@ -122,6 +127,8 @@ if [[ "$dotnet_version" == "$DOTNET_CHANNEL".* ]]; then
 else
   bad "dotnet --version reported '$dotnet_version', expected a $DOTNET_CHANNEL.x"
 fi
+check "The dotnet block added its nuget hosts to the egress whitelist" "0" \
+  "$(dexec grep -q 'api\.nuget\.org' /etc/claudops/firewall-allow.d/10-dotnet.conf >/dev/null 2>&1; echo $?)"
 check "DOTNET_ROOT is set in the image" "/usr/share/dotnet" \
   "$(dexec printenv DOTNET_ROOT 2>/dev/null | tr -d '\r')"
 

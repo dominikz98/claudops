@@ -8,5 +8,5 @@
     "sourceMap": false,
     "types": ["node"]
   },
-  "include": ["tests/**/*.ts", "docker.ts", "playwright.config.ts"]
+  "include": ["tests/**/*.ts", "docker.ts", "global-setup.ts", "playwright.config.ts"]
 }

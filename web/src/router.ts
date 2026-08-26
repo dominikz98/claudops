@@ -8,25 +8,34 @@
  * (knowledge/spa-hash-routing-avoids-the-api-namespace.md).
  */
 
-export type Route = { view: 'list' } | { view: 'projects' } | { view: 'console'; id: string };
+export type Route =
+  | { view: 'list' }
+  | { view: 'projects' }
+  | { view: 'login' }
+  | { view: 'console'; id: string };
 
 const CONSOLE_PREFIX = '#/i/';
 const PROJECTS_HASH = '#/projects';
+const LOGIN_HASH = '#/login';
 
 /** Anything unrecognised is the list: a mistyped hash must not leave the page
- *  blank. */
+ *  blank. The login is a hash like the others -- the SPA never owns a path,
+ *  because every path belongs to the API
+ *  (knowledge/spa-hash-routing-avoids-the-api-namespace.md). */
 export function parseRoute(hash: string): Route {
   if (hash.startsWith(CONSOLE_PREFIX)) {
     const id = decodeURIComponent(hash.slice(CONSOLE_PREFIX.length));
     return id === '' ? { view: 'list' } : { view: 'console', id };
   }
 
+  if (hash === LOGIN_HASH) return { view: 'login' };
   return hash === PROJECTS_HASH ? { view: 'projects' } : { view: 'list' };
 }
 
 export function routeHash(route: Route): string {
   if (route.view === 'console') return `${CONSOLE_PREFIX}${encodeURIComponent(route.id)}`;
-  return route.view === 'projects' ? PROJECTS_HASH : '#/';
+  if (route.view === 'projects') return PROJECTS_HASH;
+  return route.view === 'login' ? LOGIN_HASH : '#/';
 }
 
 export function navigate(route: Route): void {

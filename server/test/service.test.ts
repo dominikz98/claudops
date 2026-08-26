@@ -31,6 +31,7 @@ const instanceEnv: InstanceEnvConfig = {
   claudeOauthToken: 'oauth-token',
   gitUserName: 'claudops',
   gitUserEmail: 'claudops@example.invalid',
+  firewallAllow: undefined,
 };
 
 describe('InstanceService', () => {
@@ -156,6 +157,35 @@ describe('InstanceService', () => {
       });
     });
 
+    it('grants NET_ADMIN, so the container can install its own egress firewall', async () => {
+      await service.create({ name: 'demo', projectId });
+
+      expect(engine.specFor('id-1')?.capAdd).toEqual(['NET_ADMIN']);
+    });
+
+    it('adds nothing else, so Docker keeps the default set it needs', async () => {
+      await service.create({ name: 'demo', projectId });
+
+      // NET_RAW is deliberately absent: the legacy iptables backend needs it,
+      // but it is already in Docker's default set, and adding it here would
+      // suggest the default set is being replaced rather than extended.
+      expect(engine.specFor('id-1')?.capAdd).not.toContain('NET_RAW');
+    });
+
+    it('hands the operator whitelist over as FIREWALL_ALLOW', async () => {
+      const wide = new InstanceService(repository, engine, {
+        instanceEnv: { ...instanceEnv, firewallAllow: 'api.nuget.org, 10.9.8.0/24' },
+        projects,
+        generateId: () => 'id-wide',
+      });
+
+      await wide.create({ name: 'demo', projectId });
+
+      expect(engine.specFor('id-wide')?.env).toMatchObject({
+        FIREWALL_ALLOW: 'api.nuget.org, 10.9.8.0/24',
+      });
+    });
+
     it('never sets an ANTHROPIC_API_KEY next to the OAuth token', async () => {
       await service.create({ name: 'demo', projectId });
 
@@ -168,6 +198,7 @@ describe('InstanceService', () => {
           claudeOauthToken: undefined,
           gitUserName: undefined,
           gitUserEmail: undefined,
+          firewallAllow: undefined,
         },
         projects,
         generateId: () => 'id-bare',

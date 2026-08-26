@@ -293,6 +293,7 @@ export class FakeDockerEngine implements DockerEngine {
         env: {},
         labels: {},
         limits: { cpus: 1, memoryBytes: 1024 * 1024 * 1024 },
+        capAdd: [],
       },
       state: 'running',
     });
@@ -311,6 +312,7 @@ export class FakeDockerEngine implements DockerEngine {
         env: {},
         labels: instanceLabels(instanceId),
         limits: { cpus: 1, memoryBytes: 1024 * 1024 * 1024 },
+        capAdd: [],
       },
       state: 'running',
     });

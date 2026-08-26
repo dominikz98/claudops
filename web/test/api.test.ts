@@ -243,3 +243,95 @@ describe('api client', () => {
     });
   });
 });
+
+describe('the login half of the API', () => {
+  it('posts the secret and expects a cookie to be set by the server', async () => {
+    const { fetch, calls } = fakeFetch(() =>
+      json({ authenticated: true, expiresAt: '2026-08-26T20:00:00.000Z' }),
+    );
+
+    await createApi(fetch).login('a-shared-secret-long-enough');
+
+    expect(calls[0]?.url).toBe('/login');
+    expect(calls[0]?.init?.method).toBe('POST');
+    expect(sentJson(calls[0])).toEqual({ secret: 'a-shared-secret-long-enough' });
+  });
+
+  it('turns a wrong secret into an ApiCallError with the code the form branches on', async () => {
+    const { fetch } = fakeFetch(() =>
+      json({ error: 'invalid_secret', message: 'that is not the shared secret' }, 401),
+    );
+
+    await expect(createApi(fetch).login('wrong')).rejects.toMatchObject({
+      status: 401,
+      code: 'invalid_secret',
+    });
+  });
+
+  it('posts the logout and tolerates its empty 204', async () => {
+    const { fetch, calls } = fakeFetch(() => new Response(null, { status: 204 }));
+
+    await createApi(fetch).logout();
+
+    expect(calls[0]?.url).toBe('/logout');
+    expect(calls[0]?.init?.method).toBe('POST');
+  });
+
+  it('reads the session state', async () => {
+    const { fetch } = fakeFetch(() =>
+      json({ authenticated: true, expiresAt: '2026-08-26T20:00:00.000Z' }),
+    );
+
+    await expect(createApi(fetch).session()).resolves.toEqual({
+      authenticated: true,
+      expiresAt: '2026-08-26T20:00:00.000Z',
+    });
+  });
+});
+
+describe('a lost session', () => {
+  const gateRefusal = (): Response =>
+    json({ error: 'unauthorized', message: 'log in first' }, 401);
+
+  it('is reported once per refused call, whichever verb it was', async () => {
+    let seen = 0;
+    const { fetch } = fakeFetch(gateRefusal);
+    const api = createApi(fetch, () => {
+      seen += 1;
+    });
+
+    await expect(api.list()).rejects.toBeInstanceOf(ApiCallError);
+    // DELETE has its own path through the client, so it needs its own proof.
+    await expect(api.remove('abc123')).rejects.toBeInstanceOf(ApiCallError);
+
+    expect(seen).toBe(2);
+  });
+
+  it('is not reported for a wrong secret at the form', async () => {
+    // `invalid_secret` means "you were at the form and got it wrong" -- sending
+    // the browser to the form again would throw that message away unread.
+    let seen = 0;
+    const { fetch } = fakeFetch(() =>
+      json({ error: 'invalid_secret', message: 'that is not the shared secret' }, 401),
+    );
+
+    await expect(
+      createApi(fetch, () => {
+        seen += 1;
+      }).login('wrong'),
+    ).rejects.toBeInstanceOf(ApiCallError);
+    expect(seen).toBe(0);
+  });
+
+  it('is not reported for an ordinary failure', async () => {
+    let seen = 0;
+    const { fetch } = fakeFetch(() => json({ error: 'not_found', message: 'no such route' }, 404));
+
+    await expect(
+      createApi(fetch, () => {
+        seen += 1;
+      }).get('nope'),
+    ).rejects.toBeInstanceOf(ApiCallError);
+    expect(seen).toBe(0);
+  });
+});

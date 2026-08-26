@@ -33,6 +33,18 @@ export const DEFAULT_TMUX_SESSION = 'main';
  */
 export const TMUX_DETACH = Uint8Array.from([0x02, 0x64]);
 
+/**
+ * What every instance container gets on top of Docker's default capabilities.
+ *
+ * Deliberately not configurable: the entrypoint always installs its egress
+ * firewall, and without NET_ADMIN that fails, seals the container off and
+ * withholds Claude -- so an instance created without this would never be
+ * useful, and a switch for it would only be a way to turn the isolation off by
+ * accident. Turning the firewall off is FIREWALL_MODE inside the container,
+ * which is the operator's decision, not the server's.
+ */
+export const INSTANCE_CAPABILITIES: readonly string[] = ['NET_ADMIN'];
+
 export interface CreateInstanceInput {
   name: string;
   /** Repository, branch and PAT all come from here -- an instance is created
@@ -364,6 +376,7 @@ export class InstanceService {
       env: this.envFor(template),
       labels: instanceLabels(id),
       limits: this.limits,
+      capAdd: INSTANCE_CAPABILITIES,
     };
   }
 
@@ -385,6 +398,7 @@ export class InstanceService {
     set('GIT_USER_NAME', this.instanceEnv.gitUserName);
     set('GIT_USER_EMAIL', this.instanceEnv.gitUserEmail);
     set('CLAUDE_CODE_OAUTH_TOKEN', this.instanceEnv.claudeOauthToken);
+    set('FIREWALL_ALLOW', this.instanceEnv.firewallAllow);
 
     return env;
   }

@@ -10,7 +10,7 @@
 
 import { ApiCallError, type Api, type Instance, type Project } from '../api.ts';
 import { clear, el, relativeTime } from '../dom.ts';
-import { routeHash } from '../router.ts';
+import { navigate, routeHash } from '../router.ts';
 import type { View } from './view.ts';
 
 /** Docker state changes without anyone asking, so the list asks. */
@@ -41,6 +41,21 @@ export function mountList(root: HTMLElement, api: Api): View {
   let destroyed = false;
 
   const banner = el('p', { class: 'banner', hidden: 'hidden', 'data-testid': 'banner' });
+
+  /** Only here, not on every page: this is the view everything else is reached
+   *  from, and one logout is enough for a LAN prototype. */
+  const logout = el('button', { class: 'secondary logout', 'data-testid': 'logout' }, 'Log out');
+  logout.addEventListener('click', () => {
+    void (async () => {
+      try {
+        await api.logout();
+      } catch {
+        // The cookie is gone from the browser either way; the form is where the
+        // user wants to end up, and it says so itself if the server is down.
+      }
+      navigate({ view: 'login' });
+    })();
+  });
   const rows = el('tbody', { 'data-testid': 'instances' });
   const submit = el('button', { type: 'submit', 'data-testid': 'create-submit' }, 'Create');
 
@@ -318,6 +333,7 @@ export function mountList(root: HTMLElement, api: Api): View {
         { class: 'nav', href: routeHash({ view: 'projects' }), 'data-testid': 'projects-link' },
         'Projects →',
       ),
+      logout,
     ),
     form,
     banner,

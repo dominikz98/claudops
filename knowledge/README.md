@@ -44,3 +44,11 @@ Format and maintenance rules: skill `domain-knowledge`.
 - [A memory limit without a swap limit is a memory limit of twice that](memory-limit-needs-a-swap-limit.md) - the instance that pages the NUC instead of dying
 - [better-sqlite3 13 segfaults on Node below 22.14](better-sqlite3-needs-node-22-14.md) - a test gate that is red for no reason of yours
 - [A free port on Windows can still be a forbidden one](windows-reserves-tcp-port-ranges.md) - EACCES on a port nothing is listening on
+- [iptables needs root, not just NET_ADMIN](iptables-needs-root-not-just-net-admin.md) - why one sudoers entry exists in the image
+- [A firewall script must fail closed, and say so when it cannot](a-firewall-script-must-fail-closed.md) - the Anthropic reference fails open while reporting failure
+- [The firewall's re-run guard is an iptables chain, not a file](firewall-sentinel-is-an-iptables-chain.md) - a marker in /run refuses after a restart and permits after a flush
+- [Do not whitelist the docker bridge](do-not-whitelist-the-docker-bridge.md) - the reference's host /24 is the claudops API and every neighbour
+- [Reading /proc/1/environ in a container needs CAP_SYS_PTRACE](proc-environ-needs-cap-sys-ptrace.md) - the whitelist entry that silently never arrived
+- [A browser WebSocket cannot set a header, so the credential is a cookie](a-browser-websocket-cannot-set-a-header.md) - and a root onRequest hook does gate the upgrade
+- [A hook that refuses a WebSocket upgrade has to destroy the socket itself](refusing-a-websocket-upgrade-leaks-its-socket.md) - otherwise the server never shuts down again
+- [The session cookie is stateless, so logout is client-side only](the-session-cookie-is-stateless.md) - what rotating the login secret actually does

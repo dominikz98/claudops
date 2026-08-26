@@ -361,6 +361,10 @@ export class DockerodeEngine implements DockerEngine {
         OpenStdin: false,
         HostConfig: {
           AutoRemove: false,
+          // Added, never replaced: Docker's default capability set stays, which
+          // is what keeps CAP_NET_RAW in place for the legacy iptables backend
+          // the container's firewall may use.
+          CapAdd: [...spec.capAdd],
           // What `docker run --cpus` sets. A ceiling on CPU time per period,
           // not a pinning: the instance may use every core, just not more than
           // this much of them in total.

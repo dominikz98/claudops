@@ -276,6 +276,9 @@ drives.
 | `CLAUDOPS_INSTANCE_CPUS` | `2` | CPU ceiling per instance, as `docker run --cpus` takes it. |
 | `CLAUDOPS_INSTANCE_MEMORY` | `4g` | Memory ceiling per instance: a byte count or a `b`/`k`/`m`/`g` suffix, at least `6m`. Swap is capped at the same value. |
 | `CLAUDOPS_SECRET_KEY` | – | 32 bytes, base64 or hex: encrypts the PAT a project stores. Without it a project can be created but not with a `gitToken`. |
+| `CLAUDOPS_LOGIN_SECRET` | – | **Required**, at least 16 characters. The shared secret `POST /login` takes. Without it the server exits 2 -- unlike the key above, because "unusable without a login" cannot hold if the login can be forgotten. |
+| `CLAUDOPS_SESSION_SECURE` | – | `1` marks the session cookie `Secure`. Only behind TLS: over plain HTTP the browser discards it and the login appears to do nothing. |
+| `CLAUDOPS_FIREWALL_ALLOW` | – | Extra hosts and CIDRs for an instance's egress whitelist, comma- or space-separated. Handed over as `FIREWALL_ALLOW`; rejected at startup if it is not a host list. |
 | `CLAUDOPS_LOG_LEVEL` | `info` | Fastify log level. |
 | `DOCKER_SOCKET` | platform default | `/var/run/docker.sock` on Linux, `//./pipe/docker_engine` on Windows. |
 | `DOCKER_HOST` | – | If set and `DOCKER_SOCKET` is not, the transport is left to dockerode. |
@@ -290,6 +293,10 @@ src/db/                   SQLite: migrations, connection, the two repositories
 src/docker/engine.ts      the port: everything the server needs from Docker
 src/docker/dockerode-engine.ts   the real implementation
 src/secrets/cipher.ts     AES-256-GCM for the one secret that is stored
+src/auth/session.ts       the session token: one HMAC over an expiry
+src/auth/cookie.ts        reading and writing that one cookie by hand
+src/auth/gate.ts          the onRequest hook, and what is public without a login
+src/auth/routes.ts        login, logout, session
 src/projects/service.ts   projects: CRUD, the PAT, the in-use check
 src/projects/images.ts    the image builds: queue, status, log, startup sweep
 src/projects/routes.ts    REST endpoints and their schemas
@@ -331,6 +338,27 @@ leaves no containers behind.
 means it runs the *previous* `dist/`, so after a source change run the smoke test
 without it or the result describes the code you replaced.
 
+## Authentication
+
+Everything is behind a session cookie except `/health`, the login endpoints and
+the SPA shell -- which has to be public, because it *is* the login page and
+carries no data of its own.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `POST` | `/login` | `{ "secret": "..." }` -> `200` and a `claudops_session` cookie. `401 invalid_secret` for a wrong one, `429 too_many_attempts` after ten wrong guesses a minute from one address. |
+| `POST` | `/logout` | `204` and a cleared cookie. Public, so a stale cookie can always be cleared. |
+| `GET` | `/session` | `200` with the expiry, or `401` -- which is the answer the SPA asks for before it paints anything. |
+
+The cookie is an HMAC over an expiry, twelve hours, renewed past half-life. There
+is no session store, so nothing survives a lost cookie and nothing revokes a
+copied one (`knowledge/the-session-cookie-is-stateless.md`). One `onRequest` hook
+does the checking, which is also what gates the WebSocket upgrade -- refused with
+a plain HTTP 401 before the handler runs.
+
+`server/scripts/ws-probe.ts` therefore takes a `--cookie`, and `smoke-lib.sh`
+logs in as soon as `/health` answers.
+
 ## Not part of this yet
 
-- Auth, egress firewall -> #9
+- Nothing from issue #1's package list. See the wiki for what is next.

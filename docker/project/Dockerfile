@@ -44,7 +44,13 @@ ENV DOTNET_ROOT=/usr/share/dotnet \
 # One RUN per block, each referencing its own ARG: that is what makes the value
 # part of the layer's cache key, so flipping one block does not invalidate the
 # other. There is deliberately no COPY in this file -- the build context stays
-# out of every cache key.
+# out of every cache key, which is also why a block that needs its hosts on the
+# egress whitelist writes its own drop-in into
+# /etc/claudops/firewall-allow.d rather than copying a file in.
+#
+# Note that the build itself is not firewalled: the entrypoint installs the
+# firewall at container start, so dotnet-install.sh and `playwright install`
+# reach whatever they need here.
 RUN if [ "${WITH_DOTNET}" = "1" ]; then \
       set -eux; \
       apt-get update; \
@@ -55,6 +61,15 @@ RUN if [ "${WITH_DOTNET}" = "1" ]; then \
       rm /tmp/dotnet-install.sh; \
       ln -sf "${DOTNET_ROOT}/dotnet" /usr/local/bin/dotnet; \
       dotnet --version; \
+      printf '%s\n' \
+        '# nuget and the dotnet CLI, added by the dotnet building block.' \
+        'api.nuget.org' \
+        'globalcdn.nuget.org' \
+        'www.nuget.org' \
+        'builds.dotnet.microsoft.com' \
+        'ci.dot.net' \
+        > /etc/claudops/firewall-allow.d/10-dotnet.conf; \
+      chmod 0644 /etc/claudops/firewall-allow.d/10-dotnet.conf; \
     fi
 
 RUN if [ "${WITH_PLAYWRIGHT}" = "1" ]; then \

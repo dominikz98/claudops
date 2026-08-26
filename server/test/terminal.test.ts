@@ -46,6 +46,7 @@ describe('terminal bridge over WebSocket', () => {
         claudeOauthToken: 'oauth-token',
         gitUserName: undefined,
         gitUserEmail: undefined,
+        firewallAllow: undefined,
       },
       cipher: testCipher(),
       logLevel: 'silent',

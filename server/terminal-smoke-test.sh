@@ -37,9 +37,22 @@ wait_for_image() {
 
 trap smoke_cleanup EXIT
 
+# The session cookie out of the jar wait_for_health filled, in the form a Cookie
+# header takes. A browser sends this by itself; `ws` has to be told (#9).
+session_cookie() {
+  awk '$6 == "claudops_session" { printf "%s=%s", $6, $7 }' "$COOKIE_JAR" | tr -d '\r'
+}
+
 # probe <url> [steps...] -- terminal output lands in $PROBE_OUT, the close code
 # and any control frame in $PROBE_ERR. Returns the probe's exit code.
 probe() {
+  (cd "$SERVER_DIR" && pnpm exec tsx scripts/ws-probe.ts \
+    --cookie "$(session_cookie)" "$@") >"$PROBE_OUT" 2>"$PROBE_ERR"
+}
+
+# probe_without_cookie <url> [steps...] -- the same, unauthenticated: the
+# upgrade has to fail rather than hand out a console.
+probe_without_cookie() {
   (cd "$SERVER_DIR" && pnpm exec tsx scripts/ws-probe.ts "$@") >"$PROBE_OUT" 2>"$PROBE_ERR"
 }
 
@@ -186,6 +199,19 @@ check "An unknown instance closes with 4404" "4404" "$(close_code)"
 docker stop "$container_id" >/dev/null 2>&1
 probe "$terminal_url" --timeout 5000
 check "A stopped container closes with 4409" "4409" "$(close_code)"
+
+# ------------------------------------------------------------------- AC (#9)
+info "AC (#9): the WebSocket endpoint is unusable without a login"
+probe_without_cookie "$terminal_url" --timeout 5000
+probe_status=$?
+# The gate answers the upgrade itself with a plain 401, so there is no socket and
+# therefore no close code -- `ws` reports it as a failed handshake.
+if [[ "$probe_status" != "0" ]]; then
+  ok "An upgrade without a session cookie is refused (probe exit $probe_status)"
+else
+  bad "The terminal upgraded without a session cookie"
+fi
+contains "The refusal is an HTTP 401, before the handler runs" "401" "$(diagnostics)"
 
 # --------------------------------------------------------------------- cleanup
 info "The instance can still be deleted afterwards"

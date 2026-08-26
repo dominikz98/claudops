@@ -17,9 +17,20 @@ to it. The page normally does not poll, because nothing but this page changes a
 project; while a build is running it refreshes every two seconds, because then the
 server does.
 
-There is no login yet (#9), so anyone who can reach the port can start and delete
-instances and type into every console. Keep it on a trusted network or behind a
-reverse proxy until then.
+The UI is behind a shared secret. The first page you get is a login form; it
+takes `CLAUDOPS_LOGIN_SECRET` and leaves a session cookie that lasts twelve
+hours and renews itself while you keep using it. **Log out** is in the header of
+the instance list. Everything is behind it -- the pages, the REST API and the
+console WebSocket -- except `/health`, which has to answer without a credential
+so a monitor or a smoke test can use it.
+
+Two consequences worth knowing. The cookie is not `Secure` unless you set
+`CLAUDOPS_SESSION_SECURE=1`, because the server speaks plain HTTP and a browser
+silently discards a `Secure` cookie that arrived over it -- set it only with TLS
+in front. And there is no session store, so logging out clears your own cookie
+but cannot invalidate one somebody else copied; rotating
+`CLAUDOPS_LOGIN_SECRET` and restarting is what ends every outstanding session at
+once.
 
 A page that shows the list but never fills it means the API is answering with an
 error -- the red banner names it. If the browser shows the JSON of an endpoint
@@ -363,6 +374,37 @@ Project images are the one thing the reconcile does not touch: deleting a projec
 removes its image, and an image left behind after a failed delete is `docker rmi`
 material -- check that no instance still runs on it first.
 
-## Not there yet
+## An instance cannot reach a host
 
-Egress firewall and UI login (#9).
+Egress inside an instance is default-deny: it reaches the whitelist and nothing
+else. When a tool inside a container hangs on a download or reports a refused
+connection, that is usually why.
+
+Start with the state file and the log:
+
+```bash
+docker exec <container> cat /run/claudops-firewall.state
+docker logs <container> 2>&1 | grep '^\[firewall\]'
+```
+
+The first line of the state file is one word:
+
+| State | Meaning |
+| --- | --- |
+| `active` | The firewall is up. Everything the log listed with a `+` is reachable, nothing else. |
+| `failed` | Setup did not finish, so the container was sealed to loopback. Claude was not started. |
+| `unfiltered` | Not even the seal was possible -- almost always a missing `--cap-add=NET_ADMIN`. Egress is **not** restricted, and Claude was still not started. |
+
+For a host that is genuinely needed, add it to the server's
+`CLAUDOPS_FIREWALL_ALLOW` (comma- or space-separated hosts and CIDRs), restart
+the server and **recreate the instance** -- the whitelist is read once at
+container start, so an existing container keeps the one it came up with.
+
+A host that worked and then stopped is usually a CDN whose addresses rotated. The
+container re-resolves its whitelist every 15 minutes for exactly that; a shorter
+interval is `FIREWALL_REFRESH_SECONDS`.
+
+`FIREWALL_MODE=off` turns the firewall off for a container entirely. It is the
+last resort, not a workaround: it is also what makes
+`--dangerously-skip-permissions` unsafe, so use it to prove a diagnosis and then
+put the host on the whitelist instead.

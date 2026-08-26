@@ -24,7 +24,8 @@ every server start. Everything else is planned; see the
 | Projects (repo, branch, PAT) | Available, end-to-end tested |
 | Project images from building blocks | Available, smoke-tested |
 | Lifecycle, limits, recycling | Available, end-to-end tested |
-| Auth, egress firewall, UI login | Planned (#9) |
+| Egress firewall (default-deny whitelist) | Available, smoke-tested |
+| UI login (shared secret) | Available, end-to-end tested |
 
 ## Quick start
 
@@ -36,30 +37,42 @@ pnpm install && pnpm build
 ```bash
 CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN" \
 CLAUDOPS_SECRET_KEY="$(node -e 'console.log(require("node:crypto").randomBytes(32).toString("base64"))')" \
+CLAUDOPS_LOGIN_SECRET="pick-something-long-enough" \
 node server/dist/index.js
 ```
 
-Then <http://localhost:8080>: create a project on the **Projects** page and wait
+`CLAUDOPS_LOGIN_SECRET` is required -- the server refuses to start without it,
+and it is what the UI asks for. Then <http://localhost:8080>: log in, create a
+project on the **Projects** page and wait
 for its image to say `ready` -- that is the environment its instances run in --
 then name an instance, pick the project, press Create, press Console. The same
-thing over the API, which is what the page uses and nothing else needs:
+thing over the API, which is what the page uses and nothing else needs -- the
+login first, because every endpoint but `/health` needs its cookie:
 
 ```bash
-curl -s localhost:8080/projects \
+curl -s -c /tmp/claudops-cookies localhost:8080/login \
+  -H 'content-type: application/json' \
+  -d '{"secret":"pick-something-long-enough"}'
+```
+
+```bash
+curl -s -b /tmp/claudops-cookies localhost:8080/projects \
   -H 'content-type: application/json' \
   -d '{"name":"claudops","repoUrl":"https://github.com/dominikz98/claudops.git"}'
 ```
 
 ```bash
-curl -s localhost:8080/instances \
+curl -s -b /tmp/claudops-cookies localhost:8080/instances \
   -H 'content-type: application/json' \
   -d '{"name":"demo","projectId":"<project id>"}'
 ```
 
-The answer carries the instance `id`, and its console is one WebSocket away:
+The answer carries the instance `id`, and its console is one WebSocket away --
+with the same cookie, which a browser sends by itself:
 
 ```bash
-npx wscat -c 'ws://localhost:8080/instances/<id>/terminal?cols=120&rows=40'
+npx wscat -H "Cookie: $(sed -n 's/.*claudops_session\s*/claudops_session=/p' /tmp/claudops-cookies)" \
+  -c 'ws://localhost:8080/instances/<id>/terminal?cols=120&rows=40'
 ```
 
 Detach with `Ctrl-b d`; Claude keeps running, and reconnecting -- or simply

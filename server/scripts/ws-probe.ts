@@ -13,6 +13,14 @@
  *   wait:<needle>         block until the output received so far contains <needle>
  *   sleep:<ms>            wait, for instance to let the pane settle
  *
+ * Options:
+ *   --timeout <ms>        how long a `wait` may block
+ *   --cookie <value>      the session cookie, without which the upgrade answers
+ *                         401 (#9). A browser sends it by itself; `ws` has to be
+ *                         told, which is the one thing it can do that the
+ *                         browser's WebSocket cannot
+ *                         (knowledge/a-browser-websocket-cannot-set-a-header.md).
+ *
  * The `line` variants exist because a carriage return does not survive the trip
  * through a shell argument on every host: Git Bash drops a trailing CR from a
  * command substitution, and the keystroke silently never arrives.
@@ -77,6 +85,7 @@ const url = argv.shift();
 if (url === undefined) usage('usage: ws-probe <url> [steps...]');
 
 let timeoutMs = DEFAULT_TIMEOUT_MS;
+let cookie: string | undefined;
 const steps: Step[] = [];
 while (argv.length > 0) {
   const argument = argv.shift();
@@ -86,10 +95,15 @@ while (argv.length > 0) {
     if (!Number.isFinite(timeoutMs)) usage('--timeout needs a number of milliseconds');
     continue;
   }
+  if (argument === '--cookie') {
+    cookie = argv.shift();
+    if (cookie === undefined || cookie === '') usage('--cookie needs a value');
+    continue;
+  }
   steps.push(parseStep(argument));
 }
 
-const socket = new WebSocket(url);
+const socket = new WebSocket(url, cookie === undefined ? {} : { headers: { cookie } });
 let screen = '';
 let closed: { code: number; reason: string } | undefined;
 

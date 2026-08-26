@@ -30,6 +30,11 @@ DB_FILE="$WORK_DIR/claudops.db"
 DB_FILE_NATIVE="$WORK_DIR_NATIVE/claudops.db"
 SERVER_LOG="$WORK_DIR/server.log"
 GIT_TOKEN_PROBE="smoke-pat-must-not-appear"
+# The OAuth token half of "a grep over logs and DB finds no tokens" (#9). A
+# stand-in rather than the real one: a fake token still has to stay out of every
+# response, out of the database and out of the log, and a real one would put a
+# working credential into a temporary directory.
+OAUTH_PROBE="smoke-oauth-must-not-appear"
 PUBLIC_REPO="https://github.com/dominikz98/claudops.git"
 # Hex rather than base64: it survives every layer of quoting between here and
 # the server's environment without a thought.
@@ -72,6 +77,7 @@ start_server "$PORT" "$DB_FILE_NATIVE" "$SERVER_LOG" \
   "CLAUDOPS_BASE_IMAGE=$IMAGE" \
   "CLAUDOPS_PROJECT_CONTEXT=$PROJECT_CONTEXT_NATIVE" \
   "CLAUDOPS_SECRET_KEY=$SECRET_KEY" \
+  "CLAUDE_CODE_OAUTH_TOKEN=$OAUTH_PROBE" \
   'CLAUDOPS_GIT_USER_NAME=claudops' \
   'CLAUDOPS_GIT_USER_EMAIL=claudops@example.invalid'
 server_pid="$SERVER_PID"
@@ -83,6 +89,25 @@ else
   sed 's/^/        /' "$SERVER_LOG"
   exit 1
 fi
+
+# ---------------------------------------------------- #9: the UI needs a login
+# Before anything else uses the API: wait_for_health has already logged in, so
+# these run with an explicitly empty cookie jar rather than by ordering.
+info "#9 AC 2: the API is unusable without a login"
+unauthenticated() {
+  curl -s -w '\n%{http_code}' -X "$1" "$BASE$2" | tail -n1 | tr -d '\r'
+}
+check "GET /instances without a cookie answers 401" "401" "$(unauthenticated GET /instances)"
+check "GET /projects without a cookie answers 401" "401" "$(unauthenticated GET /projects)"
+# Leaks strictly less than a 404 would: without a session not even the route
+# table shows.
+check "An unknown route without a cookie answers 401 too" "401" "$(unauthenticated GET /nope)"
+check "/health stays reachable, because this harness gates on it" "200" \
+  "$(unauthenticated GET /health)"
+check "A wrong secret is refused" "401" \
+  "$(curl -s -w '\n%{http_code}' -X POST -H 'content-type: application/json' \
+      -d '{"secret":"not-the-shared-secret"}' "$BASE/login" | tail -n1 | tr -d '\r')"
+check "The cookie from the login opens the API" "200" "$(status_of GET /instances)"
 
 # ------------------------------------------------ #6: a project holds the PAT
 info "#6: creating a project with a PAT"
@@ -240,6 +265,35 @@ check "Token still not readable on disk" "0" \
 check "Token still not in the server log" "0" \
   "$(grep -c "$GIT_TOKEN_PROBE" "$SERVER_LOG" | tr -d '\r')"
 
+# ------------------------------------------- #9 AC 3: no tokens in log or DB
+# The PAT above is one of the three credentials claudops handles; these are the
+# other two. The OAuth token reaches the container and nothing else, and the
+# login secret never leaves the server's own environment at all.
+info "#9 AC 3: a grep over logs and DB finds no tokens"
+if container_env "$container_id" | grep -q "^CLAUDE_CODE_OAUTH_TOKEN=$OAUTH_PROBE$"; then
+  ok "The OAuth token reached the container"
+else
+  bad "CLAUDE_CODE_OAUTH_TOKEN did not reach the container"
+fi
+check "The OAuth token is not echoed back by the API" "0" \
+  "$(grep -c "$OAUTH_PROBE" <<<"$instance_json")"
+check "The OAuth token is not in the instance list either" "0" \
+  "$(grep -c "$OAUTH_PROBE" <<<"$(body_of GET /instances)")"
+check "The OAuth token is not on disk" "0" \
+  "$(db_bytes | grep -ac "$OAUTH_PROBE" || true)"
+check "The OAuth token is not in the server log" "0" \
+  "$(grep -c "$OAUTH_PROBE" "$SERVER_LOG" | tr -d '\r')"
+check "The login secret is not on disk" "0" \
+  "$(db_bytes | grep -ac "$SMOKE_LOGIN_SECRET" || true)"
+# It is posted to /login on every run, so this is the redaction of req.body.secret
+# doing its job rather than an accident.
+check "The login secret is not in the server log" "0" \
+  "$(grep -c "$SMOKE_LOGIN_SECRET" "$SERVER_LOG" | tr -d '\r')"
+check "The session cookie is not in the server log" "0" \
+  "$(grep -c 'claudops_session=' "$SERVER_LOG" | tr -d '\r')"
+check "The container never sees the login secret" "0" \
+  "$(container_env "$container_id" | grep -c "$SMOKE_LOGIN_SECRET" | tr -d '\r')"
+
 
 info "#7 AC 1: the environment of the project is inside the instance"
 if [[ -n "${FULL_IMAGE:-}" ]]; then
@@ -391,6 +445,7 @@ start_server "$PORT" "$DB_FILE_NATIVE" "$WORK_DIR/server-restart.log" \
   "CLAUDOPS_BASE_IMAGE=$IMAGE" \
   "CLAUDOPS_PROJECT_CONTEXT=$PROJECT_CONTEXT_NATIVE" \
   "CLAUDOPS_SECRET_KEY=$SECRET_KEY" \
+  "CLAUDE_CODE_OAUTH_TOKEN=$OAUTH_PROBE" \
   'CLAUDOPS_GIT_USER_NAME=claudops' \
   'CLAUDOPS_GIT_USER_EMAIL=claudops@example.invalid'
 server_pid="$SERVER_PID"

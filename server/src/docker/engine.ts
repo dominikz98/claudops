@@ -26,6 +26,15 @@ export interface ContainerSpec {
   env: Record<string, string>;
   labels: Record<string, string>;
   limits: ContainerLimits;
+  /**
+   * Linux capabilities added on top of Docker's default set. `NET_ADMIN` is
+   * what lets the entrypoint install its own egress firewall: iptables needs it
+   * in the effective set, and without it the container seals itself off and
+   * refuses to start Claude. CAP_NET_RAW -- which the legacy iptables backend
+   * opens a raw socket with -- is already in Docker's default set, so it is
+   * deliberately not repeated here, and nothing may drop it.
+   */
+  capAdd: readonly string[];
 }
 
 /** A container as the Docker API reports it. */

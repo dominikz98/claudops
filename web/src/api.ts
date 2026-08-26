@@ -102,7 +102,22 @@ export class ApiCallError extends Error {
   }
 }
 
+/** `GET /session`. A 401 rather than `authenticated: false` is the negative
+ *  answer -- the endpoint sits behind the same gate as everything else. */
+export interface SessionState {
+  authenticated: boolean;
+  expiresAt: string | null;
+}
+
 export interface Api {
+  /** Exchanges the shared secret for a session cookie. Throws ApiCallError with
+   *  `invalid_secret` for a wrong one and `too_many_attempts` for too many. */
+  login(secret: string): Promise<void>;
+  /** Clears the cookie. The token stays valid until it expires -- there is no
+   *  store to revoke it in. */
+  logout(): Promise<void>;
+  /** Resolves when there is a session, throws a 401 ApiCallError when not. */
+  session(): Promise<SessionState>;
   list(): Promise<Instance[]>;
   get(id: string): Promise<Instance>;
   create(input: CreateInstanceInput): Promise<Instance>;
@@ -148,12 +163,31 @@ function withoutBlanks(fields: Record<string, unknown>): Record<string, unknown>
   );
 }
 
-export function createApi(fetchImpl: typeof fetch = globalThis.fetch.bind(globalThis)): Api {
-  /** Every call goes through here, so an error body is turned into an
-   *  ApiCallError in exactly one place. */
+/**
+ * `onUnauthorized` is called for every refusal that came from the session gate.
+ * That is the `unauthorized` code specifically, not `invalid_secret`: the first
+ * means "your session is gone, go to the form", the second means "you were at
+ * the form and got it wrong" -- and redirecting on the second would throw the
+ * message away before anybody read it.
+ *
+ * Without it an expired session would show up as a red banner that the list
+ * view's three-second poll repaints forever.
+ */
+export function createApi(
+  fetchImpl: typeof fetch = globalThis.fetch.bind(globalThis),
+  onUnauthorized?: () => void,
+): Api {
+  /** Every refusal becomes an ApiCallError in exactly one place, which is also
+   *  the one place that notices a lost session. */
+  const fail = async (response: Response): Promise<ApiCallError> => {
+    const error = await failure(response);
+    if (error.code === 'unauthorized') onUnauthorized?.();
+    return error;
+  };
+
   const request = async <T>(path: string, init?: RequestInit): Promise<T> => {
     const response = await fetchImpl(path, init);
-    if (!response.ok) throw await failure(response);
+    if (!response.ok) throw await fail(response);
     return (await response.json()) as T;
   };
 
@@ -166,10 +200,24 @@ export function createApi(fetchImpl: typeof fetch = globalThis.fetch.bind(global
   /** DELETE answers 204 with no body, so it cannot go through `request`. */
   const remove = async (path: string): Promise<void> => {
     const response = await fetchImpl(path, { method: 'DELETE' });
-    if (!response.ok) throw await failure(response);
+    if (!response.ok) throw await fail(response);
   };
 
   return {
+    async login(secret: string): Promise<void> {
+      await request<{ authenticated: boolean }>('/login', send('POST', { secret }));
+    },
+
+    async logout(): Promise<void> {
+      // 204 with no body, like a DELETE.
+      const response = await fetchImpl('/logout', { method: 'POST' });
+      if (!response.ok) throw await fail(response);
+    },
+
+    session(): Promise<SessionState> {
+      return request<SessionState>('/session');
+    },
+
     async list(): Promise<Instance[]> {
       return (await request<{ instances: Instance[] }>('/instances')).instances;
     },
