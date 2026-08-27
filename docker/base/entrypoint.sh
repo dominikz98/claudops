@@ -74,6 +74,27 @@ configure_git() {
   return 0
 }
 
+# Claude Code treats a git repository as its own trust root, so the entry the
+# image seeds for WORKSPACE_DIR does not reach the clone below it: without this
+# the console opens on the trust prompt instead of on Claude
+# (knowledge/claude-onboarding-must-be-pre-seeded.md). The directory is only
+# known once REPO_URL has been read, which is why this is here and not in the
+# Dockerfile.
+trust_workspace() {
+  local dir="$1" cfg="$HOME/.claude.json" merged
+
+  if ! merged="$(jq --arg dir "$dir" \
+        '.projects[$dir].hasTrustDialogAccepted = true' "$cfg" 2>/dev/null)"; then
+    log "WARNING: could not mark $dir as trusted -- the console may open on the trust prompt."
+    return 1
+  fi
+
+  # In place rather than a rename: the file is 0600, and a replacement would
+  # carry whatever the umask says instead.
+  printf '%s\n' "$merged" > "$cfg"
+  return 0
+}
+
 clone_repo() {
   local url="$1" target="$2"
 
@@ -121,6 +142,8 @@ main() {
   else
     log "No REPO_URL set -- starting without a repo in $WORKSPACE_DIR."
   fi
+
+  trust_workspace "$start_dir"
 
   trap shutdown TERM INT
 

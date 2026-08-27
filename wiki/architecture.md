@@ -126,7 +126,11 @@ volumes.
 
 **Isolation is what permits the risk.** Claude runs with
 `--dangerously-skip-permissions`, which is only acceptable because the container
-is isolated and its egress is restricted to a whitelist. The container installs
+is isolated and its egress is restricted to a whitelist. The image also answers
+the warning Claude shows for that mode in advance, together with the theme picker
+and the workspace trust prompt: a fresh container is always a first start, and
+none of the three dialogs can be answered from the instance list -- the console
+would simply open on a wizard. The container installs
 that whitelist on itself: the entrypoint runs `init-firewall.sh` before it clones
 anything, which resolves a built-in host list plus GitHub's published ranges plus
 the project's own repository host, then sets the default policy to DROP. The

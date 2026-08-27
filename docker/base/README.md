@@ -97,6 +97,17 @@ drops.
 - **A failed clone does not abort.** The tmux session still starts in
   `/workspace` so you can attach through the console and inspect the cause
   (wrong PAT, wrong branch). A dead container would be unreachable for that.
+- **Claude Code's first-start questions are answered in advance.** A fresh
+  container is always a first start, so without this the console opens on the
+  theme picker, then the workspace trust prompt, then the confirmation of
+  `--dangerously-skip-permissions` -- three dialogs, none of which an operator can
+  answer from the instance list. The image seeds `~/.claude.json` (0600, no
+  credential in it) and the entrypoint adds the trust entry for the directory it
+  cloned into, because a git repository is its own trust root and its name is only
+  known at start
+  (`knowledge/claude-onboarding-must-be-pre-seeded.md`). Pre-accepting the
+  bypass-permissions warning is the same decision as the `CLAUDE_ARGS` default
+  above, not an additional one.
 - **Restarting the container on the same volume** skips the clone if the target
   directory already is a git repo.
 - **`docker stop`** shuts the tmux server down cleanly via SIGTERM.

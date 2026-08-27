@@ -89,6 +89,45 @@ fi
 check "Claude CLI is installed" "0" \
   "$(dexec claude --version >/dev/null 2>&1; echo $?)"
 
+# -------------------------------------------- AC (#26): no onboarding wizard
+info "AC (#26): the first attach lands in Claude, not in a wizard"
+
+# Claude paints its first frame seconds after the pane exists, so wait for a
+# frame that is recognisably either the settled prompt or one of the three
+# wizards -- capturing earlier would assert against an empty pane.
+pane=''
+for _ in $(seq 1 45); do
+  pane="$(dexec tmux capture-pane -p -t main:0.0 2>/dev/null | tr -d '\r')"
+  grep -qE 'bypass permissions on|Choose the text style|Quick safety check|By proceeding, you accept' \
+    <<<"$pane" && break
+  sleep 1
+done
+
+wizard=''
+grep -q 'Choose the text style'     <<<"$pane" && wizard="theme picker"
+grep -q 'Quick safety check'        <<<"$pane" && wizard="${wizard:+$wizard, }trust prompt"
+grep -q 'By proceeding, you accept' <<<"$pane" && wizard="${wizard:+$wizard, }bypass warning"
+
+if [[ -n "$wizard" ]]; then
+  bad "An onboarding wizard is showing: $wizard"
+elif grep -q 'bypass permissions on' <<<"$pane"; then
+  ok "Claude is at its prompt, no wizard in the way"
+else
+  bad "Claude never painted a prompt -- pane content:"
+  printf '%s\n' "$pane" | sed 's/^/        /'
+fi
+
+# The flags themselves, so a Claude release that renames one is caught here
+# rather than by someone staring at a wizard
+# (knowledge/claude-onboarding-must-be-pre-seeded.md).
+check "Onboarding is marked complete" "true" \
+  "$(dexec jq -r '.hasCompletedOnboarding' /home/claude/.claude.json 2>/dev/null | tr -d '\r')"
+check "The clone directory is trusted" "true" \
+  "$(dexec jq -r --arg d "$REPO_DIR" '.projects[$d].hasTrustDialogAccepted' \
+      /home/claude/.claude.json 2>/dev/null | tr -d '\r')"
+check "No Claude token in the config" "0" \
+  "$(dexec grep -c 'sk-ant' /home/claude/.claude.json 2>/dev/null | tr -d '\r')"
+
 info "AC 2: runs as non-root"
 check "User is 'claude'" "claude" "$(dexec id -un 2>/dev/null | tr -d '\r')"
 check "UID is not 0" "1001" "$(dexec id -u 2>/dev/null | tr -d '\r')"

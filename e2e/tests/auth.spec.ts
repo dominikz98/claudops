@@ -2,13 +2,24 @@
  * Issue #9, AC 2: the UI and the WebSocket endpoint are unusable without a
  * login.
  *
- * Everything here deliberately opts out of `use.storageState` -- a fresh context
- * with no cookie is the only way to see what an unauthenticated visitor sees.
- * The rest of the suite runs logged in, which is what proves the cookie works at
- * all.
+ * Everything here opts out of `use.storageState` *explicitly*, browser contexts
+ * and request contexts alike -- a fresh context with no cookie is the only way to
+ * see what an unauthenticated visitor sees. The rest of the suite runs logged in,
+ * which is what proves the cookie works at all.
+ *
+ * The explicitness is the point: `playwright.request.newContext()` inherits
+ * `use.storageState` from the config, so a context built without saying
+ * otherwise arrives logged in and every 401 assertion below silently becomes a
+ * 200 (knowledge/playwright-request-context-inherits-storage-state.md).
  */
 
-import { expect, test, type Browser } from '@playwright/test';
+import {
+  expect,
+  test,
+  type APIRequestContext,
+  type Browser,
+  type PlaywrightWorkerArgs,
+} from '@playwright/test';
 
 test.describe.configure({ mode: 'serial' });
 
@@ -17,6 +28,18 @@ const SECRET = process.env.CLAUDOPS_E2E_LOGIN_SECRET ?? '';
 /** A context with an empty cookie jar, whatever `use.storageState` says. */
 async function anonymous(browser: Browser): ReturnType<Browser['newContext']> {
   return browser.newContext({ storageState: { cookies: [], origins: [] } });
+}
+
+/** The same for an API context, which needs it for the same reason: without the
+ *  empty jar this is the logged-in session from global-setup. */
+async function anonymousRequest(
+  playwright: PlaywrightWorkerArgs['playwright'],
+  baseURL: string | undefined,
+): Promise<APIRequestContext> {
+  return playwright.request.newContext({
+    baseURL: requireBaseUrl(baseURL),
+    storageState: { cookies: [], origins: [] },
+  });
 }
 
 /** `use.baseURL` narrowed: the config always sets it, the fixture type does not
@@ -28,7 +51,7 @@ function requireBaseUrl(baseURL: string | undefined): string {
 
 test.describe('without a session', () => {
   test('the API refuses every endpoint but /health', async ({ playwright, baseURL }) => {
-    const request = await playwright.request.newContext({ baseURL: requireBaseUrl(baseURL) });
+    const request = await anonymousRequest(playwright, baseURL);
 
     expect((await request.get('/instances')).status()).toBe(401);
     expect((await request.get('/projects')).status()).toBe(401);
@@ -46,7 +69,7 @@ test.describe('without a session', () => {
   });
 
   test('the SPA shell is served, because it is the login page', async ({ playwright, baseURL }) => {
-    const request = await playwright.request.newContext({ baseURL: requireBaseUrl(baseURL) });
+    const request = await anonymousRequest(playwright, baseURL);
 
     // One index.html plus one hashed bundle, the same files the app is built
     // from. They carry no data -- every instance, project and console is behind
@@ -67,7 +90,7 @@ test.describe('without a session', () => {
   }) => {
     // The gate answers the upgrade with a plain HTTP 401, so there is no socket
     // and no close code -- which is why this asserts a status rather than a 4401.
-    const request = await playwright.request.newContext({ baseURL: requireBaseUrl(baseURL) });
+    const request = await anonymousRequest(playwright, baseURL);
     const response = await request.get('/instances/does-not-exist/terminal', {
       headers: {
         connection: 'Upgrade',
