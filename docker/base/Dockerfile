@@ -133,4 +133,20 @@ RUN printf '%s' \
 
 WORKDIR ${WORKSPACE_DIR}
 
+# What "ready" means for an instance: the tmux session exists, so a console can
+# attach to it. The container reports that itself rather than the server timing
+# the entrypoint -- installing the firewall and cloning a repository takes
+# anything from seconds to minutes, and no timer gets that right.
+#
+# `${TMUX_SESSION}` is expanded at runtime by the shell CMD-SHELL builds, not at
+# build time: a project image that overrides the variable is checked against its
+# own session.
+#
+# The start period is what turns "never came up" into a failure instead of a
+# permanent `starting`: a check that keeps failing past it makes the container
+# `unhealthy` after three tries. Five minutes is a clone of a large repository
+# over a slow line, which is the slowest legitimate start there is.
+HEALTHCHECK --interval=5s --timeout=5s --start-period=300s --retries=3 \
+  CMD tmux has-session -t "${TMUX_SESSION}"
+
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

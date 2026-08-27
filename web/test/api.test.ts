@@ -39,6 +39,7 @@ const instance = {
   repoBranch: null,
   createdAt: '2026-08-25T10:00:00.000Z',
   status: 'running',
+  session: 'ready',
 };
 
 const project = {

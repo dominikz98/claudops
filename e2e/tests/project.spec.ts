@@ -145,6 +145,12 @@ test('#7 AC: a changed environment rebuilds the image', async () => {
   const created = row().filter({ hasText: PROJECT });
   const builtBefore = (await buildLogOf(page.request, projectId)).builtAt;
 
+  // #25: opened *before* the rebuild and never touched again. The stub prints
+  // the build args it was given, so what stands here now belongs to the build
+  // that has already happened.
+  await created.getByTestId('build-log').click();
+  await expect(page.getByTestId('log')).toContainText('dotnet=1 playwright=0');
+
   await created.getByTestId('edit').click();
   await page.getByTestId('block-playwright').check();
   await page.getByTestId('project-submit').click();
@@ -155,6 +161,15 @@ test('#7 AC: a changed environment rebuilds the image', async () => {
     .poll(async () => (await buildLogOf(page.request, projectId)).builtAt, { timeout: 60_000 })
     .not.toBe(builtBefore);
   await expect(created.getByTestId('image-status')).toHaveText('ready', { timeout: 30_000 });
+
+  // #25 AC: the panel moved on to the new build's output on the page's own
+  // poll -- no reload, no second click. The rebuild clears the stored log
+  // first, so this line can only have arrived by fetching it again.
+  await expect(page.getByTestId('log')).toContainText('dotnet=1 playwright=1', {
+    timeout: 30_000,
+  });
+  await created.getByTestId('build-log').click();
+  await expect(page.getByTestId('log')).toHaveCount(0);
 
   // What the tag holds now -- the proof that the changed block reached the build.
   // Read from the image rather than from the log, because a cached layer prints

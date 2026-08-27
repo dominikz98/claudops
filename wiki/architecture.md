@@ -104,6 +104,16 @@ whose container is gone reports `missing` rather than disappearing. Creating goe
 row first, container second, and rolls the row back on failure -- a container
 without a row would have no handle left to find it by.
 
+**Readiness is reported by the container, not timed by the server.** A container
+is `running` before it is useful: the entrypoint still has an egress firewall to
+install and a repository to clone, and no console can attach until its tmux
+session exists. The base image therefore carries a `HEALTHCHECK` that runs
+`tmux has-session`, and the server reads that back as a second field next to the
+Docker status. Guessing from an elapsed timer instead would be wrong for every
+repository size at once. The same check is what turns an entrypoint that never
+reaches tmux into a terminal state rather than a permanent "starting", once its
+start period has passed.
+
 **Cleaning up is a startup pass, not a poller.** Docker and the database can only
 drift apart when something dies between two steps: a killed server, a `docker rm`
 by hand, a create that failed after its container was up. Once, at startup, the

@@ -14,6 +14,7 @@ import {
   InstanceNotFoundError,
   InstanceService,
   MISSING_STATUS,
+  SessionNotReadyError,
 } from '../src/instances/service.ts';
 import { ProjectRepository } from '../src/db/projects.ts';
 import { projectImageTag } from '../src/docker/labels.ts';
@@ -340,6 +341,79 @@ describe('InstanceService', () => {
     });
   });
 
+  /** `running` and "the console can be attached" are minutes apart: the
+   *  entrypoint installs a firewall and clones a repository first. What tells
+   *  them apart is the container's own healthcheck, not a timer here. */
+  describe('session readiness', () => {
+    it('tells a container that is up from a session that is ready', async () => {
+      await service.create({ name: 'demo', projectId });
+      engine.setHealth('container-1', 'starting');
+
+      expect(await service.get('id-1')).toMatchObject({
+        status: 'running',
+        session: 'starting',
+      });
+
+      engine.setHealth('container-1', 'healthy');
+
+      expect(await service.get('id-1')).toMatchObject({
+        status: 'running',
+        session: 'ready',
+      });
+    });
+
+    it('reports a container that never reached its session as failed', async () => {
+      // What the healthcheck's retries turn a hanging entrypoint into: a
+      // terminal answer, rather than `starting` for as long as it runs.
+      await service.create({ name: 'demo', projectId });
+      engine.setHealth('container-1', 'unhealthy');
+
+      expect(await service.get('id-1')).toMatchObject({
+        status: 'running',
+        session: 'failed',
+      });
+    });
+
+    it('has no session to report for a container that is not running', async () => {
+      await service.create({ name: 'demo', projectId });
+      engine.setState('container-1', 'exited');
+
+      expect(await service.get('id-1')).toMatchObject({ status: 'exited', session: 'none' });
+
+      engine.forget('container-1');
+
+      expect(await service.get('id-1')).toMatchObject({ status: MISSING_STATUS, session: 'none' });
+    });
+
+    it('treats an image without a healthcheck as ready rather than locking it out', async () => {
+      // An instance from an image built before the healthcheck existed reports
+      // nothing. Reading that as `starting` would disable its console forever.
+      await service.create({ name: 'demo', projectId });
+      engine.setHealth('container-1', undefined);
+
+      expect(await service.get('id-1')).toMatchObject({ session: 'ready' });
+    });
+
+    it('answers a fresh create with `starting`, without asking Docker', async () => {
+      // The container was started microseconds ago, so no healthcheck has run.
+      // Saying anything else would hand the caller a console it cannot open.
+      const instance = await service.create({ name: 'demo', projectId });
+
+      expect(instance).toMatchObject({ status: 'running', session: 'starting' });
+    });
+
+    it('carries the readiness through the list as well as through get', async () => {
+      await service.create({ name: 'first', projectId });
+      await service.create({ name: 'second', projectId });
+      engine.setHealth('container-2', 'starting');
+
+      const byId = new Map((await service.list()).map((i) => [i.id, i.session]));
+
+      expect(byId.get('id-1')).toBe('ready');
+      expect(byId.get('id-2')).toBe('starting');
+    });
+  });
+
   describe('delete', () => {
     it('removes the container and the row', async () => {
       await service.create({ name: 'demo', projectId });
@@ -658,7 +732,30 @@ describe('InstanceService', () => {
       await expect(service.openTerminal('id-orphan')).rejects.toThrow(ContainerMissingError);
     });
 
+    it('refuses while the session is still starting, before it execs anything', async () => {
+      // `tmux attach` against a session that does not exist exits non-zero, and
+      // by then the socket is open and the only thing left to report is a
+      // failed session. So the readiness is asked first.
+      await service.create({ name: 'demo', projectId });
+      engine.setHealth('container-1', 'starting');
+
+      await expect(service.openTerminal('id-1')).rejects.toThrow(SessionNotReadyError);
+      expect(engine.terminals).toEqual([]);
+    });
+
+    it('refuses a container whose session never came up', async () => {
+      await service.create({ name: 'demo', projectId });
+      engine.setHealth('container-1', 'unhealthy');
+
+      await expect(service.openTerminal('id-1')).rejects.toMatchObject({
+        name: 'SessionNotReadyError',
+        readiness: 'failed',
+      });
+    });
+
     it('passes a stopped container on as such', async () => {
+      // Deliberately not a SessionNotReadyError: "not running" says more, and
+      // Start is the way out of it.
       await service.create({ name: 'demo', projectId });
       engine.setState('container-1', 'exited');
 

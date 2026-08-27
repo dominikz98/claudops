@@ -8,6 +8,7 @@ import {
 import {
   ContainerMissingError,
   InstanceNotFoundError,
+  SessionNotReadyError,
   type InstanceService,
 } from '../instances/service.ts';
 import { bridgeTerminal, type BridgeOptions } from './bridge.ts';
@@ -39,6 +40,12 @@ function refusalFor(error: unknown, log: FastifyBaseLogger): Refusal {
   }
   if (error instanceof ContainerNotRunningError) {
     return { code: TerminalClose.conflict, reason: 'not_running', message: error.message };
+  }
+  // Its own reason rather than `session_failed`: nothing failed here, the exec
+  // was never started -- and a client can tell "come back in a moment" from
+  // "this one is broken" by the readiness the message carries.
+  if (error instanceof SessionNotReadyError) {
+    return { code: TerminalClose.conflict, reason: 'session_not_ready', message: error.message };
   }
   if (error instanceof DockerUnavailableError) {
     return {

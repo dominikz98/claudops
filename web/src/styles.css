@@ -239,8 +239,13 @@ td.actions {
   justify-content: flex-end;
 }
 
+/* Two words in one cell: the Docker state, and -- when there is a running
+   container to ask -- whether its session is up. */
 .status {
+  align-items: baseline;
+  display: flex;
   font-family: ui-monospace, monospace;
+  gap: 0.5rem;
 }
 
 .status-running {
@@ -279,7 +284,8 @@ td.actions {
 }
 
 .badge.building,
-.badge.pending {
+.badge.pending,
+.badge.starting {
   border-color: var(--accent);
   color: var(--accent);
 }
@@ -300,15 +306,25 @@ td.actions {
   color: var(--muted);
 }
 
-a.open {
+/* A link while the session is attachable, a disabled button while it is not --
+   which is why this is not scoped to `a`: both have to look like one control. */
+.open {
+  background: none;
   border: 1px solid var(--border);
   border-radius: 4px;
+  color: var(--accent);
+  font: inherit;
   padding: 0.4rem 0.9rem;
   text-decoration: none;
 }
 
 a.open:hover {
   border-color: var(--accent);
+}
+
+button.open:disabled {
+  color: var(--muted);
+  cursor: not-allowed;
 }
 
 /* ----------------------------------------------------------------- console */

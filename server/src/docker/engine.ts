@@ -37,6 +37,14 @@ export interface ContainerSpec {
   capAdd: readonly string[];
 }
 
+/**
+ * What a container's own `HEALTHCHECK` reports, one to one with Docker's
+ * values. `docker/base/Dockerfile` runs `tmux has-session`, so this is the
+ * container saying whether its session is up rather than the server guessing
+ * from how long ago it was started.
+ */
+export type ContainerHealth = 'starting' | 'healthy' | 'unhealthy';
+
 /** A container as the Docker API reports it. */
 export interface ContainerSummary {
   containerId: string;
@@ -44,6 +52,10 @@ export interface ContainerSummary {
   /** Raw Docker state: created, running, exited, paused, restarting, dead. */
   state: string;
   status: string;
+  /** `undefined` for a container that is not running and for one whose image
+   *  carries no healthcheck -- "cannot be asked", which is not the same answer
+   *  as `unhealthy`. */
+  health: ContainerHealth | undefined;
 }
 
 /** A volume as the Docker API reports it. `instanceId` is `undefined` for one

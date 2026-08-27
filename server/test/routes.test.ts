@@ -139,6 +139,27 @@ describe('instance REST API', () => {
       expect(instances.find((i) => i.name === 'second')?.status).toBe('running');
     });
 
+    it('tells a running container apart from a session that is ready', async () => {
+      // The two are minutes apart while the entrypoint clones, and only the
+      // second one is a console anybody can open.
+      const first = (await create({ name: 'first', projectId })).json<{ containerId: string }>();
+      await create({ name: 'second', projectId });
+      engine.setHealth(first.containerId, 'starting');
+
+      const instances = (await app.inject({ method: 'GET', url: '/instances' })).json<{
+        instances: { name: string; status: string; session: string }[];
+      }>().instances;
+
+      expect(instances.find((i) => i.name === 'first')).toMatchObject({
+        status: 'running',
+        session: 'starting',
+      });
+      expect(instances.find((i) => i.name === 'second')).toMatchObject({
+        status: 'running',
+        session: 'ready',
+      });
+    });
+
     it('answers 503 rather than a stale status when Docker is gone', async () => {
       await create({ name: 'demo', projectId });
       engine.unavailable = true;
