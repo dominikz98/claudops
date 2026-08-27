@@ -83,6 +83,10 @@ const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 const argv = process.argv.slice(2);
 const url = argv.shift();
 if (url === undefined) usage('usage: ws-probe <url> [steps...]');
+// The URL is positional and comes first. Said out loud because getting it wrong
+// is not obvious from the fallout: the option name becomes the URL, its value
+// becomes an unknown step, and the complaint names neither.
+if (url.startsWith('--')) usage(`the url comes before the options, got '${url}' first`);
 
 let timeoutMs = DEFAULT_TIMEOUT_MS;
 let cookie: string | undefined;

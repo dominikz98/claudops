@@ -104,6 +104,33 @@ ENV TERM=xterm-256color \
 RUN mkdir -p "${WORKSPACE_DIR}" && chown "${USER_UID}:${USER_GID}" "${WORKSPACE_DIR}"
 
 USER ${USER_NAME}
+
+# Claude Code asks three questions on a first start, and a fresh container is
+# always a first start: the theme picker, the trust prompt for the working
+# directory, and the confirmation of --dangerously-skip-permissions. None of them
+# can be answered from the instance list, so the console opens on a wizard
+# instead of on Claude -- see
+# knowledge/claude-onboarding-must-be-pre-seeded.md for what each flag settles.
+#
+# The trust entry covers WORKSPACE_DIR itself, which is where a container
+# without a REPO_URL starts. It does *not* reach the clone below it: a git
+# repository is its own trust root, so the entrypoint adds an entry for the
+# directory it actually cloned into.
+#
+# Pre-accepting the bypass-permissions warning restates the decision from
+# EPIC #1, it does not take a new one: the mode is defensible only inside this
+# image's isolation and its egress whitelist, which is precisely what the
+# warning asks an operator to confirm.
+#
+# 0600 because Claude keeps writing to this file at runtime and its own first
+# start creates it that way.
+RUN printf '%s' \
+      '{"hasCompletedOnboarding":true,"theme":"dark",' \
+      '"bypassPermissionsModeAccepted":true,' \
+      "\"projects\":{\"${WORKSPACE_DIR}\":{\"hasTrustDialogAccepted\":true}}}" \
+      > "/home/${USER_NAME}/.claude.json" \
+ && chmod 0600 "/home/${USER_NAME}/.claude.json"
+
 WORKDIR ${WORKSPACE_DIR}
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

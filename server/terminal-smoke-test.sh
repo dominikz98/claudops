@@ -45,9 +45,14 @@ session_cookie() {
 
 # probe <url> [steps...] -- terminal output lands in $PROBE_OUT, the close code
 # and any control frame in $PROBE_ERR. Returns the probe's exit code.
+#
+# The URL stays first: ws-probe takes it positionally, so an option in front of
+# it is read *as* the URL and the value behind it becomes an unknown step.
 probe() {
+  local url="$1"
+  shift
   (cd "$SERVER_DIR" && pnpm exec tsx scripts/ws-probe.ts \
-    --cookie "$(session_cookie)" "$@") >"$PROBE_OUT" 2>"$PROBE_ERR"
+    "$url" --cookie "$(session_cookie)" "$@") >"$PROBE_OUT" 2>"$PROBE_ERR"
 }
 
 # probe_without_cookie <url> [steps...] -- the same, unauthenticated: the
