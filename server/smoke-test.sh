@@ -340,17 +340,23 @@ clone_instance="$(body_of POST /instances "{\"name\":\"smoke-clone\",\"projectId
 clone_id="$(json id <<<"$clone_instance")"
 clone_container="$(json containerId <<<"$clone_instance")"
 
+# Waiting for the branch rather than for `.git`: git creates that directory
+# early and only writes HEAD at the end, so a check that stops at the directory
+# can read back "HEAD" from a clone that is still running -- which looks exactly
+# like a container that ignored REPO_BRANCH.
 cloned=""
+clone_branch=""
 for _ in $(seq 1 60); do
-  if docker exec "$clone_container" test -d /workspace/claudops/.git 2>/dev/null; then
+  clone_branch="$(docker exec "$clone_container" \
+    git -C /workspace/claudops rev-parse --abbrev-ref HEAD 2>/dev/null | tr -d '\r')"
+  if [[ -n "$clone_branch" && "$clone_branch" != 'HEAD' ]]; then
     cloned="yes"
     break
   fi
   sleep 2
 done
 check "The repository is cloned into /workspace/claudops" "yes" "$cloned"
-check "The checked out branch is the one the project names" "main" \
-  "$(docker exec "$clone_container" git -C /workspace/claudops rev-parse --abbrev-ref HEAD 2>/dev/null | tr -d '\r')"
+check "The checked out branch is the one the project names" "main" "$clone_branch"
 check "No token ends up in the remote URL" "0" \
   "$(docker exec "$clone_container" git -C /workspace/claudops remote get-url origin 2>/dev/null | grep -c '@')"
 
@@ -460,6 +466,86 @@ check "Deleting one in the container frees the budget again" "201" \
 check "DELETE of the clone instance answers 204" "204" "$(status_of DELETE "/instances/$clone_id")"
 check "DELETE of the clone project answers 204" "204" "$(status_of DELETE "/projects/$clone_project")"
 
+# ------------------------------------------- #16: model and effort per instance
+info "#16: the model is chosen on create and switched on a running instance"
+
+model_created="$(api POST /instances \
+  "{\"name\":\"smoke-model\",\"projectId\":\"$project_id\",\"model\":\"haiku\",\"effort\":\"low\"}")"
+check "POST with a model answers 201" "201" "$(head -1 <<<"$model_created")"
+
+model_json="$(tail -n +2 <<<"$model_created")"
+model_id="$(json id <<<"$model_json")"
+model_container="$(json containerId <<<"$model_json")"
+check "The instance reports the chosen model" "haiku" "$(json model <<<"$model_json")"
+check "The instance reports the chosen effort" "low" "$(json effort <<<"$model_json")"
+
+check "An unknown model is refused" "400" \
+  "$(status_of POST /instances \
+      "{\"name\":\"nope\",\"projectId\":\"$project_id\",\"model\":\"gpt-4\"}")"
+
+# What the server is responsible for: the choice reaches the container as an
+# environment variable. That the entrypoint turns it into `--model` on the
+# `claude` line is the base image's own smoke test.
+container_env="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' \
+  "$model_container" 2>/dev/null | tr -d '\r')"
+contains "The container carries CLAUDE_MODEL" "CLAUDE_MODEL=haiku" "$container_env"
+contains "The container carries CLAUDE_EFFORT" "CLAUDE_EFFORT=low" "$container_env"
+
+# A switch types into the session, so there has to be one. Right after a create
+# there is not -- the healthcheck has not run once. Tolerant rather than timed:
+# on a slow enough host the first check could already have passed, and the
+# deterministic version of this assertion is in server/test/routes.test.ts.
+early="$(api PATCH "/instances/$model_id" '{"model":"opus"}')"
+if [[ "$(head -1 <<<"$early")" == '409' ]]; then
+  ok "A switch before the session is up is refused, not half-applied"
+  check "The refusal names the session, not the container" "session_not_ready" \
+    "$(json error <<<"$(tail -n +2 <<<"$early")")"
+else
+  info "  (the session was already up -- nothing to refuse)"
+fi
+
+session_ready=''
+for _ in $(seq 1 90); do
+  [[ "$(json session <<<"$(body_of GET "/instances/$model_id")")" == 'ready' ]] && {
+    session_ready=yes
+    break
+  }
+  sleep 1
+done
+
+if [[ -z "$session_ready" ]]; then
+  bad "The session never became ready -- nothing to switch a model on"
+else
+  ok "The session became ready"
+
+  switched="$(api PATCH "/instances/$model_id" '{"model":"opus"}')"
+  check "PATCH answers 200" "200" "$(head -1 <<<"$switched")"
+  check "The new model comes back" "opus" "$(json model <<<"$(tail -n +2 <<<"$switched")")"
+  check "The effort that was not sent is kept" "low" \
+    "$(json effort <<<"$(tail -n +2 <<<"$switched")")"
+
+  # Half one: the running session was typed into. Whether Claude is at a prompt
+  # in there or the pane fell back to a shell, the line is on it either way.
+  contains "The slash command reached the pane" "/model opus" \
+    "$(docker exec "$model_container" tmux capture-pane -p -t main:0.0 2>/dev/null | tr -d '\r')"
+
+  # Half two: what the next container start will read. Without it a stop/start
+  # would bring haiku back from the environment above.
+  check "The override file carries the new model" "opus" \
+    "$(docker exec "$model_container" cat /home/claude/.claudops/model 2>/dev/null | tr -d '\r')"
+  check "The untouched effort is in its file too" "low" \
+    "$(docker exec "$model_container" cat /home/claude/.claudops/effort 2>/dev/null | tr -d '\r')"
+
+  check "An unknown value is refused on a PATCH as well" "400" \
+    "$(status_of PATCH "/instances/$model_id" '{"effort":"ludicrous"}')"
+  check "The stored model survived the refusal" "opus" \
+    "$(json model <<<"$(body_of GET "/instances/$model_id")")"
+fi
+
+# Removed again, so the list assertions below still see exactly one instance.
+check "DELETE of the model instance answers 204" "204" \
+  "$(status_of DELETE "/instances/$model_id")"
+
 # --------------------------------------- AC 3: the list reports the Docker state
 info "AC 3: the list shows the status taken from the Docker API"
 list="$(body_of GET /instances)"
@@ -533,7 +619,10 @@ check "No volume of the instance remains" "" "$(volumes_for "$life_id")"
 # Three kinds of damage, all of them things a killed server or a hand on the
 # NUC really leaves behind.
 info "#8 AC 2: a restart with orphaned and hand-removed containers ends consistent"
-healthy_json="$(body_of POST /instances "{\"name\":\"smoke-healthy\",\"projectId\":\"$project_id\"}")"
+# Given a model on purpose: #16 AC 3 is that the choice survives a server
+# restart, and this is the instance meant to come through one intact.
+healthy_json="$(body_of POST /instances \
+  "{\"name\":\"smoke-healthy\",\"projectId\":\"$project_id\",\"model\":\"sonnet\",\"effort\":\"high\"}")"
 healthy_id="$(json id <<<"$healthy_json")"
 healthy_container="$(json containerId <<<"$healthy_json")"
 
@@ -594,6 +683,13 @@ check "The healthy instance was left alone" "running" \
   "$(json status <<<"$(body_of GET "/instances/$healthy_id")")"
 check "Its container is still running" "true" \
   "$(docker inspect -f '{{.State.Running}}' "$healthy_container" 2>/dev/null | tr -d '\r')"
+
+# #16 AC 3: the model is the one thing about an instance the database keeps,
+# so a restarted server still knows it.
+check "#16: the chosen model survived the server restart" "sonnet" \
+  "$(json model <<<"$(body_of GET "/instances/$healthy_id")")"
+check "#16: the chosen effort survived it too" "high" \
+  "$(json effort <<<"$(body_of GET "/instances/$healthy_id")")"
 
 check "DELETE of the reconciled instance answers 204" "204" \
   "$(status_of DELETE "/instances/$removed_id")"

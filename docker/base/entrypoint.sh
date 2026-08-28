@@ -4,7 +4,7 @@
 # 1. Install the egress firewall (default-deny plus a whitelist)
 # 2. Configure git (credential helper for GIT_TOKEN)
 # 3. Clone REPO_URL into $WORKSPACE_DIR/<repo-name>
-# 4. Start Claude Code in a detached tmux session
+# 4. Start Claude Code in a detached tmux session, at the chosen model/effort
 # 5. Watch over the session as PID 1 until it ends or SIGTERM arrives
 #
 # The session is started *detached* on purpose: the claudops server starts the
@@ -15,6 +15,9 @@ WORKSPACE_DIR="${WORKSPACE_DIR:-/workspace}"
 TMUX_SESSION="${TMUX_SESSION:-main}"
 REPO_BRANCH="${REPO_BRANCH:-main}"
 CLAUDE_ARGS="${CLAUDE_ARGS:-}"
+CLAUDE_MODEL="${CLAUDE_MODEL:-}"
+CLAUDE_EFFORT="${CLAUDE_EFFORT:-}"
+OVERRIDE_DIR="$HOME/.claudops"
 FIREWALL_MODE="${FIREWALL_MODE:-enforce}"
 FIREWALL_SCRIPT='/usr/local/bin/init-firewall.sh'
 FIREWALL_STATE='/run/claudops-firewall.state'
@@ -116,6 +119,35 @@ clone_repo() {
   return 1
 }
 
+# One `--model` / `--effort` argument for the `claude` start, or nothing.
+#
+# The override file wins over the environment, and an *empty* file means "no
+# flag" rather than "not set": claudops writes it when the model is switched
+# from the UI, and Docker cannot change a created container's environment -- so
+# without this a `docker restart` would bring back the value the instance was
+# created with. A file that does not exist is the case where nothing was ever
+# switched, and then the environment is right.
+#
+# The pattern check is what makes the file harmless. It is in the agent's own
+# home directory and the agent can write it, which is fine -- it can type
+# `/model` anyway -- but a single word is all it can ever turn into, never a
+# second flag on the start line.
+claude_flag() {  # claude_flag <name> <env-value> <flag>
+  local file="$OVERRIDE_DIR/$1" value="$2"
+
+  [[ -f "$file" ]] && value="$(cat "$file" 2>/dev/null)"
+  [[ -n "$value" ]] || return 0
+
+  if [[ ! "$value" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    # On stderr, not stdout: the caller captures this function's output into the
+    # argument list, and a log line in there would become an argument.
+    log "WARNING: ignoring $1 '$value' -- not a plain model or effort name." >&2
+    return 0
+  fi
+
+  printf ' %s %s' "$3" "$value"
+}
+
 shutdown() {
   log "Signal received -- shutting down the tmux server."
   tmux kill-server 2>/dev/null
@@ -123,7 +155,7 @@ shutdown() {
 }
 
 main() {
-  local start_dir="$WORKSPACE_DIR" target pane_cmd
+  local start_dir="$WORKSPACE_DIR" target pane_cmd claude_args
   local firewall_ok=1
 
   # Before anything touches the network: the clone has to be subject to the
@@ -150,8 +182,15 @@ main() {
   # `exec bash -l` in both branches keeps the pane open when what ran before it
   # ends -- otherwise the session disappears and the container dies on the first
   # /exit.
+  claude_args="${CLAUDE_ARGS}"
+  claude_args+="$(claude_flag model "$CLAUDE_MODEL" --model)"
+  claude_args+="$(claude_flag effort "$CLAUDE_EFFORT" --effort)"
+
   if [[ "$firewall_ok" -eq 1 ]]; then
-    pane_cmd="claude ${CLAUDE_ARGS}; exec bash -l"
+    # The line as it will run, so a container that started on the wrong model
+    # says so in `docker logs` rather than only in `ps`.
+    log "Starting Claude Code: claude $claude_args"
+    pane_cmd="claude ${claude_args}; exec bash -l"
   else
     # Fail closed on the network, stay reachable for diagnosis: the same
     # reasoning as a failed clone (knowledge/failed-clone-must-not-abort.md),

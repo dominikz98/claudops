@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { DEFAULT_INSTANCE_LIMITS, type InstanceEnvConfig } from '../src/config.ts';
@@ -10,12 +12,16 @@ import {
   ImageNotFoundError,
 } from '../src/docker/engine.ts';
 import {
+  ContainerCommandFailedError,
   ContainerMissingError,
+  INSTANCE_EFFORTS,
+  INSTANCE_MODELS,
   InstanceNotFoundError,
   InstanceService,
   InvalidUploadNameError,
   MISSING_STATUS,
   SessionNotReadyError,
+  UnknownChoiceError,
   UPLOAD_DIR,
   uploadFileName,
   UploadTooLargeError,
@@ -80,6 +86,9 @@ describe('InstanceService', () => {
       projects,
       generateId: () => ids.shift() ?? 'exhausted',
       now: () => new Date('2026-08-25T08:00:00.000Z'),
+      // The pause exists for a real TUI reading real keystrokes; here it would
+      // only make the suite slower.
+      sendKeysPauseMs: 0,
     });
     projectId = addProject({ name: 'demo-project' });
   });
@@ -533,6 +542,8 @@ describe('InstanceService', () => {
         projectId: null,
         repoUrl: null,
         repoBranch: null,
+        model: null,
+        effort: null,
         createdAt: '2026-08-25T08:00:00.000Z',
       });
 
@@ -661,6 +672,170 @@ describe('InstanceService', () => {
     });
   });
 
+  describe('model and effort', () => {
+    /** Only the tmux typing, without the two file writes in front of it -- what
+     *  a test about "did the switch reach the session" wants to read. */
+    const sentLines = (): string[] =>
+      engine.commands
+        .filter((entry) => entry.command[1] === 'send-keys')
+        .map((entry) => entry.command.at(-1) ?? '');
+
+    it('starts the container with the chosen model and effort', async () => {
+      const instance = await service.create({
+        name: 'demo',
+        projectId,
+        model: 'haiku',
+        effort: 'low',
+      });
+
+      expect(instance).toMatchObject({ model: 'haiku', effort: 'low' });
+      expect(engine.specFor('id-1')?.env).toMatchObject({
+        CLAUDE_MODEL: 'haiku',
+        CLAUDE_EFFORT: 'low',
+      });
+      expect(repository.get('id-1')).toMatchObject({ model: 'haiku', effort: 'low' });
+    });
+
+    it('passes neither variable when nothing was chosen', async () => {
+      await service.create({ name: 'demo', projectId });
+
+      const env = engine.specFor('id-1')?.env ?? {};
+      expect(Object.keys(env)).not.toContain('CLAUDE_MODEL');
+      expect(Object.keys(env)).not.toContain('CLAUDE_EFFORT');
+    });
+
+    it('refuses an unknown value without leaving a row or a container behind', async () => {
+      await expect(service.create({ name: 'demo', projectId, model: 'gpt-4' })).rejects.toThrow(
+        UnknownChoiceError,
+      );
+
+      expect(await service.list()).toEqual([]);
+      expect(engine.containers.size).toBe(0);
+    });
+
+    it('writes the override files and types the change into the session', async () => {
+      await service.create({ name: 'demo', projectId, model: 'haiku', effort: 'low' });
+      engine.commands.length = 0;
+
+      const instance = await service.setModelEffort('id-1', { model: 'opus', effort: 'xhigh' });
+
+      expect(instance).toMatchObject({ model: 'opus', effort: 'xhigh' });
+      // The override files first: they are what the next container start reads,
+      // and they carry the values as arguments rather than inside the script.
+      expect(engine.commands[0]?.command.slice(-2)).toEqual(['opus', 'xhigh']);
+      // `/model` before `/effort` -- which levels exist depends on the model.
+      expect(sentLines()).toEqual(['/model opus', 'Enter', '/effort xhigh', 'Enter']);
+      expect(repository.get('id-1')).toMatchObject({ model: 'opus', effort: 'xhigh' });
+    });
+
+    it('leaves the stored value alone for a field that is not sent', async () => {
+      await service.create({ name: 'demo', projectId, model: 'haiku', effort: 'low' });
+      engine.commands.length = 0;
+
+      expect(await service.setModelEffort('id-1', { effort: 'high' })).toMatchObject({
+        model: 'haiku',
+        effort: 'high',
+      });
+      // Only the effort was typed: a `/model haiku` on an instance already on
+      // haiku would cost a full prompt-cache rebuild for nothing.
+      expect(sentLines()).toEqual(['/effort high', 'Enter']);
+    });
+
+    it('types nothing at all when nothing changes', async () => {
+      await service.create({ name: 'demo', projectId, model: 'haiku' });
+      engine.commands.length = 0;
+
+      await service.setModelEffort('id-1', { model: 'haiku' });
+
+      expect(engine.commands).toEqual([]);
+    });
+
+    it('resets the effort with /effort auto and the model with the file alone', async () => {
+      await service.create({ name: 'demo', projectId, model: 'haiku', effort: 'low' });
+      engine.commands.length = 0;
+
+      await service.setModelEffort('id-1', { model: null, effort: null });
+
+      // An empty override file, not a removed one: a missing file falls back to
+      // the environment, which still says haiku.
+      expect(engine.commands[0]?.command.slice(-2)).toEqual(['', '']);
+      // `/effort` has `auto` for this; `/model` has nothing, so the model
+      // reaches the running session not at all and the next start through the
+      // file. The UI offers a reset on neither.
+      expect(sentLines()).toEqual(['/effort auto', 'Enter']);
+      expect(repository.get('id-1')).toMatchObject({ model: null, effort: null });
+    });
+
+    it('refuses an unknown value and leaves the instance as it was', async () => {
+      await service.create({ name: 'demo', projectId, model: 'haiku' });
+      engine.commands.length = 0;
+
+      await expect(service.setModelEffort('id-1', { model: 'gpt-4' })).rejects.toThrow(
+        UnknownChoiceError,
+      );
+
+      expect(engine.commands).toEqual([]);
+      expect(repository.get('id-1')?.model).toBe('haiku');
+    });
+
+    it('refuses an unknown instance, one without a container and one that is not up', async () => {
+      await expect(service.setModelEffort('nope', { model: 'opus' })).rejects.toThrow(
+        InstanceNotFoundError,
+      );
+
+      repository.insert({
+        id: 'id-orphan',
+        name: 'half-created',
+        image: 'claudops-project-gone',
+        projectId: null,
+        repoUrl: null,
+        repoBranch: null,
+        model: null,
+        effort: null,
+        createdAt: '2026-08-25T08:00:00.000Z',
+      });
+      await expect(service.setModelEffort('id-orphan', { model: 'opus' })).rejects.toThrow(
+        ContainerMissingError,
+      );
+
+      await service.create({ name: 'demo', projectId });
+      engine.setHealth('container-1', 'starting');
+      await expect(service.setModelEffort('id-1', { model: 'opus' })).rejects.toThrow(
+        SessionNotReadyError,
+      );
+      // Nothing was written anywhere: half a switch is worse than none.
+      expect(engine.commands).toEqual([]);
+      expect(repository.get('id-1')?.model).toBeNull();
+    });
+
+    it('stops at a command the container refused, before the row is written', async () => {
+      await service.create({ name: 'demo', projectId, model: 'haiku' });
+      engine.commands.length = 0;
+      // What `tmux send-keys` says when the pane it was given is not there --
+      // an exec that ran and failed, not one that could not start. A function,
+      // because the fake answers per command since #15.
+      engine.commandResult = () => ({ exitCode: 1, output: "can't find pane: main:0.0" });
+
+      await expect(service.setModelEffort('id-1', { model: 'opus' })).rejects.toThrow(
+        ContainerCommandFailedError,
+      );
+
+      // The first command is the one that failed, and nothing followed it.
+      expect(engine.commands).toHaveLength(1);
+      expect(repository.get('id-1')?.model).toBe('haiku');
+    });
+
+    it('keeps the database out of it when the container is not running', async () => {
+      await service.create({ name: 'demo', projectId, model: 'haiku' });
+      engine.setState('container-1', 'exited');
+
+      await expect(service.setModelEffort('id-1', { model: 'opus' })).rejects.toThrow(
+        SessionNotReadyError,
+      );
+      expect(repository.get('id-1')?.model).toBe('haiku');
+    });
+  });
+
   describe('openTerminal', () => {
     it('attaches to the existing tmux session of the instance container', async () => {
       await service.create({ name: 'demo', projectId });
@@ -730,6 +905,8 @@ describe('InstanceService', () => {
         projectId: null,
         repoUrl: null,
         repoBranch: null,
+        model: null,
+        effort: null,
         createdAt: '2026-08-25T08:00:00.000Z',
       });
 
@@ -945,5 +1122,33 @@ describe('InstanceService', () => {
       expect(name).toHaveLength(80);
       expect(name.endsWith('.png')).toBe(true);
     });
+  });
+});
+
+/**
+ * The web client mirrors these two lists rather than fetching them -- nine
+ * strings, and the server's schema is what enforces them. Read out of the file
+ * rather than imported: `web/` is a separate package with its own tsconfig, and
+ * a test that reaches into it with an import would not survive either build.
+ *
+ * What this catches is the one failure mode of a mirrored list: a model added
+ * on one side only, which shows up as a dropdown entry the server answers 400
+ * to.
+ */
+describe('the web client mirrors the model and effort lists', () => {
+  const api = readFileSync(join(import.meta.dirname, '../../web/src/api.ts'), 'utf8');
+
+  const listIn = (name: string): string[] => {
+    const match = new RegExp(`export const ${name} = \\[([^\\]]*)\\]`).exec(api);
+    expect(match, `${name} is not declared in web/src/api.ts`).not.toBeNull();
+    return [...(match?.[1] ?? '').matchAll(/'([^']+)'/g)].map((entry) => entry[1] ?? '');
+  };
+
+  it('offers exactly the models the server accepts', () => {
+    expect(listIn('INSTANCE_MODELS')).toEqual([...INSTANCE_MODELS]);
+  });
+
+  it('offers exactly the effort levels the server accepts', () => {
+    expect(listIn('INSTANCE_EFFORTS')).toEqual([...INSTANCE_EFFORTS]);
   });
 });

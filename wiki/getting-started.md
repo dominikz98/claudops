@@ -122,17 +122,28 @@ cannot start on an environment that was never built.
 
 ## Start an instance
 
-In the browser: back on the instance list, fill in a name, pick the project and
-press Create. The row appears with the status Docker reports. A project whose
-image is not `ready` is greyed out in the picker -- it would be a `422`.
+In the browser: back on the instance list, fill in a name, pick the project,
+optionally pick a model and an effort level, and press Create. The row appears
+with the status Docker reports. A project whose image is not `ready` is greyed
+out in the picker -- it would be a `422`.
 
 The same thing over the API, with the project id from above:
 
 ```bash
 curl -s localhost:8080/instances \
   -H 'content-type: application/json' \
-  -d '{"name":"my-instance","projectId":"<project id>"}'
+  -d '{"name":"my-instance","projectId":"<project id>","model":"sonnet","effort":"high"}'
 ```
+
+`model` and `effort` are optional. Left out, the instance runs whatever Claude
+Code defaults to; given, they become `--model` and `--effort` on the `claude`
+start line inside the container. Both can be changed later without restarting
+anything -- see [Change the model of a running instance](operations.md#change-the-model-of-a-running-instance).
+
+| Field | Values |
+| --- | --- |
+| `model` | `opus`, `sonnet`, `haiku`, `fable`, or left out |
+| `effort` | `low`, `medium`, `high`, `xhigh`, `max`, or left out |
 
 The answer carries the instance `id` and the `containerId`. The container is
 started from the project's image, clones the project's repository into

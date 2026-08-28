@@ -1,17 +1,23 @@
 /**
- * The instance list: create from a project, see the status Docker reports, open
- * the console, delete.
+ * The instance list: create from a project, see the status Docker reports,
+ * switch its model, open the console, delete.
  *
  * The table body is re-rendered on every poll, the shell around it is not --
  * otherwise typing in the create form would lose focus every three seconds.
+ * The model dropdowns *are* in the body, so the poll skips the re-render while
+ * one of them has the focus; without that an open dropdown would close itself
+ * every three seconds and be unusable.
  * The project list is fetched once: it only changes on the projects page, and
  * navigating back here mounts this view again anyway.
  */
 
 import {
   ApiCallError,
+  INSTANCE_EFFORTS,
+  INSTANCE_MODELS,
   type Api,
   type Instance,
+  type ModelChoice,
   type Project,
   type SessionReadiness,
 } from '../api.ts';
@@ -37,6 +43,15 @@ const SESSION_HINTS: Record<SessionReadiness, string> = {
   failed: 'The container never reached its session. `docker logs` on it says why.',
 };
 
+/** What the model dropdowns say when they are disabled. Switching types slash
+ *  commands into the session, so there has to be one. */
+const CHOICE_HINTS: Record<SessionReadiness, string> = {
+  none: 'No running session -- start the instance to change its model.',
+  starting: 'The session is still coming up. The model can be changed once it is.',
+  ready: '',
+  failed: 'The container never reached its session, so there is nothing to type into.',
+};
+
 /** Which way the power button points, by Docker state. `missing` is in neither
  *  list -- there is no container to stop and none to start -- and neither is
  *  `paused`, which needs an unpause rather than a start. */
@@ -53,6 +68,10 @@ export function mountList(root: HTMLElement, api: Api): View {
   let projects: Project[] = [];
   /** The id whose delete button is currently asking "are you sure". */
   let confirming: string | undefined;
+  /** Instances with a model switch in flight. The poll leaves the table alone
+   *  until it lands -- otherwise the dropdown springs back to its old value for
+   *  the duration of the request and then jumps forward again. */
+  const switching = new Set<string>();
   let destroyed = false;
 
   const banner = el('p', { class: 'banner', hidden: 'hidden', 'data-testid': 'banner' });
@@ -108,11 +127,50 @@ export function mountList(root: HTMLElement, api: Api): View {
     '.',
   );
 
+  /**
+   * One model or effort dropdown.
+   *
+   * The empty value is Claude Code's own default. On the create form it is
+   * selectable; in a table row it is not, because there is no way to type "back
+   * to the default" into a running session -- a bare `/model` opens a picker
+   * nobody is at the console to answer.
+   *
+   * The two places also get different test ids, so a selector for the form
+   * cannot accidentally match a row once the table has one.
+   */
+  const choiceSelect = (
+    where: 'form' | 'row',
+    name: keyof ModelChoice,
+    values: readonly string[],
+    current: string | null,
+  ): HTMLSelectElement => {
+    const resettable = where === 'form';
+    const select = el('select', {
+      name,
+      'data-testid': resettable ? `create-${name}` : name,
+    });
+    select.append(
+      el('option', { value: '', ...(resettable ? {} : { disabled: 'disabled' }) }, 'default'),
+      ...values.map((value) => el('option', { value }, value)),
+    );
+    // Selecting a disabled option programmatically is allowed -- `disabled`
+    // only stops the user from picking it, which is exactly the intent.
+    select.value = current ?? '';
+    return select;
+  };
+
   const form = el(
     'form',
     { class: 'create', 'data-testid': 'create-form' },
     field('Name', 'name', 'text', 'my-instance', true),
     el('label', {}, el('span', {}, 'Project'), projectSelect),
+    el('label', {}, el('span', {}, 'Model'), choiceSelect('form', 'model', INSTANCE_MODELS, null)),
+    el(
+      'label',
+      {},
+      el('span', {}, 'Effort'),
+      choiceSelect('form', 'effort', INSTANCE_EFFORTS, null),
+    ),
     submit,
     projectHint,
   );
@@ -258,6 +316,36 @@ export function mountList(root: HTMLElement, api: Api): View {
     );
   };
 
+  /**
+   * The two dropdowns of one row. Disabled unless the session is attachable --
+   * the same treatment the Console button gets, and for the same reason: the
+   * server has to type the change into a running session.
+   */
+  const choiceCell = (instance: Instance): HTMLElement => {
+    const ready = instance.session === 'ready';
+    const model = choiceSelect('row', 'model', INSTANCE_MODELS, instance.model);
+    const effort = choiceSelect('row', 'effort', INSTANCE_EFFORTS, instance.effort);
+    const both = [model, effort];
+
+    for (const select of both) {
+      if (!ready) {
+        select.setAttribute('disabled', 'disabled');
+        select.setAttribute('title', CHOICE_HINTS[instance.session]);
+        continue;
+      }
+      select.addEventListener('change', () => {
+        void applyChoice(instance.id, { [select.name]: select.value || null }, both);
+      });
+      // The poll holds off while a dropdown has the focus; this is what lets it
+      // resume once the user has clicked away without picking anything.
+      select.addEventListener('blur', () => {
+        if (!busy()) renderRows();
+      });
+    }
+
+    return el('td', { class: 'choice' }, model, effort);
+  };
+
   const renderRows = (): void => {
     clear(rows);
 
@@ -266,7 +354,7 @@ export function mountList(root: HTMLElement, api: Api): View {
         el(
           'tr',
           { 'data-testid': 'empty' },
-          el('td', { colspan: '7' }, 'No instances yet. Create one above.'),
+          el('td', { colspan: '8' }, 'No instances yet. Create one above.'),
         ),
       );
       return;
@@ -301,6 +389,7 @@ export function mountList(root: HTMLElement, api: Api): View {
           el('td', { class: 'name' }, instance.name),
           statusCell(instance),
           el('td', { 'data-testid': 'project' }, projectName(instance.projectId)),
+          choiceCell(instance),
           // The repository as the container was told it, not as the project
           // reads today.
           el('td', { class: 'repo' }, instance.repoUrl ?? '--'),
@@ -312,12 +401,22 @@ export function mountList(root: HTMLElement, api: Api): View {
     }
   };
 
+  /** Whether a dropdown in the table is open, or at least focused. Rebuilding
+   *  the tbody underneath one closes it, which at a three-second poll makes it
+   *  impossible to use. */
+  const editing = (): boolean =>
+    document.activeElement instanceof HTMLSelectElement && rows.contains(document.activeElement);
+
+  /** Whether the table may be rebuilt at all right now. */
+  const busy = (): boolean => editing() || switching.size > 0;
+
   const refresh = async (): Promise<void> => {
     try {
       instances = await api.list();
       if (destroyed) return;
       clearError();
-      renderRows();
+      // The data is kept either way; only the repaint waits.
+      if (!busy()) renderRows();
     } catch (error) {
       if (destroyed) return;
       // The last known list stays on screen: a daemon that went away for a
@@ -333,6 +432,28 @@ export function mountList(root: HTMLElement, api: Api): View {
     } catch (error) {
       showError(error);
     }
+    await refresh();
+  };
+
+  /** Sends one switch and repaints. The dropdowns are disabled meanwhile: the
+   *  server types the change into the session, which is not instant, and a
+   *  second change on top of the first would race it. */
+  const applyChoice = async (
+    id: string,
+    changes: Partial<ModelChoice>,
+    controls: HTMLSelectElement[],
+  ): Promise<void> => {
+    for (const control of controls) control.setAttribute('disabled', 'disabled');
+    switching.add(id);
+
+    try {
+      await api.setModelEffort(id, changes);
+      clearError();
+    } catch (error) {
+      showError(error);
+    }
+    // Cleared before the refresh, which is the repaint that puts the row right.
+    switching.delete(id);
     await refresh();
   };
 
@@ -357,7 +478,14 @@ export function mountList(root: HTMLElement, api: Api): View {
 
     submit.setAttribute('disabled', 'disabled');
     try {
-      await api.create({ name: value('name'), projectId: value('projectId') });
+      await api.create({
+        name: value('name'),
+        projectId: value('projectId'),
+        // An empty string is "default"; the API drops it rather than sending a
+        // value the server's enum would reject.
+        model: value('model'),
+        effort: value('effort'),
+      });
       form.reset();
       clearError();
       await refresh();
@@ -414,6 +542,7 @@ export function mountList(root: HTMLElement, api: Api): View {
           el('th', {}, 'Name'),
           el('th', {}, 'Status'),
           el('th', {}, 'Project'),
+          el('th', {}, 'Model'),
           el('th', {}, 'Repository'),
           el('th', {}, 'Branch'),
           el('th', {}, 'Age'),

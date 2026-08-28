@@ -60,3 +60,8 @@ Format and maintenance rules: skill `domain-knowledge`.
 - [A `docker exec` without a TTY hands back a framed stream, one with a TTY does not](a-non-tty-exec-is-framed.md) - the byte count that comes out plausible instead of wrong
 - [`putArchive` gives the file the uid from the tar header, not the container's user](putarchive-writes-the-uid-from-the-tar-header.md) - the attachment the agent can read but not delete
 - [A raw body needs both a content-type parser and a route `bodyLimit`](a-raw-upload-needs-a-parser-and-its-own-bodylimit.md) - 415 without the first, 413 at one megabyte without the second
+- [CLAUDE_CODE_EFFORT_LEVEL outranks `/effort`, so the start value has to be a flag](the-effort-env-var-outranks-the-slash-command.md) - the switch that is accepted and changes nothing
+- [A model switch has to reach two places, and one of them is a file](a-model-switch-has-to-reach-two-places.md) - Docker cannot change the environment of a container that exists
+- [`tmux send-keys` needs the pane, not the session -- and a pause before Enter](send-keys-needs-the-pane-not-the-session.md) - three ways to type a command nobody receives
+- [A warm prompt cache turns a model switch into a dialog, and claudops does not answer it](a-warm-cache-turns-a-model-switch-into-a-dialog.md) - why a blind second Enter is worse than the dialog
+- [A smoke test has to wait for the state it asserts on, not for a sign of it](a-smoke-test-must-wait-for-the-state-it-asserts-on.md) - two waits that were green until the host got busy

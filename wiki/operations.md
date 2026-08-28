@@ -11,6 +11,11 @@ up again without touching the instance, and **Delete** asks twice and then takes
 the container and its volumes with it. A project whose image is not built yet
 cannot be picked in the create form -- the option says which state it is in.
 
+Each row also carries two dropdowns, the model and the effort level Claude Code
+runs at. They are greyed out until the session is up, for the same reason the
+Console button is -- see
+[Change the model of a running instance](#change-the-model-of-a-running-instance).
+
 Next to the Docker status stands a second badge, the *session*: a container is
 `running` from the moment it starts, but its Claude session only exists once the
 entrypoint has installed the egress firewall and cloned the repository. **Console**
@@ -192,6 +197,59 @@ instance's label, so uncommitted work in the workspace is gone for good.
 
 A stopped instance is the cheap state: it holds disk, but no CPU and no memory.
 Deleting is for an instance you are finished with.
+
+## Change the model of a running instance
+
+Pick a different model or effort level from the dropdowns in the instance row.
+The change applies to the session that is already running: nothing restarts, the
+scrollback stays, and whatever Claude was doing keeps going.
+
+```bash
+curl -s -X PATCH localhost:8080/instances/<id> \
+  -H 'content-type: application/json' \
+  -d '{"model":"opus","effort":"high"}'
+```
+
+Either field on its own is enough; the one you leave out keeps its value.
+
+| Field | Values |
+| --- | --- |
+| `model` | `opus`, `sonnet`, `haiku`, `fable` |
+| `effort` | `low`, `medium`, `high`, `xhigh`, `max` |
+
+What the server does with it is two things:
+
+- It types `/model` and `/effort` into the instance's tmux session, exactly as
+  you would at the console.
+- It writes the values to `~/.claudops/model` and `~/.claudops/effort` in the
+  container, which the entrypoint reads on the next start. Without that, a
+  **Stop** and **Start** would bring back the model the instance was created
+  with.
+
+Two things follow from the first half:
+
+- **It needs a session to type into.** An instance that is stopped, or whose
+  session is still coming up, answers `409 session_not_ready` -- start it, wait
+  for the badge to say `ready`, then switch. The dropdowns in the UI are disabled
+  until then.
+- **Claude Code may ask you to confirm.** Switching model or effort throws away
+  its prompt cache, so while that cache is still warm it asks first. claudops
+  does not answer that dialog: open the console and press the key, and the switch
+  goes through. On an instance that has been idle for a while there is no dialog
+  at all. Until it is answered, the session stays on its old model -- the
+  instance list already shows the new one, which is the value the next container
+  start will use either way.
+
+Whether it really took effect is visible in the container:
+
+```bash
+docker exec claudops-<id> pgrep -af claude   # the flags the session was started with
+docker exec claudops-<id> cat /home/claude/.claudops/model
+```
+
+The first line shows what the *current* process was started with, so after a
+switch it still names the old model until the container is restarted -- the
+running session was changed by the slash command, not by its arguments.
 
 ## The console over the WebSocket
 

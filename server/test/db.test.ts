@@ -42,7 +42,31 @@ describe('migrations', () => {
       'created_at',
       // Added by migration 2, hence last: SQLite appends.
       'project_id',
+      // Migration 4. Not a status either: a decision the container is started
+      // with, which nothing but this table remembers across a restart.
+      'model',
+      'effort',
     ]);
+  });
+
+  it('leaves an instance from before migration 4 without a model or effort', () => {
+    const db = new Database(':memory:');
+    // The schema as it stood after migration 2, plus one row -- what an
+    // upgrade of a running installation actually finds.
+    db.exec(`CREATE TABLE instances (
+               id TEXT PRIMARY KEY, name TEXT NOT NULL, image TEXT NOT NULL,
+               container_id TEXT, repo_url TEXT, repo_branch TEXT,
+               created_at TEXT NOT NULL, project_id TEXT);
+             INSERT INTO instances (id, name, image, created_at)
+               VALUES ('old', 'from-before', 'claudops-base', '2026-08-01T00:00:00.000Z');`);
+    db.pragma('user_version = 3');
+
+    migrate(db);
+
+    const row = new InstanceRepository(db).get('old');
+    expect(row?.name).toBe('from-before');
+    expect(row?.model).toBeNull();
+    expect(row?.effort).toBeNull();
   });
 
   it('keeps the project PAT in a single column and nothing else secret', () => {
@@ -93,6 +117,8 @@ describe('InstanceRepository', () => {
     projectId: null,
     repoUrl: 'https://github.com/dominikz98/claudops.git',
     repoBranch: 'main',
+    model: null,
+    effort: null,
     createdAt: '2026-08-25T08:00:00.000Z',
   };
 
@@ -110,6 +136,19 @@ describe('InstanceRepository', () => {
     repository.attachContainer('abc123', 'container-1');
 
     expect(repository.get('abc123')?.containerId).toBe('container-1');
+  });
+
+  it('records a model and an effort, and takes them back to null', () => {
+    repository.insert({ ...newInstance, model: 'haiku', effort: 'low' });
+    expect(repository.get('abc123')).toMatchObject({ model: 'haiku', effort: 'low' });
+
+    repository.setModelEffort('abc123', 'opus', 'xhigh');
+    expect(repository.get('abc123')).toMatchObject({ model: 'opus', effort: 'xhigh' });
+
+    // `null` is a value here, not "leave it alone" -- the service has already
+    // decided what stays and what changes by the time it calls this.
+    repository.setModelEffort('abc123', null, null);
+    expect(repository.get('abc123')).toMatchObject({ model: null, effort: null });
   });
 
   it('forgets a container that is gone, and says whether it had one', () => {
@@ -335,6 +374,8 @@ describe('ProjectRepository', () => {
       projectId,
       repoUrl: null,
       repoBranch: null,
+      model: null,
+      effort: null,
       createdAt: '2026-08-25T08:00:00.000Z',
     });
 
@@ -380,6 +421,8 @@ describe('ProjectRepository', () => {
       projectId: 'proj-1',
       repoUrl: null,
       repoBranch: null,
+      model: null,
+      effort: null,
       createdAt: '2026-08-25T08:00:00.000Z',
     });
 

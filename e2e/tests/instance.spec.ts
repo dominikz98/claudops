@@ -14,6 +14,7 @@ import {
   listClients,
   openProbeWindow,
   paneSize,
+  readFile,
   removeContainers,
 } from '../docker.ts';
 import { waitForImage } from '../project.ts';
@@ -21,6 +22,10 @@ import { waitForImage } from '../project.ts';
 test.describe.configure({ mode: 'serial' });
 
 const SESSION = 'main';
+/** #16: chosen on create, switched afterwards. */
+const START_MODEL = 'haiku';
+const START_EFFORT = 'low';
+const SWITCHED_MODEL = 'opus';
 /** The deterministic window `openProbeWindow` creates. */
 const PROBE = `${SESSION}:probe`;
 
@@ -71,11 +76,19 @@ test('an instance can be created from the browser', async () => {
 
   await page.getByTestId('name').fill('e2e');
   await page.getByTestId('projectId').selectOption({ label: 'e2e-console' });
+  // #16: the model is part of creating an instance, not something set later.
+  await page.getByTestId('create-model').selectOption(START_MODEL);
+  await page.getByTestId('create-effort').selectOption(START_EFFORT);
   await page.getByTestId('create-submit').click();
 
   const row = page.locator('tr[data-instance-id]');
   await expect(row).toHaveCount(1);
   await expect(row.getByTestId('status')).toHaveText('running');
+  await expect(row.getByTestId('model')).toHaveValue(START_MODEL);
+  await expect(row.getByTestId('effort')).toHaveValue(START_EFFORT);
+  // Nothing to type a slash command into yet, so the dropdowns follow the
+  // Console button rather than the container.
+  await expect(row.getByTestId('model')).toBeDisabled();
   // #25 AC: the container is up, its session is not -- the entrypoint has a
   // firewall to install and a repository to clone first, and the healthcheck
   // has not run once yet. The Console button follows that, not the container.
@@ -144,6 +157,41 @@ test('AC 2: a browser refresh reconnects with the session intact', async () => {
   // The old tab's exec has to be gone, or tmux keeps sizing the pane for a
   // client nobody is watching (knowledge/docker-cannot-kill-an-exec.md).
   await expect.poll(() => listClients(containerId, SESSION).length, { timeout: 15_000 }).toBe(1);
+});
+
+test('AC (#16): the model can be switched without losing the session', async () => {
+  // The dropdowns are on the list; the test before this one left the page on
+  // the console.
+  await page.getByTestId('back').click();
+  const row = page.locator(`tr[data-instance-id="${instanceId}"]`);
+
+  // Enabled now, because the session is: the server switches by typing into it.
+  await expect(row.getByTestId('model')).toBeEnabled();
+  await row.getByTestId('model').selectOption(SWITCHED_MODEL);
+  await expect(row.getByTestId('model')).toHaveValue(SWITCHED_MODEL);
+
+  // The slash command really reached the pane the entrypoint started, not the
+  // probe window this file opened next to it. Claude is not what answers here
+  // -- the clone failed, so the pane is a shell -- but "the line arrived" is
+  // exactly the half this test can prove.
+  await expect
+    .poll(() => capturePane(containerId, `${SESSION}:0.0`), { timeout: 15_000 })
+    .toContain(`/model ${SWITCHED_MODEL}`);
+
+  // And the other half of a switch: what the next container start will read.
+  expect(readFile(containerId, '/home/claude/.claudops/model')).toBe(SWITCHED_MODEL);
+  expect(readFile(containerId, '/home/claude/.claudops/effort')).toBe(START_EFFORT);
+
+  // A server restart is not part of this file; the row is, and it is where the
+  // choice is stored.
+  await page.reload();
+  await expect(row.getByTestId('model')).toHaveValue(SWITCHED_MODEL);
+
+  // The session itself is untouched -- the console still has everything it had.
+  // Ending here also leaves the page where the next test starts from.
+  await row.getByTestId('console').click();
+  await expect(page.getByTestId('status')).toHaveAttribute('data-state', 'connected');
+  await expect(page.getByTestId('terminal')).toContainText('MARK-ALPHA');
 });
 
 test('AC 3: deleting from the UI removes the row and the container', async () => {

@@ -239,6 +239,24 @@ td.actions {
   justify-content: flex-end;
 }
 
+/* Model and effort in one cell: two dropdowns rather than two more columns,
+   which would push the repository off the screen. Greyed out while there is no
+   session to type a switch into. */
+td.choice {
+  display: flex;
+  gap: 0.35rem;
+}
+
+td.choice select {
+  font-size: 0.8125rem;
+  padding: 0.2rem 0.3rem;
+}
+
+td.choice select:disabled {
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
 /* Two words in one cell: the Docker state, and -- when there is a running
    container to ask -- whether its session is up. */
 .status {

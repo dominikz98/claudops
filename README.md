@@ -30,6 +30,7 @@ and files or pasted screenshots can be attached to a running instance. Everythin
 | UI login (shared secret) | Available, end-to-end tested |
 | Build and start-up progress | Available, end-to-end tested |
 | File and image attachments | Available, end-to-end tested |
+| Model and effort per instance | Available, end-to-end tested |
 
 ## Quick start
 

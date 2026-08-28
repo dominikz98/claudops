@@ -23,6 +23,11 @@ NOCAP="${CONTAINER}-nocap"
 # never reaches its tmux session looks like to the healthcheck.
 NOSESSION="${CONTAINER}-nosession"
 TEST_REPO="${TEST_REPO:-https://github.com/dominikz98/claudops.git}"
+# Issue #16: what the container is started with, and what a switch from the UI
+# writes over it. Aliases, not model ids -- the same list the server offers.
+START_MODEL='haiku'
+START_EFFORT='low'
+SWITCHED_MODEL='sonnet'
 TEST_BRANCH="${TEST_BRANCH:-main}"
 REPO_DIR="/workspace/claudops"
 MARKER="CLAUDOPS_SCROLLBACK_MARKER"
@@ -64,6 +69,8 @@ docker run -d --name "$CONTAINER" \
   -e REPO_BRANCH="$TEST_BRANCH" \
   -e GIT_USER_NAME="claudops" \
   -e GIT_USER_EMAIL="claudops@example.invalid" \
+  -e CLAUDE_MODEL="$START_MODEL" \
+  -e CLAUDE_EFFORT="$START_EFFORT" \
   ${CLAUDE_CODE_OAUTH_TOKEN:+-e CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN"} \
   "$IMAGE" >/dev/null || { bad "docker run"; exit 1; }
 
@@ -319,6 +326,57 @@ check "Without GIT_TOKEN nobody receives anything" "" \
   "$(docker exec -e GIT_TOKEN= "$CONTAINER" \
       sh -c 'printf "protocol=https\nhost=github.com\n\n" | git-credential-claudops get' \
       2>/dev/null | tr -d '\r')"
+
+# ------------------------------------------------- AC (#16): model and effort
+info "AC (#16): the container runs Claude Code at the chosen model and effort"
+
+# The pane command is `claude <args>`, so the arguments are on the process --
+# which is the only place that can prove the flags actually arrived. Several
+# processes carry them: the shell tmux started, the `claude` wrapper and the
+# node process behind it, hence "at least one" rather than a count.
+claude_args() { dexec pgrep -af 'claude' 2>/dev/null | tr -d '\r'; }
+
+# has_arg <description> <argument> -- present at least once
+has_arg() {
+  local found; found="$(claude_args | grep -c -- "$2")"
+  if [[ "${found:-0}" -ge 1 ]]; then
+    ok "$1"
+  else
+    bad "$1 (no process carries '$2')"
+    claude_args | sed 's/^/        /'
+  fi
+}
+
+# has_no_arg <description> <argument> -- present nowhere
+has_no_arg() {
+  local found; found="$(claude_args | grep -c -- "$2")"
+  if [[ "${found:-0}" -eq 0 ]]; then
+    ok "$1"
+  else
+    bad "$1 ('$2' is still on the command line)"
+    claude_args | sed 's/^/        /'
+  fi
+}
+
+has_arg "Started with --model $START_MODEL" "--model $START_MODEL"
+has_arg "Started with --effort $START_EFFORT" "--effort $START_EFFORT"
+
+# What claudops writes when the model is switched from the UI. The file wins
+# over the environment on the next start, and an *empty* one means "no flag" --
+# a removed file would fall back to the environment, which still says haiku.
+info "AC (#16): the override file survives a restart, the environment does not win"
+dexec sh -c 'mkdir -p ~/.claudops && printf %s "$1" > ~/.claudops/model && printf %s "" > ~/.claudops/effort' \
+  sh "$SWITCHED_MODEL" >/dev/null 2>&1 || bad "could not write the override files"
+
+docker restart "$CONTAINER" >/dev/null 2>&1 || bad "docker restart"
+for _ in $(seq 1 90); do
+  dexec pgrep -f 'claude' >/dev/null 2>&1 && break
+  sleep 1
+done
+
+has_arg "Restart uses the override" "--model $SWITCHED_MODEL"
+has_no_arg "CLAUDE_MODEL from the create no longer wins" "--model $START_MODEL"
+has_no_arg "The empty override file means no --effort at all" "--effort"
 
 # ------------------------------------------------------------ docker stop
 info "Clean stop (SIGTERM)"

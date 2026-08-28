@@ -57,6 +57,18 @@ const MIGRATIONS: readonly string[] = [
   `ALTER TABLE projects ADD COLUMN image_status   TEXT NOT NULL DEFAULT 'pending';
    ALTER TABLE projects ADD COLUMN image_log      TEXT;
    ALTER TABLE projects ADD COLUMN image_built_at TEXT;`,
+
+  // 4 -- the model and the effort level an instance runs Claude Code at. The
+  // second exception to "Docker holds the state": these are a decision, not a
+  // state. The container is started with them, and after a `docker restart`
+  // there is nothing left to ask -- the process is simply gone, so the choice
+  // has to be written down somewhere that outlives it.
+  //
+  // Both nullable, and NULL means "whatever Claude Code picks itself". That is
+  // also what every row from before this migration gets, which is the right
+  // answer for them: they were started without either flag.
+  `ALTER TABLE instances ADD COLUMN model  TEXT;
+   ALTER TABLE instances ADD COLUMN effort TEXT;`,
 ];
 
 export function schemaVersion(db: Database): number {

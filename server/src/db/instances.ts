@@ -14,6 +14,12 @@ export interface InstanceRecord {
   projectId: string | null;
   repoUrl: string | null;
   repoBranch: string | null;
+  /** Model alias and effort level Claude Code runs at. `null` on both means
+   *  "whatever Claude Code picks itself" -- no flag, no slash command. Unlike
+   *  `repoUrl` these are not a snapshot: they follow the instance, because
+   *  changing them is the point. */
+  model: string | null;
+  effort: string | null;
   createdAt: string;
 }
 
@@ -24,6 +30,8 @@ export interface NewInstance {
   projectId: string | null;
   repoUrl: string | null;
   repoBranch: string | null;
+  model: string | null;
+  effort: string | null;
   createdAt: string;
 }
 
@@ -35,6 +43,8 @@ interface InstanceRow {
   project_id: string | null;
   repo_url: string | null;
   repo_branch: string | null;
+  model: string | null;
+  effort: string | null;
   created_at: string;
 }
 
@@ -47,6 +57,8 @@ function toRecord(row: InstanceRow): InstanceRecord {
     projectId: row.project_id,
     repoUrl: row.repo_url,
     repoBranch: row.repo_branch,
+    model: row.model,
+    effort: row.effort,
     createdAt: row.created_at,
   };
 }
@@ -58,8 +70,10 @@ export class InstanceRepository {
     this.db
       .prepare(
         `INSERT INTO instances
-           (id, name, image, container_id, project_id, repo_url, repo_branch, created_at)
-         VALUES (@id, @name, @image, NULL, @projectId, @repoUrl, @repoBranch, @createdAt)`,
+           (id, name, image, container_id, project_id, repo_url, repo_branch,
+            model, effort, created_at)
+         VALUES (@id, @name, @image, NULL, @projectId, @repoUrl, @repoBranch,
+                 @model, @effort, @createdAt)`,
       )
       .run(instance);
 
@@ -68,6 +82,16 @@ export class InstanceRepository {
 
   attachContainer(id: string, containerId: string): void {
     this.db.prepare('UPDATE instances SET container_id = ? WHERE id = ?').run(containerId, id);
+  }
+
+  /** Records the model and effort an instance has been switched to. Both are
+   *  written together because the two always arrive together -- the caller
+   *  resolves "keep what is stored" before it gets here, so a `null` is a
+   *  deliberate "back to Claude Code's own default", never "unchanged". */
+  setModelEffort(id: string, model: string | null, effort: string | null): void {
+    this.db
+      .prepare('UPDATE instances SET model = ?, effort = ? WHERE id = ?')
+      .run(model, effort, id);
   }
 
   /**
