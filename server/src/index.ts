@@ -16,6 +16,7 @@ async function main(): Promise<void> {
     dotnetChannel: config.dotnetChannel,
     instanceEnv: config.instanceEnv,
     instanceLimits: config.instanceLimits,
+    uploadLimits: config.uploadLimits,
     cipher: config.cipher,
     auth: config.auth,
     secureCookie: config.secureCookie,

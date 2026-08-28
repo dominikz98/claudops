@@ -43,6 +43,7 @@ docker build -t claudops-base docker/base
 | `POST` | `/instances/:id/stop` | Stop the container, keep the instance. Answers `200` with its new status. |
 | `POST` | `/instances/:id/start` | Start it again. `200`, `409` when the instance has no container. |
 | `DELETE` | `/instances/:id` | Remove the container, its volumes and the instance. `204`, or `404` if unknown. |
+| `POST` | `/instances/:id/files` | Attach one file. Bytes as the body, name in `?name=`. Answers `201`. See [Attachments](#attachments). |
 | `GET` | `/instances/:id/terminal` | WebSocket: the instance console. See [Terminal](#terminal). |
 
 A project first, then an instance from it -- the answer to the first call carries
@@ -62,7 +63,8 @@ curl -s localhost:8080/instances \
 
 Status codes worth knowing: `400` for a body that fails validation -- including
 an unknown field, which is rejected rather than dropped -- `409` for a duplicate
-project name, a project still in use, or an instance whose container is gone,
+project name, a project still in use, or an instance whose container is gone or
+is not running, `413` for an attachment over one of the two upload limits,
 `422` when the referenced project does not exist or its image is not ready,
 `503` while the Docker daemon is unreachable.
 
@@ -237,6 +239,58 @@ package, resolved from the server's own location rather than from the working
 directory. A directory without an `index.html` -- a checkout where `pnpm build`
 never ran -- is not fatal: the server logs a warning and serves the API only.
 
+## Attachments
+
+`POST /instances/:id/files` puts one file into the instance and writes its path
+into the console, so it is in Claude's prompt without anybody typing it out.
+
+```bash
+curl -s -X POST --data-binary @screenshot.png \
+  -H 'content-type: application/octet-stream' \
+  'localhost:8080/instances/<id>/files?name=screenshot.png'
+```
+
+```json
+{
+  "name": "screenshot.png",
+  "path": "/workspace/.claudops/uploads/screenshot.png",
+  "size": 184320,
+  "announced": true
+}
+```
+
+One file per request, and the body is the bytes as they are -- no multipart: a
+single file needs no envelope, and a raw body is what lets the route own its
+`bodyLimit` and refuse an oversized one before it is read. The content type has
+to be `application/octet-stream`; anything Fastify parses itself answers `415`.
+
+**Where it lands.** `/workspace/.claudops/uploads/`, a *sibling* of the clone in
+`/workspace/<repo>`. An attachment therefore never turns up in the repository's
+`git status` and cannot be committed by accident -- a property of the path, not
+of a `.gitignore` somebody has to maintain. The file belongs to the container
+user `claude`, mode `0644`.
+
+**The name.** Only the last path segment survives, everything outside
+`[A-Za-z0-9._-]` becomes an underscore, leading dots go, and a name over 80
+characters is shortened from the front with its extension kept. So
+`?name=../../etc/passwd` writes `/workspace/.claudops/uploads/passwd` and nothing
+else. A name that is nothing but dots answers `400 invalid_filename`. A name
+that is already taken is overwritten -- which is why the browser gives a pasted
+screenshot a timestamp of its own.
+
+**`announced`.** `true` when the path was typed into the tmux session with
+`tmux send-keys -l` -- typed, not submitted: an Enter as well would send whatever
+was half-written in the prompt along with it. `false` for an instance whose
+session is not up yet; the file is there either way.
+
+**Limits.** `CLAUDOPS_UPLOAD_MAX_FILE` per request and
+`CLAUDOPS_UPLOAD_MAX_TOTAL` for everything one instance holds. Both answer
+`413 upload_too_large` with a message naming the limit; the per-request one is
+enforced by Fastify before the handler runs, so an oversized body is never read
+into memory. What an instance holds is read out of the container on every
+upload rather than counted in the database -- a `rm` in the console has to be
+visible immediately.
+
 ## Terminal
 
 `GET /instances/:id/terminal` upgrades to a WebSocket and attaches a
@@ -298,6 +352,8 @@ drives.
 | `CLAUDOPS_TMUX_SESSION` | `main` | Session the terminal attaches to. Matches `TMUX_SESSION` in the image; only a project image with its own entrypoint needs another. |
 | `CLAUDOPS_INSTANCE_CPUS` | `2` | CPU ceiling per instance, as `docker run --cpus` takes it. |
 | `CLAUDOPS_INSTANCE_MEMORY` | `4g` | Memory ceiling per instance: a byte count or a `b`/`k`/`m`/`g` suffix, at least `6m`. Swap is capped at the same value. |
+| `CLAUDOPS_UPLOAD_MAX_FILE` | `25m` | Largest single attachment, same notation. At least `1k`. |
+| `CLAUDOPS_UPLOAD_MAX_TOTAL` | `200m` | Everything one instance's uploads directory may hold. Must not be smaller than the per-file limit. |
 | `CLAUDOPS_SECRET_KEY` | – | 32 bytes, base64 or hex: encrypts the PAT a project stores. Without it a project can be created but not with a `gitToken`. |
 | `CLAUDOPS_LOGIN_SECRET` | – | **Required**, at least 16 characters. The shared secret `POST /login` takes. Without it the server exits 2 -- unlike the key above, because "unusable without a login" cannot hold if the login can be forgotten. |
 | `CLAUDOPS_SESSION_SECURE` | – | `1` marks the session cookie `Secure`. Only behind TLS: over plain HTTP the browser discards it and the login appears to do nothing. |
@@ -323,7 +379,8 @@ src/auth/routes.ts        login, logout, session
 src/projects/service.ts   projects: CRUD, the PAT, the in-use check
 src/projects/images.ts    the image builds: queue, status, log, startup sweep
 src/projects/routes.ts    REST endpoints and their schemas
-src/instances/service.ts  orchestration: rows, containers, status join, attach
+src/docker/tar.ts         the one archive putArchive takes: a single file
+src/instances/service.ts  orchestration: rows, containers, status join, attach, uploads
 src/instances/routes.ts   REST endpoints and their schemas
 src/terminal/protocol.ts  the wire format: frames, close codes
 src/terminal/bridge.ts    one socket to one TTY, both directions
@@ -339,9 +396,9 @@ scripts/ws-probe.ts       WebSocket client for the smoke test
 
 ```bash
 pnpm test                          # vitest, no Docker needed
-./server/smoke-test.sh             # the issue #3, #6, #7 and #8 acceptance criteria against real Docker
+./server/smoke-test.sh             # the issue #3, #6, #7, #8 and #15 acceptance criteria against real Docker
 ./server/terminal-smoke-test.sh    # the issue #4 acceptance criteria, real container and socket
-./e2e/run.sh                       # the issue #5, #6, #7 and #8 acceptance criteria, in a real browser
+./e2e/run.sh                       # the issue #5, #6, #7, #8 and #15 acceptance criteria, in a real browser
 ./docker/project/smoke-test.sh     # the toolchains, really inside a project image
 ```
 

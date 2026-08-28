@@ -1,14 +1,22 @@
-import { DEFAULT_INSTANCE_LIMITS, type InstanceEnvConfig } from '../config.ts';
+import {
+  DEFAULT_INSTANCE_LIMITS,
+  DEFAULT_UPLOAD_LIMITS,
+  type InstanceEnvConfig,
+  type UploadLimits,
+} from '../config.ts';
 import type { InstanceRepository } from '../db/instances.ts';
-import type {
-  ContainerLimits,
-  ContainerSpec,
-  ContainerSummary,
-  DockerEngine,
-  TerminalSession,
-  TerminalSize,
+import {
+  ContainerNotFoundError,
+  ContainerNotRunningError,
+  type ContainerLimits,
+  type ContainerSpec,
+  type ContainerSummary,
+  type DockerEngine,
+  type TerminalSession,
+  type TerminalSize,
 } from '../docker/engine.ts';
 import { containerName, instanceLabels } from '../docker/labels.ts';
+import { singleFileArchive } from '../docker/tar.ts';
 import { shortId } from '../ids.ts';
 import {
   ProjectImageNotReadyError,
@@ -45,6 +53,22 @@ export const TMUX_DETACH = Uint8Array.from([0x02, 0x64]);
  * which is the operator's decision, not the server's.
  */
 export const INSTANCE_CAPABILITIES: readonly string[] = ['NET_ADMIN'];
+
+/**
+ * Where an attachment lands. A sibling of the clone, never a directory inside
+ * it: the workspace holds `<repo>/` next to this, so an upload cannot turn up
+ * in the repository's `git status` and cannot be committed by accident -- which
+ * is a property of the path rather than of a `.gitignore` somebody maintains.
+ */
+export const UPLOAD_DIR = '/workspace/.claudops/uploads';
+
+/** Tar keeps 100 bytes for a name, and a path that has to stay readable in a
+ *  console has rather less patience than that. */
+const MAX_UPLOAD_NAME = 80;
+
+/** The longest extension worth preserving when a name has to be shortened.
+ *  Past this it is not a suffix any more, it is the rest of the name. */
+const MAX_EXTENSION = 10;
 
 /**
  * Whether the instance's console can be attached to -- a second axis next to
@@ -85,6 +109,93 @@ export interface InstanceView {
   /** Whether the console is attachable, as the container reports it. Read from
    *  Docker on every request, exactly like `status`. */
   session: SessionReadiness;
+}
+
+/** Bytes as a person reads them, for a message that has to say what was too
+ *  big. Binary units, like every other size in this server. */
+function describeBytes(bytes: number): string {
+  if (bytes < 1024) return `${String(bytes)} B`;
+
+  const units = ['KiB', 'MiB', 'GiB'];
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+
+  return `${value.toFixed(value < 10 ? 1 : 0)} ${units[unit] ?? 'B'}`;
+}
+
+/**
+ * The name an upload gets inside the container.
+ *
+ * Everything a browser sends is treated as hostile: only the last path segment
+ * survives, anything outside `[A-Za-z0-9._-]` becomes an underscore, and
+ * leading dots go -- which is what turns `..` into nothing and refuses it, and
+ * also keeps an attachment from hiding itself from an `ls`.
+ *
+ * The name never reaches a shell. It goes into a tar header and into the argv
+ * of `tmux send-keys`, so this is defence in depth rather than the only thing
+ * standing between a filename and the container.
+ */
+export function uploadFileName(raw: string): string {
+  const base = raw.split(/[\\/]/).pop() ?? '';
+  const cleaned = base.replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '');
+  if (cleaned === '') throw new InvalidUploadNameError(raw);
+  if (cleaned.length <= MAX_UPLOAD_NAME) return cleaned;
+
+  // Shortened from the front, not the back: the extension is what tells Claude
+  // it was handed a PNG.
+  const dot = cleaned.lastIndexOf('.');
+  const extension = dot > 0 && cleaned.length - dot <= MAX_EXTENSION ? cleaned.slice(dot) : '';
+  return cleaned.slice(0, MAX_UPLOAD_NAME - extension.length) + extension;
+}
+
+/** One file on its way into an instance. */
+export interface UploadInput {
+  /** As the browser sent it. Sanitised by `uploadFileName`, never used raw. */
+  name: string;
+  content: Uint8Array;
+}
+
+/** What an upload became inside the container. */
+export interface UploadView {
+  /** The sanitised name, which may differ from the one that was sent. */
+  name: string;
+  /** The absolute path in the container -- what Claude is told. */
+  path: string;
+  size: number;
+  /**
+   * Whether the path was written into the tmux session. `false` for an
+   * instance whose session is not up yet: the file is there either way, and
+   * refusing the upload over it would be the wrong trade.
+   */
+  announced: boolean;
+}
+
+export class InvalidUploadNameError extends Error {
+  constructor(readonly sent: string) {
+    super(`'${sent}' is not a usable file name`);
+    this.name = 'InvalidUploadNameError';
+  }
+}
+
+/** One of the two ceilings was hit. `scope` says which, because the way out
+ *  differs: a smaller file, or a cleanup inside the instance. */
+export class UploadTooLargeError extends Error {
+  constructor(
+    readonly scope: 'file' | 'instance',
+    readonly limitBytes: number,
+    readonly actualBytes: number,
+  ) {
+    super(
+      scope === 'file'
+        ? `the file is ${describeBytes(actualBytes)}, the limit per file is ${describeBytes(limitBytes)}`
+        : `the instance would then hold ${describeBytes(actualBytes)} of uploads, the limit is ${describeBytes(limitBytes)}`,
+    );
+    this.name = 'UploadTooLargeError';
+  }
 }
 
 export class InstanceNotFoundError extends Error {
@@ -173,6 +284,9 @@ export interface InstanceServiceOptions {
   /** What every instance container is capped at. Defaults to
    *  DEFAULT_INSTANCE_LIMITS, which is what the config falls back to as well. */
   limits?: ContainerLimits | undefined;
+  /** What may be uploaded into an instance. Defaults to
+   *  DEFAULT_UPLOAD_LIMITS, which is what the config falls back to as well. */
+  uploads?: UploadLimits | undefined;
   generateId?: () => string;
   now?: () => Date;
 }
@@ -182,6 +296,7 @@ export class InstanceService {
   private readonly projects: ProjectService;
   private readonly tmuxSession: string;
   private readonly limits: ContainerLimits;
+  private readonly uploads: UploadLimits;
   private readonly generateId: () => string;
   private readonly now: () => Date;
 
@@ -194,6 +309,7 @@ export class InstanceService {
     this.projects = options.projects;
     this.tmuxSession = options.tmuxSession ?? DEFAULT_TMUX_SESSION;
     this.limits = options.limits ?? DEFAULT_INSTANCE_LIMITS;
+    this.uploads = options.uploads ?? DEFAULT_UPLOAD_LIMITS;
     this.generateId = options.generateId ?? shortId;
     this.now = options.now ?? (() => new Date());
   }
@@ -393,6 +509,88 @@ export class InstanceService {
       size,
       closeInput: TMUX_DETACH,
     });
+  }
+
+  /**
+   * Puts one file into the instance's uploads directory and writes its path
+   * into the tmux session, so it is in Claude's prompt without anybody typing
+   * it out.
+   *
+   * The path is inserted, not submitted: `send-keys -l` types the characters
+   * and stops there. An Enter as well would send whatever the user had
+   * half-written in the prompt along with it.
+   */
+  async upload(id: string, input: UploadInput): Promise<UploadView> {
+    // Name and size first: both are answerable without Docker, and a request
+    // that cannot succeed should not cost a round trip to the daemon.
+    const name = uploadFileName(input.name);
+    const size = input.content.length;
+    if (size > this.uploads.maxFileBytes) {
+      throw new UploadTooLargeError('file', this.uploads.maxFileBytes, size);
+    }
+
+    const containerId = this.containerOf(id);
+    const summary = (await this.containerSummaries()).get(containerId);
+    if (summary === undefined) throw new ContainerNotFoundError(containerId);
+    if (summary.state !== 'running') throw new ContainerNotRunningError(containerId);
+
+    const used = await this.usedUploadBytes(containerId);
+    if (used + size > this.uploads.maxInstanceBytes) {
+      throw new UploadTooLargeError('instance', this.uploads.maxInstanceBytes, used + size);
+    }
+
+    // The archive carries the name; the target is the directory its entry is
+    // extracted into, which the reading above has just made sure exists.
+    await this.engine.putArchive(containerId, UPLOAD_DIR, singleFileArchive(name, input.content));
+
+    const path = `${UPLOAD_DIR}/${name}`;
+    const announced =
+      sessionOf(summary) === 'ready' ? await this.announce(containerId, path) : false;
+
+    return { name, path, size, announced };
+  }
+
+  /**
+   * What the uploads directory holds, in bytes, creating it on the way.
+   *
+   * `find -printf` rather than `du`: du counts the directory entry itself, so
+   * an empty uploads directory would already report four kilobytes against the
+   * quota. The summing happens here rather than in an `awk` the image is not
+   * guaranteed to carry.
+   */
+  private async usedUploadBytes(containerId: string): Promise<number> {
+    const result = await this.engine.runCommand(containerId, [
+      'sh',
+      '-c',
+      `mkdir -p ${UPLOAD_DIR} && find ${UPLOAD_DIR} -type f -printf '%s\\n'`,
+    ]);
+
+    if (result.exitCode !== 0) {
+      throw new Error(`the uploads directory is not usable: ${result.output.trim()}`);
+    }
+
+    return result.output
+      .split('\n')
+      .map((line) => Number.parseInt(line.trim(), 10))
+      .filter((bytes) => Number.isFinite(bytes))
+      .reduce((total, bytes) => total + bytes, 0);
+  }
+
+  /** Types the path into the pane. A tmux that refuses is not a failed upload:
+   *  the file is in the container, and the answer says the path was not
+   *  written. */
+  private async announce(containerId: string, path: string): Promise<boolean> {
+    const result = await this.engine.runCommand(containerId, [
+      'tmux',
+      'send-keys',
+      '-t',
+      this.tmuxSession,
+      // Literally, and with a trailing space so the next word the user types
+      // does not run into the path.
+      '-l',
+      `${path} `,
+    ]);
+    return result.exitCode === 0;
   }
 
   /** The container of an instance that has to have one. Everything that talks

@@ -125,6 +125,25 @@ else
   exit 1
 fi
 
+# And then wait for the container to *say* so. Since #29 the terminal endpoint
+# refuses a session the healthcheck has not confirmed, and that check runs every
+# five seconds -- so `tmux has-session` is true for a moment before `session` is,
+# and a probe started in that window is closed with `session_not_ready` before it
+# can type anything. The browser waits for exactly this too (e2e/tests/instance.spec.ts).
+session_state=""
+for _ in $(seq 1 60); do
+  session_state="$(json session <<<"$(body_of GET "/instances/$instance_id")")"
+  [[ "$session_state" == "ready" ]] && break
+  sleep 1
+done
+if [[ "$session_state" == "ready" ]]; then
+  ok "The instance reports its session as ready"
+else
+  bad "The instance never reported session: ready (last: '$session_state') -- docker logs:"
+  docker logs "$container_id" 2>&1 | sed 's/^/        /'
+  exit 1
+fi
+
 # Window 0 runs Claude, whose output depends on a token and on the day. A second
 # window with a plain login shell makes every check below deterministic without
 # touching the session the bridge is tested against.

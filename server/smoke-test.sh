@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Smoke test for claudops-server: checks the acceptance criteria from issues #3,
-# #6, #7 and #8 against a real Docker daemon and a real server process. #8 needs
-# two server processes on the same database -- the startup reconcile is only
-# observable across a restart.
+# #6, #7, #8 and #15 against a real Docker daemon and a real server process. #8
+# needs two server processes on the same database -- the startup reconcile is
+# only observable across a restart.
 #
 #   ./server/smoke-test.sh              # builds base image + server, then tests
 #   SKIP_BUILD=1 ./server/smoke-test.sh # uses what is already built
@@ -36,6 +36,15 @@ GIT_TOKEN_PROBE="smoke-pat-must-not-appear"
 # working credential into a temporary directory.
 OAUTH_PROBE="smoke-oauth-must-not-appear"
 PUBLIC_REPO="https://github.com/dominikz98/claudops.git"
+# Deliberately far below the defaults (#15): the refusal of a file over the
+# limit has to be reachable without pushing twenty-five megabytes through curl
+# on every run. Everything this script uploads is a few dozen bytes.
+UPLOAD_MAX_FILE="256k"
+# 600 KiB, so three 250 KB files are one too many and the per-instance ceiling
+# is reachable in three requests.
+UPLOAD_MAX_TOTAL="600k"
+UPLOAD_TOO_BIG_BYTES=300000
+UPLOAD_FILLER_BYTES=250000
 # Hex rather than base64: it survives every layer of quoting between here and
 # the server's environment without a thought.
 SECRET_KEY="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))')"
@@ -79,7 +88,9 @@ start_server "$PORT" "$DB_FILE_NATIVE" "$SERVER_LOG" \
   "CLAUDOPS_SECRET_KEY=$SECRET_KEY" \
   "CLAUDE_CODE_OAUTH_TOKEN=$OAUTH_PROBE" \
   'CLAUDOPS_GIT_USER_NAME=claudops' \
-  'CLAUDOPS_GIT_USER_EMAIL=claudops@example.invalid'
+  'CLAUDOPS_GIT_USER_EMAIL=claudops@example.invalid' \
+  "CLAUDOPS_UPLOAD_MAX_FILE=$UPLOAD_MAX_FILE" \
+  "CLAUDOPS_UPLOAD_MAX_TOTAL=$UPLOAD_MAX_TOTAL"
 server_pid="$SERVER_PID"
 
 if wait_for_health "$BASE"; then
@@ -342,6 +353,109 @@ check "The checked out branch is the one the project names" "main" \
   "$(docker exec "$clone_container" git -C /workspace/claudops rev-parse --abbrev-ref HEAD 2>/dev/null | tr -d '\r')"
 check "No token ends up in the remote URL" "0" \
   "$(docker exec "$clone_container" git -C /workspace/claudops remote get-url origin 2>/dev/null | grep -c '@')"
+
+
+# --------------------------------------------- #15: attachments reach the agent
+# Against the clone instance on purpose: only an instance with a real repository
+# can show that an upload stays out of its `git status`.
+info "#15: a file uploaded through the API arrives in the container"
+
+# curl rather than api(): the body of an upload is the file's bytes and its name
+# travels in the query, so the JSON helper cannot send one.
+upload() {
+  local id="$1" name="$2" file="$3" raw
+  raw="$(curl -s -w '\n%{http_code}' -b "$COOKIE_JAR_NATIVE" \
+    -X POST -H 'content-type: application/octet-stream' \
+    --data-binary "@$(native "$file")" "$BASE/instances/$id/files?name=$name")"
+  printf '%s\n%s' "$(tail -n1 <<<"$raw")" "$(sed '$d' <<<"$raw")"
+}
+
+# The session, not just the container: the path is typed into tmux, and tmux
+# exists a while after the container is up (#25).
+session_ready=""
+for _ in $(seq 1 90); do
+  if [[ "$(json session <<<"$(body_of GET "/instances/$clone_id")")" == "ready" ]]; then
+    session_ready="yes"
+    break
+  fi
+  sleep 2
+done
+check "The session is up before anything is attached" "yes" "$session_ready"
+
+probe_file="$WORK_DIR/upload-probe.png"
+printf 'PNG-PROBE-%s' "$" > "$probe_file"
+probe_bytes="$(wc -c < "$probe_file" | tr -d ' \r')"
+uploads_dir="/workspace/.claudops/uploads"
+
+uploaded="$(upload "$clone_id" "probe.png" "$probe_file")"
+upload_body="$(tail -n +2 <<<"$uploaded")"
+check "POST /instances/:id/files answers 201" "201" "$(head -1 <<<"$uploaded")"
+check "The answer names the path outside the clone" "$uploads_dir/probe.png" \
+  "$(json path <<<"$upload_body")"
+check "The answer reports the size that was sent" "$probe_bytes" "$(json size <<<"$upload_body")"
+
+check "AC 2: the file is really in the container, byte for byte" "$(cat "$probe_file")" \
+  "$(docker exec "$clone_container" cat "$uploads_dir/probe.png" 2>/dev/null | tr -d '\r')"
+# The tar header carries uid 1001; a 0 there would hand the agent a file it
+# cannot write (knowledge/putarchive-writes-the-uid-from-the-tar-header.md).
+check "It belongs to the agent, not to root" "claude" \
+  "$(docker exec "$clone_container" stat -c '%U' "$uploads_dir/probe.png" 2>/dev/null | tr -d '\r')"
+
+check "AC 1: the path was written into the tmux session" "true" \
+  "$(json announced <<<"$upload_body")"
+if docker exec "$clone_container" tmux capture-pane -p -t main 2>/dev/null \
+     | tr -d '\r' | grep -qF "$uploads_dir/probe.png"; then
+  ok "The path is visible in the pane, so it is in the prompt"
+else
+  bad "The path never reached the tmux pane"
+fi
+
+# AC 3. The uploads directory is a sibling of the clone, not a child of it, so
+# this holds by the path rather than by a .gitignore.
+check "AC 3: the upload does not show up in git status" "" \
+  "$(docker exec "$clone_container" git -C /workspace/claudops status --porcelain 2>/dev/null | tr -d '\r')"
+
+traversal="$(upload "$clone_id" "..%2F..%2Fetc%2Fpasswd" "$probe_file")"
+check "A traversal in the name stays inside the uploads directory" "$uploads_dir/passwd" \
+  "$(json path <<<"$(tail -n +2 <<<"$traversal")")"
+check "And nothing was written outside it" "0" \
+  "$(docker exec "$clone_container" grep -c 'PNG-PROBE' /etc/passwd 2>/dev/null | tr -d '\r')"
+
+info "#15 AC 4: a file over the limit is refused and the server stays up"
+big_file="$WORK_DIR/too-big.bin"
+head -c "$UPLOAD_TOO_BIG_BYTES" /dev/zero > "$big_file"
+
+oversize="$(upload "$clone_id" "too-big.bin" "$big_file")"
+check "An upload over CLAUDOPS_UPLOAD_MAX_FILE answers 413" "413" "$(head -1 <<<"$oversize")"
+check "The refusal says what was wrong" "upload_too_large" \
+  "$(json error <<<"$(tail -n +2 <<<"$oversize")")"
+check "Nothing of it was written" "" \
+  "$(docker exec "$clone_container" ls "$uploads_dir/too-big.bin" 2>/dev/null | tr -d '\r')"
+check "The server is still healthy afterwards" "200" "$(status_of GET /health)"
+check "And still takes a file that fits" "201" \
+  "$(head -1 <<<"$(upload "$clone_id" "after-the-refusal.txt" "$probe_file")")"
+
+
+# The per-instance ceiling is the one assertion that proves the byte
+# accounting really reads the container: the server sums what `find -printf`
+# reported over a demultiplexed exec stream, and a stream read raw would
+# produce no number at all and let all three through
+# (knowledge/a-non-tty-exec-is-framed.md).
+info "#15: the per-instance ceiling counts what is already in the container"
+filler_file="$WORK_DIR/filler.bin"
+head -c "$UPLOAD_FILLER_BYTES" /dev/zero > "$filler_file"
+
+check "The first filler fits" "201" \
+  "$(head -1 <<<"$(upload "$clone_id" "filler-1.bin" "$filler_file")")"
+check "The second one still fits" "201" \
+  "$(head -1 <<<"$(upload "$clone_id" "filler-2.bin" "$filler_file")")"
+third_filler="$(upload "$clone_id" "filler-3.bin" "$filler_file")"
+check "The third is over CLAUDOPS_UPLOAD_MAX_TOTAL" "413" "$(head -1 <<<"$third_filler")"
+check "And says so" "upload_too_large" \
+  "$(json error <<<"$(tail -n +2 <<<"$third_filler")")"
+check "Deleting one in the container frees the budget again" "201" \
+  "$(docker exec "$clone_container" rm "$uploads_dir/filler-1.bin" >/dev/null 2>&1; \
+     head -1 <<<"$(upload "$clone_id" "filler-3.bin" "$filler_file")")"
 
 check "DELETE of the clone instance answers 204" "204" "$(status_of DELETE "/instances/$clone_id")"
 check "DELETE of the clone project answers 204" "204" "$(status_of DELETE "/projects/$clone_project")"

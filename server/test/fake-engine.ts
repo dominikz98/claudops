@@ -5,6 +5,7 @@ import {
   DockerUnavailableError,
   ImageNotFoundError,
   type AttachTerminalOptions,
+  type CommandResult,
   type ContainerHealth,
   type ContainerSpec,
   type ContainerSummary,
@@ -93,6 +94,17 @@ interface FakeContainer {
   health: ContainerHealth | undefined;
 }
 
+interface PutArchive {
+  containerId: string;
+  targetDir: string;
+  archive: Uint8Array;
+}
+
+interface RunCommand {
+  containerId: string;
+  command: string[];
+}
+
 interface FakeVolume {
   name: string;
   labels: Record<string, string>;
@@ -135,6 +147,24 @@ export class FakeDockerEngine implements DockerEngine {
    *  sends immediately would lose its frames. */
   attachDelayMs = 0;
   readonly terminals: FakeTerminalSession[] = [];
+  /** Every archive that was put into a container, in order. */
+  readonly archives: PutArchive[] = [];
+  /** Every one-shot command, in order -- the mkdir, the du and the
+   *  `tmux send-keys` an upload runs. */
+  readonly commands: RunCommand[] = [];
+  /** What the fake `find -printf '%s'` reports: bytes already lying in the
+   *  uploads directory. */
+  uploadUsage = 0;
+  /** Set to make the next runCommand fail with exactly this error. */
+  failNextCommand: Error | undefined;
+  /** What runCommand answers. Replaced by a test that needs another answer;
+   *  the default plays a container whose uploads directory holds
+   *  `uploadUsage` bytes. */
+  commandResult: (command: string[]) => CommandResult = (command) =>
+    command.join(' ').includes('-printf')
+      ? { exitCode: 0, output: this.uploadUsage === 0 ? '' : `${String(this.uploadUsage)}
+` }
+      : { exitCode: 0, output: '' };
 
   private sequence = 0;
 
@@ -242,6 +272,27 @@ export class FakeDockerEngine implements DockerEngine {
     return Promise.resolve(session);
   }
 
+  async putArchive(containerId: string, targetDir: string, archive: Uint8Array): Promise<void> {
+    this.guard();
+    this.requireRunning(containerId);
+    this.archives.push({ containerId, targetDir, archive: Uint8Array.from(archive) });
+    return Promise.resolve();
+  }
+
+  async runCommand(containerId: string, command: string[]): Promise<CommandResult> {
+    this.guard();
+    this.requireRunning(containerId);
+
+    if (this.failNextCommand !== undefined) {
+      const error = this.failNextCommand;
+      this.failNextCommand = undefined;
+      throw error;
+    }
+
+    this.commands.push({ containerId, command });
+    return Promise.resolve(this.commandResult(command));
+  }
+
   async buildImage(spec: ImageBuildSpec, onLog: (chunk: string) => void): Promise<void> {
     this.guard();
     this.builds.push(spec);
@@ -273,6 +324,19 @@ export class FakeDockerEngine implements DockerEngine {
   }
 
   /** Test helpers -------------------------------------------------------- */
+
+  /** The archive that was put last, as text -- every upload in these tests is
+   *  a small one, and its bytes start at offset 512 behind the tar header. */
+  lastArchive(): PutArchive {
+    const archive = this.archives.at(-1);
+    if (archive === undefined) throw new Error('no archive was put');
+    return archive;
+  }
+
+  /** The commands whose argv starts with `tmux`. What an upload announces. */
+  tmuxCommands(): string[][] {
+    return this.commands.filter((entry) => entry.command[0] === 'tmux').map((e) => e.command);
+  }
 
   /** The session of the connection that attached last. */
   lastTerminal(): FakeTerminalSession {
@@ -346,6 +410,14 @@ export class FakeDockerEngine implements DockerEngine {
   /** Simulate a container that vanished behind the server's back. */
   forget(containerId: string): void {
     this.containers.delete(containerId);
+  }
+
+  /** Both new calls need a container that is up, exactly like the real
+   *  daemon: 404 for one it does not have, 409 for one that is not running. */
+  private requireRunning(containerId: string): void {
+    const container = this.containers.get(containerId);
+    if (container === undefined) throw new ContainerNotFoundError(containerId);
+    if (container.state !== 'running') throw new ContainerNotRunningError(containerId);
   }
 
   private guard(): void {

@@ -245,6 +245,49 @@ describe('api client', () => {
   });
 });
 
+describe('uploads', () => {
+  const upload = {
+    name: 'shot.png',
+    path: '/workspace/.claudops/uploads/shot.png',
+    size: 4,
+    announced: true,
+  };
+
+  it('posts the bytes as the body and the name in the query', async () => {
+    const { fetch, calls } = fakeFetch(() => json(upload, 201));
+
+    await expect(createApi(fetch).upload('abc123', 'shot.png', new Blob(['data']))).resolves.toEqual(
+      upload,
+    );
+    expect(calls[0]?.url).toBe('/instances/abc123/files?name=shot.png');
+    expect(calls[0]?.init?.method).toBe('POST');
+    // Not the blob's own type: the server has a parser for exactly this one.
+    expect(calls[0]?.init?.headers).toEqual({ 'content-type': 'application/octet-stream' });
+    expect(calls[0]?.init?.body).toBeInstanceOf(Blob);
+  });
+
+  it('escapes a name that would otherwise change the query', async () => {
+    const { fetch, calls } = fakeFetch(() => json(upload, 201));
+
+    await createApi(fetch).upload('abc123', 'a b&c=d.png', new Blob(['x']));
+
+    expect(calls[0]?.url).toBe('/instances/abc123/files?name=a%20b%26c%3Dd.png');
+  });
+
+  it('turns a refusal into an ApiCallError the console can print', async () => {
+    const { fetch } = fakeFetch(() =>
+      json({ error: 'upload_too_large', message: 'the file is 30.0 MiB' }, 413),
+    );
+
+    const error = await createApi(fetch)
+      .upload('abc123', 'big.bin', new Blob(['x']))
+      .catch((reason: unknown) => reason);
+
+    expect(error).toBeInstanceOf(ApiCallError);
+    expect((error as ApiCallError).code).toBe('upload_too_large');
+  });
+});
+
 describe('the login half of the API', () => {
   it('posts the secret and expects a cookie to be set by the server', async () => {
     const { fetch, calls } = fakeFetch(() =>

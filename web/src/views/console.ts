@@ -1,9 +1,12 @@
 /**
- * One instance console: xterm.js on one end, the terminal bridge on the other.
+ * One instance console: xterm.js on one end, the terminal bridge on the other,
+ * and a way to hand the instance a file.
  *
  * Nothing about the session lives here. Scrollback, the running Claude and the
  * geometry are in the container's tmux session, which is why a reload is a
- * reconnect and not a restore.
+ * reconnect and not a restore. An attachment does not live here either: it goes
+ * to the server as bytes, and what comes back is the path the server already
+ * typed into the pane.
  */
 
 import { FitAddon } from '@xterm/addon-fit';
@@ -13,6 +16,7 @@ import '@xterm/xterm/css/xterm.css';
 import { ApiCallError, type Api } from '../api.ts';
 import { clear, el } from '../dom.ts';
 import { routeHash } from '../router.ts';
+import { pastedFileName } from '../upload.ts';
 import {
   connectTerminal,
   type TerminalConnection,
@@ -25,12 +29,36 @@ import type { View } from './view.ts';
  *  the user stopped at. */
 const RESIZE_DEBOUNCE_MS = 100;
 
+/** One file on its way up, with the name it should carry -- which is not always
+ *  the one it has: a pasted screenshot is `image.png` every time. */
+interface Attachment {
+  name: string;
+  blob: Blob;
+}
+
+function describe(error: unknown): string {
+  if (error instanceof ApiCallError) return `${error.code}: ${error.message}`;
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** A clipboard image carries a name only by convention, and always the same
+ *  one. Anything else keeps what it was called. */
+function attachmentsOf(files: readonly File[], fromClipboard: boolean): Attachment[] {
+  return files.map((file) => ({
+    name: fromClipboard && file.type.startsWith('image/') ? pastedFileName(file.type) : file.name,
+    blob: file,
+  }));
+}
+
 export function mountConsole(root: HTMLElement, api: Api, id: string): View {
   let connection: TerminalConnection | undefined;
   let lastNotice: TerminalNotice | undefined;
   let resizeTimer: number | undefined;
   let sent: TerminalSize = { cols: 0, rows: 0 };
   let destroyed = false;
+  /** One upload at a time, so the Attach button cannot start a second run over
+   *  a queue that is still being worked through. */
+  let uploading = false;
 
   const title = el('h1', { 'data-testid': 'instance-name' }, id);
   const status = el('span', { class: 'status-text', 'data-testid': 'status' }, 'connecting');
@@ -40,6 +68,25 @@ export function mountConsole(root: HTMLElement, api: Api, id: string): View {
     'Reconnect',
   );
   const screen = el('div', { class: 'screen', 'data-testid': 'terminal' });
+
+  // Three ways in, one code path behind them: the picker, a drop on the screen
+  // and a paste that carries files rather than text.
+  const picker = el('input', {
+    type: 'file',
+    multiple: 'multiple',
+    hidden: 'hidden',
+    'data-testid': 'attach-input',
+  });
+  const attach = el(
+    'button',
+    { type: 'button', class: 'secondary', 'data-testid': 'attach' },
+    'Attach',
+  );
+  const uploadStatus = el('span', {
+    class: 'upload-status',
+    hidden: 'hidden',
+    'data-testid': 'upload-status',
+  });
 
   const terminal = new Terminal({
     // 10_000 lines is xterm's side of the scrollback; the container keeps its
@@ -99,6 +146,82 @@ export function mountConsole(root: HTMLElement, api: Api, id: string): View {
     connection?.send(Uint8Array.from(data, (character) => character.charCodeAt(0) & 0xff)),
   );
 
+  const setUpload = (text: string, state: string): void => {
+    uploadStatus.textContent = text;
+    uploadStatus.setAttribute('data-state', state);
+    uploadStatus.removeAttribute('hidden');
+  };
+
+  /**
+   * One request per file, one after the other: the server types every path into
+   * the pane, so two uploads in flight would interleave their paths in the
+   * prompt. Three files dropped together are three lines, in the order they
+   * were dropped.
+   */
+  const send = async (attachments: readonly Attachment[]): Promise<void> => {
+    if (attachments.length === 0 || uploading) return;
+
+    uploading = true;
+    attach.setAttribute('disabled', 'disabled');
+    try {
+      for (const [index, attachment] of attachments.entries()) {
+        const of = attachments.length > 1 ? ` (${String(index + 1)}/${String(attachments.length)})` : '';
+        setUpload(`uploading ${attachment.name}${of}`, 'busy');
+
+        const upload = await api.upload(id, attachment.name, attachment.blob);
+        setUpload(
+          upload.announced
+            ? `attached ${upload.path}`
+            : `uploaded to ${upload.path} -- the session is not up, so nothing was typed`,
+          upload.announced ? 'done' : 'warn',
+        );
+      }
+      // The path is in the prompt now; the cursor should be there too.
+      terminal.focus();
+    } catch (error) {
+      setUpload(describe(error), 'error');
+    } finally {
+      uploading = false;
+      attach.removeAttribute('disabled');
+    }
+  };
+
+  attach.addEventListener('click', () => picker.click());
+  picker.addEventListener('change', () => {
+    const files = [...(picker.files ?? [])];
+    // Cleared so the same file can be picked a second time -- otherwise the
+    // input reports no change and nothing happens.
+    picker.value = '';
+    void send(attachmentsOf(files, false));
+  });
+
+  // Without preventDefault on dragover the browser navigates to the file
+  // instead of letting it be dropped.
+  screen.addEventListener('dragover', (event) => {
+    event.preventDefault();
+    screen.classList.add('dropping');
+  });
+  screen.addEventListener('dragleave', () => screen.classList.remove('dropping'));
+  screen.addEventListener('drop', (event) => {
+    event.preventDefault();
+    screen.classList.remove('dropping');
+    void send(attachmentsOf([...(event.dataTransfer?.files ?? [])], false));
+  });
+
+  // Capture, and only when the clipboard really carries files: a text paste has
+  // to reach xterm untouched, which is where bracketed paste comes from.
+  screen.addEventListener(
+    'paste',
+    (event) => {
+      const files = [...(event.clipboardData?.files ?? [])];
+      if (files.length === 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+      void send(attachmentsOf(files, true));
+    },
+    true,
+  );
+
   const applyFit = (): void => {
     fit.fit();
     const next = geometry();
@@ -124,7 +247,7 @@ export function mountConsole(root: HTMLElement, api: Api, id: string): View {
       { class: 'console-header' },
       el('a', { class: 'back', href: routeHash({ view: 'list' }), 'data-testid': 'back' }, '← Instances'),
       title,
-      el('span', { class: 'status-line' }, status, reconnect),
+      el('span', { class: 'status-line' }, uploadStatus, status, attach, reconnect, picker),
     ),
     screen,
   );
