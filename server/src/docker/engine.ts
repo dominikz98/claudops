@@ -106,6 +106,16 @@ export interface TerminalSession {
   close(): void;
 }
 
+/**
+ * What a one-shot `docker exec` reported. Not a terminal: no TTY, no stream
+ * to keep, just the output and how the command ended.
+ */
+export interface CommandResult {
+  exitCode: number;
+  /** stdout and stderr, in the order Docker framed them. */
+  output: string;
+}
+
 /** What one `docker build` needs. No build-context contents here: the template
  *  in docker/project has no COPY, so the context is the Dockerfile and nothing
  *  else. */
@@ -192,6 +202,18 @@ export interface DockerEngine {
   /** Attaches a TTY exec to a running container. Throws
    *  ContainerNotFoundError or ContainerNotRunningError. */
   attachTerminal(containerId: string, options: AttachTerminalOptions): Promise<TerminalSession>;
+  /**
+   * Extracts a tar archive into `targetDir` inside the container. The
+   * directory has to exist -- Docker's extraction does not create it, which is
+   * what the `mkdir -p` before every upload is for.
+   */
+  putArchive(containerId: string, targetDir: string, archive: Uint8Array): Promise<void>;
+  /**
+   * Runs one command in the container and waits for it. Everything
+   * `attachTerminal` is not: no TTY, no duplex, and an exit code at the end --
+   * which is what a `mkdir`, a `du` or a `tmux send-keys` needs.
+   */
+  runCommand(containerId: string, command: string[]): Promise<CommandResult>;
   /**
    * Builds an image and streams the daemon's output through `onLog` as it
    * arrives, so a caller can persist the log of a build that then fails.

@@ -167,6 +167,12 @@ Or directly on the host, which needs no server at all:
 docker exec -it claudops-<id> tmux attach -t main
 ```
 
+To show Claude a file or a screenshot, use **Attach** in the console header,
+drop the file onto the terminal, or paste an image from the clipboard. It is
+uploaded into `/workspace/.claudops/uploads/` in the container -- next to the
+clone, never inside it -- and its path is typed into the prompt for you. Write
+your question after it and press Enter.
+
 Detach with `Ctrl-b d`. Claude keeps running, and attaching again finds the
 session and the scrollback where you left them -- the same is true if your
 connection simply drops. `cols` and `rows` are optional and only decide how the

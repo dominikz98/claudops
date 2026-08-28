@@ -57,3 +57,6 @@ Format and maintenance rules: skill `domain-knowledge`.
 - [Claude Code asks three questions on a first start, and a container is always a first start](claude-onboarding-must-be-pre-seeded.md) - the theme picker is not a login, and a clone is its own trust root
 - [A container that withholds Claude may be hitting GitHub's rate limit, not a firewall bug](github-meta-is-rate-limited.md) - 60 `/meta` calls an hour, one per container start
 - [`playwright.request.newContext()` inherits `use.storageState`, so an "anonymous" API context is logged in](playwright-request-context-inherits-storage-state.md) - the 401 test that asserted against a session
+- [A `docker exec` without a TTY hands back a framed stream, one with a TTY does not](a-non-tty-exec-is-framed.md) - the byte count that comes out plausible instead of wrong
+- [`putArchive` gives the file the uid from the tar header, not the container's user](putarchive-writes-the-uid-from-the-tar-header.md) - the attachment the agent can read but not delete
+- [A raw body needs both a content-type parser and a route `bodyLimit`](a-raw-upload-needs-a-parser-and-its-own-bodylimit.md) - 415 without the first, 413 at one megabyte without the second

@@ -27,6 +27,9 @@ describe('instance REST API', () => {
         firewallAllow: undefined,
       },
       cipher: testCipher(),
+      // Small on purpose: the 413 of an upload has to be reachable without
+      // injecting twenty-five megabytes into every run.
+      uploadLimits: { maxFileBytes: 512, maxInstanceBytes: 2048 },
       logLevel: 'silent',
     });
     await app.ready();
@@ -258,6 +261,106 @@ describe('instance REST API', () => {
 
       expect(response.statusCode).toBe(409);
       expect(response.json<{ error: string }>().error).toBe('container_missing');
+    });
+  });
+
+
+  describe('POST /instances/:id/files', () => {
+    let instanceId = '';
+
+    const put = (name: string, body: Buffer | string, contentType = 'application/octet-stream') =>
+      app.inject({
+        method: 'POST',
+        url: `/instances/${instanceId}/files?name=${encodeURIComponent(name)}`,
+        headers: { 'content-type': contentType },
+        payload: body,
+      });
+
+    beforeEach(async () => {
+      instanceId = (await create({ name: 'demo', projectId })).json<{ id: string }>().id;
+    });
+
+    it('takes the bytes as the body and answers with the container path', async () => {
+      const response = await put('shot.png', Buffer.from('not really a png'));
+
+      expect(response.statusCode).toBe(201);
+      expect(response.json()).toEqual({
+        name: 'shot.png',
+        path: '/workspace/.claudops/uploads/shot.png',
+        size: 16,
+        announced: true,
+      });
+      expect(engine.archives).toHaveLength(1);
+    });
+
+    it('sanitises the name it was given', async () => {
+      const response = await put('../../etc/passwd', Buffer.from('x'));
+
+      expect(response.statusCode).toBe(201);
+      expect(response.json<{ path: string }>().path).toBe('/workspace/.claudops/uploads/passwd');
+    });
+
+    it('refuses a name that is nothing but dots', async () => {
+      const response = await put('..', Buffer.from('x'));
+
+      expect(response.statusCode).toBe(400);
+      expect(response.json<{ error: string }>().error).toBe('invalid_filename');
+    });
+
+    it('refuses a request without a name at all', async () => {
+      const response = await app.inject({
+        method: 'POST',
+        url: `/instances/${instanceId}/files`,
+        headers: { 'content-type': 'application/octet-stream' },
+        payload: Buffer.from('x'),
+      });
+
+      expect(response.statusCode).toBe(400);
+    });
+
+    it('refuses a body that was not sent as bytes', async () => {
+      const response = await put('note.txt', 'plain text', 'text/plain');
+
+      expect(response.statusCode).toBe(415);
+      expect(engine.archives).toEqual([]);
+    });
+
+    it('refuses a file over the limit and stays up', async () => {
+      // maxFileBytes is 512 for this app; Fastify refuses before the handler.
+      const response = await put('big.bin', Buffer.alloc(600, 0x41));
+
+      expect(response.statusCode).toBe(413);
+      expect(response.json<{ error: string }>().error).toBe('upload_too_large');
+      expect(engine.archives).toEqual([]);
+      // AC 4: the refusal is not a crash -- the next request is answered.
+      expect((await app.inject({ method: 'GET', url: '/health' })).statusCode).toBe(200);
+      expect((await put('small.bin', Buffer.from('ok'))).statusCode).toBe(201);
+    });
+
+    it('refuses a file the instance has no room left for', async () => {
+      // maxInstanceBytes is 2048 for this app.
+      engine.uploadUsage = 2000;
+
+      const response = await put('shot.png', Buffer.alloc(100, 0x41));
+
+      expect(response.statusCode).toBe(413);
+      expect(response.json<{ error: string; message: string }>()).toMatchObject({
+        error: 'upload_too_large',
+      });
+    });
+
+    it('answers 409 for a container that is not running', async () => {
+      await app.inject({ method: 'POST', url: `/instances/${instanceId}/stop` });
+
+      const response = await put('shot.png', Buffer.from('x'));
+
+      expect(response.statusCode).toBe(409);
+    });
+
+    it('answers 404 for an instance nobody has', async () => {
+      instanceId = 'does-not-exist';
+
+      expect((await put('shot.png', Buffer.from('x'))).statusCode).toBe(404);
     });
   });
 

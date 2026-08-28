@@ -35,6 +35,15 @@ instance started from an image built before #25, with no way back short of
 rebuilding the project and recreating the instance. `ready` degrades to the
 behaviour that existed before the healthcheck did.
 
+**Every harness has to wait for it, not for tmux.** `tmux has-session` inside
+the container is true a few seconds before `session` is: the healthcheck runs
+every five seconds, so there is a window in which the session exists and the
+terminal endpoint still refuses. A test that polls the container directly and
+then connects is closed with `session_not_ready` and reports something else --
+`server/terminal-smoke-test.sh` did exactly that between #29 and #15 and failed
+eleven checks that had nothing to do with the terminal. Wait on
+`GET /instances/:id` reporting `session: ready`, which is what the browser does.
+
 **Applies to.** `docker/base/Dockerfile`, `server/src/instances/service.ts`
 (`SessionReadiness`, `SessionNotReadyError`), `server/src/terminal/routes.ts`,
 `web/src/views/list.ts`, issue #25.

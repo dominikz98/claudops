@@ -72,6 +72,11 @@ export default defineConfig({
       // Mandatory since #9: without it the server refuses to start. Same shape
       // as the key above, and global-setup.ts logs in with it.
       CLAUDOPS_LOGIN_SECRET: LOGIN_SECRET,
+      // Far below the defaults (#15): upload.spec.ts has to reach the refusal
+      // of an oversized file, and pushing twenty-five megabytes through a file
+      // picker on every run would be minutes for one assertion.
+      CLAUDOPS_UPLOAD_MAX_FILE: '64k',
+      CLAUDOPS_UPLOAD_MAX_TOTAL: '1m',
       CLAUDOPS_LOG_LEVEL: 'warn',
     },
   },
