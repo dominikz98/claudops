@@ -112,15 +112,26 @@ fi
 
 terminal_url="ws://127.0.0.1:$PORT/instances/$instance_id/terminal"
 
-# The bridge attaches to the session the entrypoint starts, so wait for it.
-for _ in $(seq 1 30); do
-  docker exec "$container_id" tmux has-session -t main >/dev/null 2>&1 && break
+# The bridge attaches to the session the entrypoint starts, so wait for it --
+# and wait for the *server* to agree, not only for tmux.
+#
+# Since #25 the bridge refuses an attach until the container's healthcheck has
+# reported the session, and that check runs every five seconds. `tmux
+# has-session` is true before the first one lands, so a connect right after it
+# is answered with `session_not_ready`, the socket closes, and every assertion
+# below reads an empty screen -- a flake that only shows up on a busy host.
+session_ready=''
+for _ in $(seq 1 60); do
+  if [[ "$(json session <<<"$(body_of GET "/instances/$instance_id")")" == 'ready' ]]; then
+    session_ready='yes'
+    break
+  fi
   sleep 1
 done
-if docker exec "$container_id" tmux has-session -t main >/dev/null 2>&1; then
-  ok "tmux session 'main' is up in the container"
+if [[ -n "$session_ready" ]]; then
+  ok "tmux session 'main' is up and the server reports it attachable"
 else
-  bad "tmux session never appeared -- docker logs:"
+  bad "the session never became attachable -- docker logs:"
   docker logs "$container_id" 2>&1 | sed 's/^/        /'
   exit 1
 fi
