@@ -1,5 +1,5 @@
 import { resolve } from 'node:path';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { migrate } from '../src/db/migrations.ts';
 import { ProjectRepository } from '../src/db/projects.ts';
@@ -99,6 +99,63 @@ describe('ProjectImageBuilder', () => {
       await builder.build(id);
 
       expect(imageOf(id)?.log).toBe('Step 1/3 : FROM claudops-base\nStep 2/3 : RUN true\n');
+    });
+
+    it('writes the log away while the build is still running', async () => {
+      // The point of the whole exercise: `GET /projects/:id/build-log` reads
+      // the same column, so a five-minute build is readable while it runs
+      // instead of staying empty until it ends.
+      engine.buildOutput = ['Step 1/3 : FROM claudops-base\n'];
+      engine.buildDelayMs = 20;
+      const id = addProject('slow');
+
+      // Not awaited: the fake emits its output before it stalls, which is the
+      // state a reader finds mid-build.
+      const running = builder.build(id);
+
+      expect(imageOf(id)).toMatchObject({
+        status: 'building',
+        log: 'Step 1/3 : FROM claudops-base\n',
+      });
+
+      await running;
+      expect(imageOf(id)?.status).toBe('ready');
+    });
+
+    it('throttles those writes instead of rewriting the log per line', async () => {
+      // A real build emits a line per apt package, and every write rewrites the
+      // whole accumulated log. `now` stands still here, so nothing but the
+      // first chunk falls outside the flush window.
+      const writes = vi.spyOn(repository, 'setImageState');
+      engine.buildOutput = ['a\n', 'b\n', 'c\n', 'd\n'];
+      const id = addProject('chatty');
+
+      await builder.build(id);
+
+      // The `building` marker at the start, and the first chunk. The three
+      // after it are inside the window.
+      expect(writes.mock.calls.filter((call) => call[1] === 'building')).toHaveLength(2);
+      expect(imageOf(id)?.log).toBe('a\nb\nc\nd\n');
+    });
+
+    it('writes again once the flush window has passed', async () => {
+      let clock = Date.parse('2026-08-25T09:00:00.000Z');
+      const ticking = new ProjectImageBuilder(projects, repository, engine, {
+        contextDir: '/build/context',
+        baseImage: 'claudops-base',
+        dotnetChannel: '10.0',
+        logger: silent,
+        logFlushMs: 1000,
+        // Two seconds per call, so every chunk is outside the window.
+        now: () => new Date((clock += 2000)),
+      });
+      const writes = vi.spyOn(repository, 'setImageState');
+      engine.buildOutput = ['a\n', 'b\n', 'c\n'];
+      const id = addProject('long');
+
+      await ticking.build(id);
+
+      expect(writes.mock.calls.filter((call) => call[1] === 'building')).toHaveLength(4);
     });
 
     it('records a failure with its output and the reason', async () => {

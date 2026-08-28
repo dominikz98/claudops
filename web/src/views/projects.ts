@@ -6,7 +6,8 @@
  * this page changes it, and a poll would fight the form for the fields being
  * typed into. The exception is a running image build -- that one is the server
  * changing the project, so the page refreshes while any build is in flight and
- * stops again once they are all done.
+ * stops again once they are all done. An open build log is re-read on the same
+ * beat, because the server writes it away as the build produces it.
  *
  * The PAT is write-only: the server answers with `hasGitToken` and never with
  * the value, so this page can show that one is stored but never what it is.
@@ -38,6 +39,18 @@ function imageLabel(status: ImageStatus): string {
   return status === 'pending' ? 'queued' : status;
 }
 
+/** Both states mean "the server is going to change this project on its own",
+ *  which is what the poll and the log follow. */
+function inFlight(status: ImageStatus): boolean {
+  return status === 'building' || status === 'pending';
+}
+
+/** Which build a stored log belongs to. Every transition changes one half:
+ *  a build that starts changes the status, one that finishes changes both. */
+function imageKey(status: ImageStatus, builtAt: string | null): string {
+  return `${status}|${builtAt ?? ''}`;
+}
+
 interface Field {
   input: HTMLInputElement;
   wrapper: HTMLElement;
@@ -52,6 +65,11 @@ export function mountProjects(root: HTMLElement, api: Api): View {
   /** The project whose build log is open, and the log itself once it arrives. */
   let showingLog: string | undefined;
   let logText = '';
+  /** Which build the open log belongs to, as `status|builtAt`. What makes the
+   *  *last* read happen after the build ended: a poll that saw `building` one
+   *  beat before the build finished would otherwise leave the panel one flush
+   *  short of the whole log, forever. */
+  let logAt: string | undefined;
   /** Set while a build is in flight, cleared as soon as none is. */
   let poll: ReturnType<typeof setTimeout> | undefined;
   let destroyed = false;
@@ -176,9 +194,7 @@ export function mountProjects(root: HTMLElement, api: Api): View {
 
   /** Keeps the timer running exactly as long as something is being built. */
   const scheduleWhileBuilding = (): void => {
-    const building = projects.some(
-      (project) => project.image.status === 'building' || project.image.status === 'pending',
-    );
+    const building = projects.some((project) => inFlight(project.image.status));
 
     if (!building || destroyed) {
       if (poll !== undefined) clearTimeout(poll);
@@ -203,6 +219,20 @@ export function mountProjects(root: HTMLElement, api: Api): View {
     } catch (error) {
       if (destroyed) return;
       showError(error);
+      return;
+    }
+
+    // The log of a build in flight grows while it runs -- the server writes it
+    // away as the daemon produces it -- so an open panel is re-read here rather
+    // than showing whatever was in the database when it was opened. The second
+    // condition is the read *after* it: the poll stops as soon as nothing is in
+    // flight, and without it the panel would keep whatever the last flush
+    // happened to carry. A log belonging to a build that has not moved is not
+    // fetched again -- it cannot have changed.
+    const open = projects.find((project) => project.id === showingLog);
+    if (open === undefined) return;
+    if (inFlight(open.image.status) || imageKey(open.image.status, open.image.builtAt) !== logAt) {
+      await loadLog(open.id);
     }
   }
 
@@ -216,23 +246,17 @@ export function mountProjects(root: HTMLElement, api: Api): View {
     await refresh();
   };
 
-  const toggleLog = async (id: string): Promise<void> => {
-    if (showingLog === id) {
-      showingLog = undefined;
-      logText = '';
-      renderRows();
-      return;
-    }
-
-    showingLog = id;
-    logText = 'loading…';
-    renderRows();
-
+  /** Reads one project's build log and paints it -- unless the panel was closed
+   *  or moved to another project while the request was in flight. */
+  async function loadLog(id: string): Promise<void> {
     try {
-      const { log } = await api.projectBuildLog(id);
+      // The status comes from this answer rather than from the list: it is the
+      // one the log itself was read at, which is what `refresh` compares.
+      const { log, status, builtAt } = await api.projectBuildLog(id);
       if (destroyed || showingLog !== id) return;
       // A build that never ran has no log; saying so beats an empty box.
       logText = log === '' ? 'No build output yet.' : log;
+      logAt = imageKey(status, builtAt);
       clearError();
     } catch (error) {
       if (destroyed) return;
@@ -240,6 +264,22 @@ export function mountProjects(root: HTMLElement, api: Api): View {
       showError(error);
     }
     renderRows();
+  }
+
+  const toggleLog = async (id: string): Promise<void> => {
+    if (showingLog === id) {
+      showingLog = undefined;
+      logText = '';
+      logAt = undefined;
+      renderRows();
+      return;
+    }
+
+    showingLog = id;
+    logText = 'loading…';
+    logAt = undefined;
+    renderRows();
+    await loadLog(id);
   };
 
   const save = async (): Promise<void> => {

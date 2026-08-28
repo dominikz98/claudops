@@ -19,6 +19,9 @@ CONTAINER="${CONTAINER:-claudops-smoke}"
 # A second container, started *without* --cap-add=NET_ADMIN, to check what the
 # entrypoint does when the firewall cannot come up.
 NOCAP="${CONTAINER}-nocap"
+# A third one, with its entrypoint replaced by a sleep: what a container that
+# never reaches its tmux session looks like to the healthcheck.
+NOSESSION="${CONTAINER}-nosession"
 TEST_REPO="${TEST_REPO:-https://github.com/dominikz98/claudops.git}"
 TEST_BRANCH="${TEST_BRANCH:-main}"
 REPO_DIR="/workspace/claudops"
@@ -42,7 +45,7 @@ check() {
 
 dexec() { docker exec "$CONTAINER" "$@"; }
 
-cleanup() { docker rm -f "$CONTAINER" "$NOCAP" >/dev/null 2>&1; }
+cleanup() { docker rm -f "$CONTAINER" "$NOCAP" "$NOSESSION" >/dev/null 2>&1; }
 trap cleanup EXIT
 
 # ---------------------------------------------------------------- build & start
@@ -127,6 +130,40 @@ check "The clone directory is trusted" "true" \
       /home/claude/.claude.json 2>/dev/null | tr -d '\r')"
 check "No Claude token in the config" "0" \
   "$(dexec grep -c 'sk-ant' /home/claude/.claude.json 2>/dev/null | tr -d '\r')"
+
+# ------------------------------------------------ AC (#25): readiness reporting
+info "AC (#25): the container reports whether its session is up"
+
+# The healthcheck is what the claudops server reads to tell "container running"
+# from "console attachable". A timer on the server side would get this wrong for
+# every repository size, which is why the container answers instead.
+health=''
+for _ in $(seq 1 30); do
+  health="$(docker inspect -f '{{.State.Health.Status}}' "$CONTAINER" 2>/dev/null | tr -d '\r')"
+  [[ "$health" == 'healthy' ]] && break
+  sleep 1
+done
+check "Health reports the session as up" "healthy" "$health"
+
+# The other half: a container that never reaches tmux has to end somewhere
+# rather than stay `starting` for as long as it runs. The intervals are cut down
+# on the command line -- the image's own start period is five minutes, which is
+# a clone of a large repository over a slow line and far more than a smoke test
+# may take.
+info "AC (#25): a container that never starts tmux ends unhealthy"
+docker rm -f "$NOSESSION" >/dev/null 2>&1
+docker run -d --name "$NOSESSION" \
+  --entrypoint sh \
+  --health-start-period=2s --health-interval=1s --health-retries=2 \
+  "$IMAGE" -c 'sleep 300' >/dev/null
+nosession=''
+for _ in $(seq 1 30); do
+  nosession="$(docker inspect -f '{{.State.Health.Status}}' "$NOSESSION" 2>/dev/null | tr -d '\r')"
+  [[ "$nosession" == 'unhealthy' ]] && break
+  sleep 1
+done
+check "Health gives up rather than staying on start-up forever" "unhealthy" "$nosession"
+docker rm -f "$NOSESSION" >/dev/null 2>&1
 
 info "AC 2: runs as non-root"
 check "User is 'claude'" "claude" "$(dexec id -un 2>/dev/null | tr -d '\r')"

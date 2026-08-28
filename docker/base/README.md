@@ -64,7 +64,7 @@ drops.
 | `FIREWALL_MODE` | `enforce` | `off` skips the firewall entirely. The operator's escape hatch, never the agent's -- and it is also what makes `CLAUDE_ARGS` unsafe. |
 | `FIREWALL_REFRESH_SECONDS` | `900` | How often the whitelist is re-resolved, because CDN addresses rotate. `0` disables it. |
 | `WORKSPACE_DIR` | `/workspace` | Base directory for clones. |
-| `TMUX_SESSION` | `main` | Session name the bridge attaches to. |
+| `TMUX_SESSION` | `main` | Session name the bridge attaches to, and the one the healthcheck looks for. |
 | `TERM` | `xterm-256color` | Without it `tmux attach` from a `docker exec` fails with "terminal does not support clear". A client with its own `TERM` overrides it. |
 | `LANG` | `C.UTF-8` | Tells tmux the attaching client can take UTF-8. Without it every multi-byte character leaves the tmux server as `_` and Claude's TUI arrives as rows of underscores. |
 
@@ -108,6 +108,13 @@ drops.
   (`knowledge/claude-onboarding-must-be-pre-seeded.md`). Pre-accepting the
   bypass-permissions warning is the same decision as the `CLAUDE_ARGS` default
   above, not an additional one.
+- **The container reports when its session is up.** A `HEALTHCHECK` runs
+  `tmux has-session -t "$TMUX_SESSION"` every five seconds, so
+  `docker inspect -f '{{.State.Health.Status}}'` tells "the container started"
+  apart from "a console can attach". claudops reads exactly that and keeps its
+  Console button disabled until then. The start period is five minutes, which is
+  a large clone over a slow line; past it, a container that still has no session
+  goes `unhealthy` rather than staying on `starting` forever.
 - **Restarting the container on the same volume** skips the clone if the target
   directory already is a git repo.
 - **`docker stop`** shuts the tmux server down cleanly via SIGTERM.

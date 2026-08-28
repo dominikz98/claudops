@@ -11,7 +11,8 @@ Projects hold a repository, a branch, its credential and an environment that is
 prebuilt as an image; instances are created from them, driven, stopped and deleted
 from a browser page on the server's own port, a console survives a refresh, each
 instance runs under a CPU and memory ceiling, and leftovers are reconciled away at
-every server start. Everything else is planned; see the
+every server start. A build's log grows on the page while it runs, and an instance
+says whether its Claude session is up rather than only whether its container is. Everything else is planned; see the
 [issues](https://github.com/dominikz98/claudops/issues) and
 [EPIC #1](https://github.com/dominikz98/claudops/issues/1).
 
@@ -26,6 +27,7 @@ every server start. Everything else is planned; see the
 | Lifecycle, limits, recycling | Available, end-to-end tested |
 | Egress firewall (default-deny whitelist) | Available, smoke-tested |
 | UI login (shared secret) | Available, end-to-end tested |
+| Build and start-up progress | Available, end-to-end tested |
 
 ## Quick start
 

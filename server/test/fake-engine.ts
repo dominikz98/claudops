@@ -5,6 +5,7 @@ import {
   DockerUnavailableError,
   ImageNotFoundError,
   type AttachTerminalOptions,
+  type ContainerHealth,
   type ContainerSpec,
   type ContainerSummary,
   type DockerEngine,
@@ -85,6 +86,11 @@ interface FakeContainer {
   containerId: string;
   spec: ContainerSpec;
   state: string;
+  /** What the container's healthcheck would report. `healthy` by default so a
+   *  test that is not about readiness gets a container it can attach to;
+   *  `setHealth` plays the other three answers, `undefined` among them -- that
+   *  is an image without a HEALTHCHECK. */
+  health: ContainerHealth | undefined;
 }
 
 interface FakeVolume {
@@ -149,7 +155,7 @@ export class FakeDockerEngine implements DockerEngine {
 
     this.sequence += 1;
     const containerId = `container-${this.sequence}`;
-    this.containers.set(containerId, { containerId, spec, state: 'running' });
+    this.containers.set(containerId, { containerId, spec, state: 'running', health: 'healthy' });
     return Promise.resolve(containerId);
   }
 
@@ -205,6 +211,8 @@ export class FakeDockerEngine implements DockerEngine {
           instanceId: instanceIdFromLabels(container.spec.labels),
           state: container.state,
           status: `Up (${container.state})`,
+          // Only a running container reports one, exactly like the real engine.
+          health: container.state === 'running' ? container.health : undefined,
         })),
     );
   }
@@ -282,6 +290,13 @@ export class FakeDockerEngine implements DockerEngine {
     if (container !== undefined) container.state = state;
   }
 
+  /** What the container's healthcheck says. `undefined` plays an image that
+   *  carries none. */
+  setHealth(containerId: string, health: ContainerHealth | undefined): void {
+    const container = this.containers.get(containerId);
+    if (container !== undefined) container.health = health;
+  }
+
   /** A container on the same host that claudops does not own. */
   addUnmanagedContainer(containerId: string): void {
     this.containers.set(containerId, {
@@ -296,6 +311,7 @@ export class FakeDockerEngine implements DockerEngine {
         capAdd: [],
       },
       state: 'running',
+      health: 'healthy',
     });
   }
 
@@ -315,6 +331,7 @@ export class FakeDockerEngine implements DockerEngine {
         capAdd: [],
       },
       state: 'running',
+      health: 'healthy',
     });
   }
 

@@ -3,6 +3,7 @@ import type { InstanceRepository } from '../db/instances.ts';
 import type {
   ContainerLimits,
   ContainerSpec,
+  ContainerSummary,
   DockerEngine,
   TerminalSession,
   TerminalSize,
@@ -45,6 +46,23 @@ export const TMUX_DETACH = Uint8Array.from([0x02, 0x64]);
  */
 export const INSTANCE_CAPABILITIES: readonly string[] = ['NET_ADMIN'];
 
+/**
+ * Whether the instance's console can be attached to -- a second axis next to
+ * the Docker state, because "the container runs" and "the tmux session is up"
+ * are minutes apart: the entrypoint installs a firewall and clones a repository
+ * before it starts anything.
+ *
+ * Who answers this is the point. It comes from the container's own healthcheck
+ * (`tmux has-session` in `docker/base/Dockerfile`), not from a timer the server
+ * runs against the container's start time.
+ *
+ * - `none` -- nothing to attach to: no container, or one that is not running.
+ * - `starting` -- the container runs, the session is not up yet.
+ * - `ready` -- attachable.
+ * - `failed` -- the healthcheck gave up: the entrypoint never reached tmux.
+ */
+export type SessionReadiness = 'none' | 'starting' | 'ready' | 'failed';
+
 export interface CreateInstanceInput {
   name: string;
   /** Repository, branch and PAT all come from here -- an instance is created
@@ -64,6 +82,9 @@ export interface InstanceView {
   createdAt: string;
   /** Raw Docker state, or `missing`. Never read from the database. */
   status: string;
+  /** Whether the console is attachable, as the container reports it. Read from
+   *  Docker on every request, exactly like `status`. */
+  session: SessionReadiness;
 }
 
 export class InstanceNotFoundError extends Error {
@@ -80,6 +101,26 @@ export class ContainerMissingError extends Error {
   constructor(readonly id: string) {
     super(`instance '${id}' has no container`);
     this.name = 'ContainerMissingError';
+  }
+}
+
+/**
+ * The container runs but its session is not attachable. Thrown *before* the
+ * exec rather than after it: `tmux attach` against a session that does not
+ * exist yet exits non-zero, and by then the socket is open and the only thing
+ * left to say is `session_failed`.
+ */
+export class SessionNotReadyError extends Error {
+  constructor(
+    readonly id: string,
+    readonly readiness: SessionReadiness,
+  ) {
+    super(
+      readiness === 'failed'
+        ? `the session of instance '${id}' never came up -- see 'docker logs'`
+        : `the session of instance '${id}' is still starting`,
+    );
+    this.name = 'SessionNotReadyError';
   }
 }
 
@@ -100,6 +141,28 @@ export interface ReconcileReport {
   /** Instances whose container is gone and who now say so. */
   endedInstances: string[];
   failures: ReconcileFailure[];
+}
+
+/**
+ * Docker's view of one container, read as "can a console attach to it".
+ *
+ * A container whose image carries no healthcheck reports nothing, and that is
+ * deliberately read as `ready`: an instance started from an image built before
+ * the healthcheck existed would otherwise have its console disabled forever,
+ * with no way back short of rebuilding the project and recreating the instance.
+ * Everything built from `docker/base` since #25 does answer.
+ */
+function sessionOf(summary: ContainerSummary | undefined): SessionReadiness {
+  if (summary === undefined || summary.state !== 'running') return 'none';
+
+  switch (summary.health) {
+    case 'starting':
+      return 'starting';
+    case 'unhealthy':
+      return 'failed';
+    default:
+      return 'ready';
+  }
 }
 
 export interface InstanceServiceOptions {
@@ -181,23 +244,22 @@ export class InstanceService {
       throw error;
     }
 
-    return { ...record, containerId, status: 'running' };
+    // `starting`, without asking Docker: the container was started microseconds
+    // ago, so no healthcheck has run yet and the answer is known. Saying
+    // anything else here would hand the caller a console it cannot attach to.
+    return { ...record, containerId, status: 'running', session: 'starting' };
   }
 
   async list(): Promise<InstanceView[]> {
-    const states = await this.containerStates();
-    return this.repository.list().map((record) => ({
-      ...record,
-      status: this.statusOf(record.containerId, states),
-    }));
+    const containers = await this.containerSummaries();
+    return this.repository.list().map((record) => this.view(record, containers));
   }
 
   async get(id: string): Promise<InstanceView> {
     const record = this.repository.get(id);
     if (record === undefined) throw new InstanceNotFoundError(id);
 
-    const states = await this.containerStates();
-    return { ...record, status: this.statusOf(record.containerId, states) };
+    return this.view(record, await this.containerSummaries());
   }
 
   async delete(id: string): Promise<void> {
@@ -309,7 +371,17 @@ export class InstanceService {
    * what makes a reconnect find its scrollback and its running Claude again.
    */
   async openTerminal(id: string, size?: TerminalSize): Promise<TerminalSession> {
-    return this.engine.attachTerminal(this.containerOf(id), {
+    const containerId = this.containerOf(id);
+
+    // Asked before the exec, not diagnosed after it. `none` is deliberately not
+    // refused here: a container that is not running has its own error from the
+    // attach, and "not running" says more than "not ready".
+    const readiness = sessionOf((await this.containerSummaries()).get(containerId));
+    if (readiness === 'starting' || readiness === 'failed') {
+      throw new SessionNotReadyError(id, readiness);
+    }
+
+    return this.engine.attachTerminal(containerId, {
       // `attach`, not `new -A`: the session belongs to the entrypoint, and
       // creating one here would produce a console nobody is watching over.
       //
@@ -358,14 +430,23 @@ export class InstanceService {
     }
   }
 
-  private async containerStates(): Promise<Map<string, string>> {
+  private async containerSummaries(): Promise<Map<string, ContainerSummary>> {
     const containers = await this.engine.listManagedContainers();
-    return new Map(containers.map((container) => [container.containerId, container.state]));
+    return new Map(containers.map((container) => [container.containerId, container]));
   }
 
-  private statusOf(containerId: string | null, states: Map<string, string>): string {
-    if (containerId === null) return MISSING_STATUS;
-    return states.get(containerId) ?? MISSING_STATUS;
+  /** The database row plus the two things only Docker knows. Both are joined in
+   *  one place so `list` and `get` cannot drift apart. */
+  private view(
+    record: Omit<InstanceView, 'status' | 'session'>,
+    containers: Map<string, ContainerSummary>,
+  ): InstanceView {
+    const summary = record.containerId === null ? undefined : containers.get(record.containerId);
+    return {
+      ...record,
+      status: summary?.state ?? MISSING_STATUS,
+      session: sessionOf(summary),
+    };
   }
 
   private specFor(id: string, template: ProjectTemplate): ContainerSpec {

@@ -52,6 +52,8 @@ Format and maintenance rules: skill `domain-knowledge`.
 - [A browser WebSocket cannot set a header, so the credential is a cookie](a-browser-websocket-cannot-set-a-header.md) - and a root onRequest hook does gate the upgrade
 - [A hook that refuses a WebSocket upgrade has to destroy the socket itself](refusing-a-websocket-upgrade-leaks-its-socket.md) - otherwise the server never shuts down again
 - [The session cookie is stateless, so logout is client-side only](the-session-cookie-is-stateless.md) - what rotating the login secret actually does
+- ["Running" is not "attachable" -- the container reports which](session-readiness-comes-from-the-container.md) - the healthcheck, and why its start period is five minutes
+- [The container list carries health only as prose](docker-list-does-not-carry-health.md) - the structured value is on the inspect
 - [Claude Code asks three questions on a first start, and a container is always a first start](claude-onboarding-must-be-pre-seeded.md) - the theme picker is not a login, and a clone is its own trust root
 - [A container that withholds Claude may be hitting GitHub's rate limit, not a firewall bug](github-meta-is-rate-limited.md) - 60 `/meta` calls an hour, one per container start
 - [`playwright.request.newContext()` inherits `use.storageState`, so an "anonymous" API context is logged in](playwright-request-context-inherits-storage-state.md) - the 401 test that asserted against a session

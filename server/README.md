@@ -38,7 +38,7 @@ docker build -t claudops-base docker/base
 | `GET` | `/projects/:id/build-log` | `{ status, builtAt, log }` of the last build. |
 | `DELETE` | `/projects/:id` | Remove a project and its image. `204`, `404` if unknown, `409` while instances point at it. |
 | `POST` | `/instances` | Start an instance from a project. Body: `name`, `projectId` (both required). Answers `201` with the instance. |
-| `GET` | `/instances` | All instances, each with the status Docker reports. |
+| `GET` | `/instances` | All instances, each with the status Docker reports and whether its session is attachable. |
 | `GET` | `/instances/:id` | One instance. `404` if unknown. |
 | `POST` | `/instances/:id/stop` | Stop the container, keep the instance. Answers `200` with its new status. |
 | `POST` | `/instances/:id/start` | Start it again. `200`, `409` when the instance has no container. |
@@ -150,8 +150,12 @@ curl -s -X POST localhost:8080/projects/<id>/build
 curl -s localhost:8080/projects/<id>/build-log
 ```
 
-The stored log is capped at the last 64 KiB, with a line saying what was dropped.
-The tail is where the failing step is, and the database is not a log server.
+The log is written away while the build runs, at most once a second, so a build in
+flight answers with a log that grows rather than with nothing until it ends. It is
+capped at the last 64 KiB, with a line saying what was dropped: the tail is where
+the failing step is, and the database is not a log server. A rebuild clears the
+previous log when it puts the image back to `pending`, so what is readable always
+belongs to the build the status names.
 
 On startup the server picks up what a restart interrupted: a project still marked
 `building` is a leftover -- no build survives the process that ran it -- and goes
@@ -173,6 +177,25 @@ outside:
 docker inspect -f '{{.HostConfig.NanoCpus}} {{.HostConfig.Memory}}' claudops-<id>
 docker stats claudops-<id>
 ```
+
+**Readiness.** `status` is the raw Docker state; `session` is whether a console
+can attach, which is a different question. The entrypoint installs an egress
+firewall and clones a repository before it starts anything, so a container is
+`running` seconds to minutes before its tmux session exists. The base image
+answers that itself, with a `HEALTHCHECK` running `tmux has-session`:
+
+| `session` | Meaning |
+| --- | --- |
+| `starting` | The container runs, the session is not up yet. |
+| `ready` | Attachable. The only state `GET /instances/:id/terminal` opens an exec in. |
+| `failed` | The check kept failing past its five-minute start period -- the entrypoint never reached tmux. `docker logs` says why. |
+| `none` | No running container to ask. |
+
+The web UI disables its Console button for everything but `ready`, and the
+terminal endpoint refuses `starting` and `failed` with `session_not_ready` before
+it creates an exec. An instance whose image carries no healthcheck -- one built
+before this existed -- reports `ready` while its container runs, which is the
+behaviour that preceded the field.
 
 **Stop and start.** `POST /instances/:id/stop` stops the container and keeps
 everything in it -- the workspace, the clone, the git state. `POST
@@ -244,7 +267,7 @@ Close codes, mirroring the HTTP status the same condition would get:
 | --- | --- |
 | `1000` | The session ended: somebody detached with `Ctrl-b d`, the shell exited, the container stopped. |
 | `4404` | No such instance. |
-| `4409` | The instance exists but has no attachable container, or the terminal process exited non-zero -- which is what "no tmux session to attach to" looks like. |
+| `4409` | The instance exists but has no attachable container. The error frame names which case: `not_running`, `no_container`, or `session_not_ready` for a container whose tmux session is not up. |
 | `4500` | Server-side failure. |
 | `4503` | The Docker daemon did not answer. |
 

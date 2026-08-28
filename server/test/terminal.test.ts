@@ -257,6 +257,30 @@ describe('terminal bridge over WebSocket', () => {
     expect(engine.terminals).toHaveLength(0);
   });
 
+  it('refuses while the session is not up yet, instead of failing the attach', async () => {
+    // The console button is disabled for exactly this state, so a client only
+    // gets here by URL -- and it still must not be told the session failed,
+    // because nothing has failed.
+    const { id, containerId } = await createInstance();
+    engine.setHealth(containerId, 'starting');
+
+    const client = await connect(`/instances/${id}/terminal`);
+
+    expect(await client.closed).toMatchObject({ code: TerminalClose.conflict });
+    expect(JSON.parse(client.notices[0] ?? '{}')).toMatchObject({ code: 'session_not_ready' });
+    expect(engine.terminals).toHaveLength(0);
+  });
+
+  it('refuses a container whose session never came up', async () => {
+    const { id, containerId } = await createInstance();
+    engine.setHealth(containerId, 'unhealthy');
+
+    const client = await connect(`/instances/${id}/terminal`);
+
+    expect(JSON.parse(client.notices[0] ?? '{}')).toMatchObject({ code: 'session_not_ready' });
+    expect(engine.terminals).toHaveLength(0);
+  });
+
   it('refuses a stopped container', async () => {
     const { id, containerId } = await createInstance();
     engine.setState(containerId, 'exited');

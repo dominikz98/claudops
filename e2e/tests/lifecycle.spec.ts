@@ -75,10 +75,18 @@ test('AC: an instance can be stopped and started again from the list', async () 
   await expect(row().getByTestId('status')).toHaveText('exited', { timeout: STATE_TIMEOUT });
   // Stopped, not deleted: the container and everything in it is still there.
   expect(containersFor(instanceId)).toEqual([containerId.slice(0, 12)]);
+  // #25 AC: no container, no session -- and no Console button to press.
+  await expect(row().getByTestId('session')).toHaveCount(0);
+  await expect(row().getByTestId('console')).toBeDisabled();
 
   await row().getByTestId('start').click();
 
   await expect(row().getByTestId('status')).toHaveText('running', { timeout: STATE_TIMEOUT });
+  // A restart puts the healthcheck back to `starting`, so the console comes
+  // back only once the entrypoint has built its session again -- a firewall and
+  // a clone attempt further than the container state alone.
+  await expect(row().getByTestId('session')).toHaveText('ready', { timeout: 60_000 });
+  await expect(row().getByTestId('console')).toBeEnabled();
 });
 
 test('AC: after a delete no container and no volume of the instance remains', async () => {

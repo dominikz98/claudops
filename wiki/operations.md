@@ -11,11 +11,18 @@ up again without touching the instance, and **Delete** asks twice and then takes
 the container and its volumes with it. A project whose image is not built yet
 cannot be picked in the create form -- the option says which state it is in.
 
+Next to the Docker status stands a second badge, the *session*: a container is
+`running` from the moment it starts, but its Claude session only exists once the
+entrypoint has installed the egress firewall and cloned the repository. **Console**
+stays disabled until that badge says `ready`, because until then there is nothing
+to attach to. See [Is the session up](#is-the-session-up).
+
 **Projects** in the top right manages the templates instances are created from.
 Each row carries the state of its image, with **Rebuild** and **Build log** next
 to it. The page normally does not poll, because nothing but this page changes a
 project; while a build is running it refreshes every two seconds, because then the
-server does.
+server does -- and an open build log is re-read on the same beat, so the output of
+a running build grows on the page instead of appearing only when it ends.
 
 The UI is behind a shared secret. The first page you get is a login form; it
 takes `CLAUDOPS_LOGIN_SECRET` and leaves a session cookie that lasts twelve
@@ -89,6 +96,29 @@ The two lists should agree. Where they do not, the status says which way:
 
 A container in `docker ps` that is *not* in the instance list was started by
 hand. It carries no `claudops.instance` label, so nothing below will find it.
+
+## Is the session up
+
+`running` says the container exists. Whether a console can attach to it is the
+`session` field next to it, and it comes from the container's own healthcheck --
+`tmux has-session`, every five seconds:
+
+```bash
+curl -s localhost:8080/instances | grep -o '"session":"[a-z]*"'
+docker inspect -f '{{.State.Health.Status}}' claudops-<id>
+```
+
+| Session | Meaning |
+| --- | --- |
+| `starting` | The container is up and the entrypoint has not reached tmux yet: the firewall is being installed, or the repository is being cloned. **Console** is disabled. Normal for the first seconds; for a large repository, for minutes. |
+| `ready` | The tmux session exists. **Console** is enabled, and this is the only state in which the terminal endpoint attaches. |
+| `failed` | The check kept failing past its five-minute start period: the entrypoint never reached tmux. `docker logs claudops-<id>` says why. **Delete** and create again, or **Stop**/**Start** to let the entrypoint run once more. |
+| `none` | There is no running container to ask -- the instance is `exited` or `missing`. |
+
+An instance started from a project image built before this existed carries no
+healthcheck. It reports `ready` as soon as its container runs, which is the
+behaviour that preceded the field; rebuild the project image to get the real
+answer.
 
 ## Project images
 
@@ -191,9 +221,11 @@ Claude followed by a login shell, so if Claude exited you land in bash with the
 session still alive. `docker logs` shows whether the clone worked.
 
 **The console closes immediately.** The close code says why: `4404` no such
-instance, `4409` the container is not running (or there is no tmux session to
-attach to), `4503` the Docker daemon is unreachable. `wscat` prints the code on
-disconnect.
+instance, `4409` the container cannot be attached to, `4503` the Docker daemon is
+unreachable. The error frame before the close names the case: `not_running` for a
+stopped container, `no_container` for an instance whose container is gone, and
+`session_not_ready` for one whose tmux session is not up -- which is what the
+disabled **Console** button in the UI is about. `wscat` prints both.
 
 **The console closed by itself after `Ctrl-P Ctrl-Q`.** That is Docker's own
 detach sequence for an exec, and it takes the connection down before the bytes

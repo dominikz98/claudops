@@ -7,6 +7,7 @@ import {
   ImageBuildFailedError,
   ImageNotFoundError,
   type AttachTerminalOptions,
+  type ContainerHealth,
   type ContainerSpec,
   type ContainerSummary,
   type DockerEngine,
@@ -58,6 +59,15 @@ const NANO_CPUS_PER_CPU = 1_000_000_000;
  *  cols/rows -- swapping these two is a silent one-character-off bug. */
 function consoleSize(size: TerminalSize): [number, number] {
   return [size.rows, size.cols];
+}
+
+/** Docker's three health strings, and nothing else: `none` -- what it reports
+ *  for an image without a HEALTHCHECK -- becomes `undefined`, because "there is
+ *  no answer" is not the same as "the answer is bad". */
+function toHealth(status: string | undefined): ContainerHealth | undefined {
+  return status === 'starting' || status === 'healthy' || status === 'unhealthy'
+    ? status
+    : undefined;
 }
 
 /** One line of the build response body. Everything is optional -- the daemon
@@ -245,12 +255,35 @@ export class DockerodeEngine implements DockerEngine {
       throw this.translate(error);
     }
 
-    return containers.map((info) => ({
+    // The list carries the health only inside its human-readable `Status`
+    // ("Up 2 minutes (healthy)"); the structured value lives on the inspect.
+    // One extra call per *running* container, in parallel -- a stopped one has
+    // no session to be ready.
+    const health = await Promise.all(
+      containers.map(async (info) =>
+        info.State === 'running' ? await this.healthOf(info.Id) : undefined,
+      ),
+    );
+
+    return containers.map((info, index) => ({
       containerId: info.Id,
       instanceId: instanceIdFromLabels(info.Labels),
       state: info.State,
       status: info.Status,
+      health: health[index],
     }));
+  }
+
+  /** Never throws: a container that went away between the list and the inspect
+   *  is one whose health nobody needs any more, and a list that fails over it
+   *  would be worse than one that reports `undefined`. */
+  private async healthOf(containerId: string): Promise<ContainerHealth | undefined> {
+    try {
+      const info = await this.docker.getContainer(containerId).inspect();
+      return toHealth(info.State.Health?.Status);
+    } catch {
+      return undefined;
+    }
   }
 
   async listManagedVolumes(): Promise<VolumeSummary[]> {

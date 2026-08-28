@@ -8,7 +8,13 @@
  * navigating back here mounts this view again anyway.
  */
 
-import { ApiCallError, type Api, type Instance, type Project } from '../api.ts';
+import {
+  ApiCallError,
+  type Api,
+  type Instance,
+  type Project,
+  type SessionReadiness,
+} from '../api.ts';
 import { clear, el, relativeTime } from '../dom.ts';
 import { navigate, routeHash } from '../router.ts';
 import type { View } from './view.ts';
@@ -17,9 +23,18 @@ import type { View } from './view.ts';
 const POLL_MS = 3000;
 
 const STATUS_HINTS: Record<string, string> = {
-  running: 'The container is up and the console can be attached.',
+  running: 'The container is up. Whether its session is, is the badge next to it.',
   exited: 'The container is stopped. Start brings it back with its workspace.',
   missing: 'The server has a row but Docker has no container. Only Delete is left.',
+};
+
+/** The second axis: a container is `running` minutes before its tmux session
+ *  exists, and only the session is what a console attaches to. */
+const SESSION_HINTS: Record<SessionReadiness, string> = {
+  none: 'No running container -- there is nothing to attach a console to.',
+  starting: 'The container is up, its session is not yet. The console opens as soon as it is.',
+  ready: 'The session is up and the console can be attached.',
+  failed: 'The container never reached its session. `docker logs` on it says why.',
 };
 
 /** Which way the power button points, by Docker state. `missing` is in neither
@@ -180,6 +195,69 @@ export function mountList(root: HTMLElement, api: Api): View {
     return button;
   };
 
+  /**
+   * The Docker state and, next to it, whether the session behind it is up.
+   * Two elements rather than one string: `status` is the raw Docker word and
+   * stays that, so a reader (and a test) can keep asking for exactly it.
+   */
+  const statusCell = (instance: Instance): HTMLElement => {
+    const cell = el(
+      'td',
+      { class: `status status-${instance.status}`, title: STATUS_HINTS[instance.status] ?? '' },
+      el('span', { 'data-testid': 'status' }, instance.status),
+    );
+
+    // Nothing to add for a container that is not running: `exited` and
+    // `missing` are already the whole answer.
+    if (instance.session !== 'none') {
+      cell.append(
+        el(
+          'span',
+          {
+            class: `badge ${instance.session}`,
+            'data-testid': 'session',
+            title: SESSION_HINTS[instance.session],
+          },
+          instance.session,
+        ),
+      );
+    }
+
+    return cell;
+  };
+
+  /**
+   * A link only while the session is attachable. Otherwise a disabled button:
+   * an anchor has no disabled state, and one that is merely painted grey is
+   * still clickable, still followed by the keyboard, and would open a console
+   * whose only possible answer is that there is nothing to attach to.
+   */
+  const consoleControl = (instance: Instance): HTMLElement => {
+    if (instance.session === 'ready') {
+      return el(
+        'a',
+        {
+          class: 'open',
+          href: routeHash({ view: 'console', id: instance.id }),
+          'data-testid': 'console',
+        },
+        'Console',
+      );
+    }
+
+    return el(
+      'button',
+      {
+        type: 'button',
+        class: 'open',
+        disabled: 'disabled',
+        'data-testid': 'console',
+        title: SESSION_HINTS[instance.session],
+      },
+      'Console',
+    );
+  };
+
   const renderRows = (): void => {
     clear(rows);
 
@@ -195,12 +273,7 @@ export function mountList(root: HTMLElement, api: Api): View {
     }
 
     for (const instance of instances) {
-      const open = el(
-        'a',
-        { class: 'open', href: routeHash({ view: 'console', id: instance.id }) },
-        'Console',
-      );
-
+      const open = consoleControl(instance);
       const power = powerButton(instance);
 
       const remove = el(
@@ -226,15 +299,7 @@ export function mountList(root: HTMLElement, api: Api): View {
           'tr',
           { 'data-instance-id': instance.id },
           el('td', { class: 'name' }, instance.name),
-          el(
-            'td',
-            {
-              class: `status status-${instance.status}`,
-              'data-testid': 'status',
-              title: STATUS_HINTS[instance.status] ?? '',
-            },
-            instance.status,
-          ),
+          statusCell(instance),
           el('td', { 'data-testid': 'project' }, projectName(instance.projectId)),
           // The repository as the container was told it, not as the project
           // reads today.

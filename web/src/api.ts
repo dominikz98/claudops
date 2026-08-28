@@ -6,6 +6,15 @@
  * without a browser and without a server.
  */
 
+/**
+ * Whether an instance's console can be attached to -- a second axis next to the
+ * Docker status, because a container is `running` minutes before its tmux
+ * session exists. Reported by the container's own healthcheck.
+ *
+ * `SessionReadiness` in server/src/instances/service.ts.
+ */
+export type SessionReadiness = 'none' | 'starting' | 'ready' | 'failed';
+
 /** `InstanceView` in server/src/instances/service.ts. No token field exists on
  *  purpose -- the server never gives one back. */
 export interface Instance {
@@ -22,6 +31,8 @@ export interface Instance {
   createdAt: string;
   /** Raw Docker state -- running, exited, created, ... -- or `missing`. */
   status: string;
+  /** Whether the console is attachable. `running` alone is not enough. */
+  session: SessionReadiness;
 }
 
 export interface CreateInstanceInput {

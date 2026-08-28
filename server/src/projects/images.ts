@@ -42,6 +42,8 @@ export interface ProjectImageOptions {
   /** Cap on the stored log. A `playwright install --with-deps` alone writes
    *  thousands of lines, and the database is not a log server. */
   maxLogBytes?: number;
+  /** How often at most a running build's output is written away. */
+  logFlushMs?: number;
   now?: () => Date;
 }
 
@@ -50,6 +52,16 @@ const DOCKERFILE = 'Dockerfile';
 /** 64 KiB is several hundred lines -- enough to see which step failed and why,
  *  which is the only reason the log is kept. */
 const DEFAULT_MAX_LOG_BYTES = 64 * 1024;
+
+/**
+ * How often at most the output of a running build is written to the database.
+ *
+ * The log has to grow while the build runs -- a five-minute build whose log
+ * appears only at the end is a page that says nothing for five minutes. One
+ * UPDATE per chunk would be the other extreme: the daemon emits a line per
+ * `apt-get` package, and each one would rewrite the whole accumulated log.
+ */
+const DEFAULT_LOG_FLUSH_MS = 1000;
 
 /**
  * Where the template lives, resolved from this module's own location rather than
@@ -109,6 +121,7 @@ class BuildLog {
 export class ProjectImageBuilder implements ProjectImages {
   private readonly options: ProjectImageOptions;
   private readonly maxLogBytes: number;
+  private readonly logFlushMs: number;
   private readonly now: () => Date;
 
   /**
@@ -129,6 +142,7 @@ export class ProjectImageBuilder implements ProjectImages {
   ) {
     this.options = options;
     this.maxLogBytes = options.maxLogBytes ?? DEFAULT_MAX_LOG_BYTES;
+    this.logFlushMs = options.logFlushMs ?? DEFAULT_LOG_FLUSH_MS;
     this.now = options.now ?? (() => new Date());
   }
 
@@ -169,9 +183,26 @@ export class ProjectImageBuilder implements ProjectImages {
 
     const log = new BuildLog(this.maxLogBytes);
 
+    /**
+     * Writes what has arrived so far, still under `building`. This is the whole
+     * point of the throttle above it: `GET /projects/:id/build-log` reads the
+     * same column the finished build writes, so a build in flight has a log
+     * that grows rather than a page that stays empty for five minutes.
+     */
+    let flushedAt: number | undefined;
+    const flush = (): void => {
+      flushedAt = this.now().getTime();
+      this.repository.setImageState(projectId, 'building', log.text());
+    };
+
     try {
       await this.engine.buildImage(this.specFor(spec), (chunk) => {
         log.append(chunk);
+        // The first chunk always: "the build has started and here is its first
+        // line" is exactly what somebody watching the page is waiting for.
+        if (flushedAt === undefined || this.now().getTime() - flushedAt >= this.logFlushMs) {
+          flush();
+        }
       });
     } catch (error) {
       // The reason goes into the log next to the output: that is the one place

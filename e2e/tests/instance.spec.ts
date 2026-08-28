@@ -76,6 +76,11 @@ test('an instance can be created from the browser', async () => {
   const row = page.locator('tr[data-instance-id]');
   await expect(row).toHaveCount(1);
   await expect(row.getByTestId('status')).toHaveText('running');
+  // #25 AC: the container is up, its session is not -- the entrypoint has a
+  // firewall to install and a repository to clone first, and the healthcheck
+  // has not run once yet. The Console button follows that, not the container.
+  await expect(row.getByTestId('session')).toHaveText('starting');
+  await expect(row.getByTestId('console')).toBeDisabled();
 
   instanceId = (await row.getAttribute('data-instance-id')) ?? '';
   expect(instanceId).not.toBe('');
@@ -84,12 +89,18 @@ test('an instance can be created from the browser', async () => {
 });
 
 test('AC 1: the console can be driven from the browser', async () => {
-  // The entrypoint clones and starts the session; attaching before it exists
-  // would test the race, not the console.
-  await expect.poll(() => hasSession(containerId, SESSION), { timeout: 60_000 }).toBe(true);
+  const row = page.locator('tr[data-instance-id]');
+
+  // #25 AC: waiting for the badge rather than for tmux -- that the two agree is
+  // the point. The container reports its session through its healthcheck, and
+  // the button is enabled by that and nothing else.
+  await expect(row.getByTestId('session')).toHaveText('ready', { timeout: 60_000 });
+  await expect(row.getByTestId('console')).toBeEnabled();
+  expect(hasSession(containerId, SESSION)).toBe(true);
+
   openProbeWindow(containerId, SESSION);
 
-  await page.locator('tr[data-instance-id]').getByRole('link', { name: 'Console' }).click();
+  await row.getByTestId('console').click();
   await expect(page.getByTestId('status')).toHaveAttribute('data-state', 'connected');
 
   // The geometry has to survive browser -> query string -> exec -> tmux. 80x24
