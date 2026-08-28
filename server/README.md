@@ -37,9 +37,10 @@ docker build -t claudops-base docker/base
 | `POST` | `/projects/:id/build` | Rebuild the project image. Answers `202` -- the build runs afterwards. |
 | `GET` | `/projects/:id/build-log` | `{ status, builtAt, log }` of the last build. |
 | `DELETE` | `/projects/:id` | Remove a project and its image. `204`, `404` if unknown, `409` while instances point at it. |
-| `POST` | `/instances` | Start an instance from a project. Body: `name`, `projectId` (both required). Answers `201` with the instance. |
+| `POST` | `/instances` | Start an instance from a project. Body: `name`, `projectId` (both required), `model` and `effort` (optional). Answers `201` with the instance. |
 | `GET` | `/instances` | All instances, each with the status Docker reports and whether its session is attachable. |
 | `GET` | `/instances/:id` | One instance. `404` if unknown. |
+| `PATCH` | `/instances/:id` | Change the model, the effort level, or both, on a running instance. `409` when there is no session to type into; see [Model and effort](#model-and-effort). |
 | `POST` | `/instances/:id/stop` | Stop the container, keep the instance. Answers `200` with its new status. |
 | `POST` | `/instances/:id/start` | Start it again. `200`, `409` when the instance has no container. |
 | `DELETE` | `/instances/:id` | Remove the container, its volumes and the instance. `204`, or `404` if unknown. |
@@ -202,6 +203,51 @@ everything in it -- the workspace, the clone, the git state. `POST
 /instances/:id/start` brings it back; the entrypoint runs again, so the tmux
 session and Claude are new, while the filesystem is where it was. What is lost is
 what was only in memory.
+
+### Model and effort
+
+Which model an instance runs, and at what effort level, is chosen when it is
+created and can be changed while it runs. `model` is one of `opus`, `sonnet`,
+`haiku`, `fable`; `effort` one of `low`, `medium`, `high`, `xhigh`, `max`.
+`null` -- and leaving the field out on create -- means whatever Claude Code
+picks itself. Anything else is a `400`.
+
+```bash
+curl -s localhost:8080/instances -H 'content-type: application/json' \
+  -d '{"name":"demo","projectId":"<id>","model":"haiku","effort":"low"}'
+
+curl -s -X PATCH localhost:8080/instances/<id> \
+  -H 'content-type: application/json' -d '{"model":"opus"}'
+```
+
+A field that is not in the `PATCH` body keeps its stored value, the same rule
+`PATCH /projects/:id` follows.
+
+A switch has to reach two places, and the server does both before it writes the
+row:
+
+1. **The running session.** `/model` and `/effort` are typed into the instance's
+   tmux pane, exactly as a person at the console would -- `/model` first,
+   because which effort levels exist depends on the model. Nothing restarts and
+   nothing is lost. Claude Code asks to confirm a switch while its prompt cache
+   is still warm; that dialog is answered in the console, by a human, like any
+   other. Until it is, the session keeps its old model.
+2. **The next container start.** The chosen values are written to
+   `~/.claudops/model` and `~/.claudops/effort` inside the container, which
+   `docker/base/entrypoint.sh` prefers over `CLAUDE_MODEL` / `CLAUDE_EFFORT`.
+   Docker cannot change a created container's environment, so without this a
+   `docker stop` and `start` would silently bring the create-time value back.
+
+Because step 1 needs a session, a `PATCH` against an instance whose `session` is
+not `ready` is refused with `409 session_not_ready` rather than half-applied --
+start the instance, wait for its session, then switch. A `PATCH` that changes
+nothing is not refused; it never touches the container.
+
+Resetting the model to Claude Code's own default (`"model": null`) reaches only
+the next container start: there is no `/model` that means "back to the default",
+and a bare `/model` opens a picker with nobody at the console to answer it.
+`"effort": null` does have one -- `/effort auto` -- and takes effect at once. The
+web UI offers a reset on neither, so this asymmetry stays out of sight.
 
 **Delete.** `DELETE /instances/:id` removes the container with its anonymous
 volumes, then any volume still carrying `claudops.instance=<id>`, then the row.

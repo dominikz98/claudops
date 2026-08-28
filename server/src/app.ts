@@ -17,7 +17,13 @@ import {
   type DockerEngine,
 } from './docker/engine.ts';
 import { instanceRoutes } from './instances/routes.ts';
-import { ContainerMissingError, InstanceService } from './instances/service.ts';
+import {
+  ContainerCommandFailedError,
+  ContainerMissingError,
+  InstanceService,
+  SessionNotReadyError,
+  UnknownChoiceError,
+} from './instances/service.ts';
 import { ProjectRepository } from './db/projects.ts';
 import {
   defaultProjectContext,
@@ -95,6 +101,9 @@ export interface AppOptions {
   logLevel?: string;
   /** Only the tests set this, to keep the terminal heartbeat out of real time. */
   terminalBridge?: BridgeOptions | undefined;
+  /** How long a container gets between the text of a slash command and its
+   *  Enter. Only the tests set this, for the same reason as the line above. */
+  sendKeysPauseMs?: number | undefined;
   /** Gates everything but the login page, the login endpoints and /health. Left
    *  out, the app runs open and says so -- which is what the tests that predate
    *  the login use. The decision to refuse that in production belongs to
@@ -150,6 +159,7 @@ export function buildApp(options: AppOptions): FastifyInstance {
     projects,
     tmuxSession: options.tmuxSession,
     limits: options.instanceLimits,
+    sendKeysPauseMs: options.sendKeysPauseMs,
   });
 
   // What a restart interrupted, and what an upgrade left behind: a project from
@@ -193,6 +203,32 @@ export function buildApp(options: AppOptions): FastifyInstance {
     // and a restart's reconcile is what clears it.
     if (error instanceof ContainerMissingError || error instanceof ContainerNotFoundError) {
       return reply.code(409).send({ error: 'container_missing', message: error.message });
+    }
+    // A model or effort value that is in neither list. 400 rather than 422: the
+    // route schema rejects the same thing, so a request that gets past it and
+    // reaches this is malformed in the same way -- just from a caller that went
+    // around the schema.
+    if (error instanceof UnknownChoiceError) {
+      return reply
+        .code(400)
+        .send({ error: 'unknown_choice', message: error.message, field: error.field });
+    }
+    // Nothing to type a slash command into. 409 for the same reading as a
+    // missing container: the instance exists, its session is what is in the way,
+    // and waiting is what clears it.
+    if (error instanceof SessionNotReadyError) {
+      return reply
+        .code(409)
+        .send({ error: 'session_not_ready', message: error.message, session: error.readiness });
+    }
+    // The container was there and refused. 500 rather than 409: nothing about
+    // the request was wrong and repeating it is not the fix -- what the command
+    // printed is, which is why it travels in the message.
+    if (error instanceof ContainerCommandFailedError) {
+      request.log.error({ err: error }, 'a command in a container failed');
+      return reply
+        .code(500)
+        .send({ error: 'container_command_failed', message: error.message });
     }
     // Only reachable from POST /instances: the project routes answer 404 for an
     // id in their own path. An unknown reference in a body is a 422, the same

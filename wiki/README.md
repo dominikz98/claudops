@@ -22,7 +22,9 @@ and deleted from a browser page, its console survives a refresh, it runs under a
 CPU and memory ceiling, and what a restart or a hand on the NUC leaves behind is
 cleaned up at the next server start. Both slow steps report progress: an image
 build's log grows on the Projects page while it runs, and an instance says whether
-its Claude session is up, not only whether its container is. Everything else
+its Claude session is up, not only whether its container is. Each instance runs
+the model and effort level it was given, changeable from the list without losing
+the session. Everything else
 is planned and marked with its issue number on the pages below. The component status table lives in the
 [root README](../README.md#state) -- kept in one place so the two cannot drift
 apart.

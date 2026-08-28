@@ -37,6 +37,8 @@ const instance = {
   projectId: 'proj1',
   repoUrl: null,
   repoBranch: null,
+  model: null,
+  effort: null,
   createdAt: '2026-08-25T10:00:00.000Z',
   status: 'running',
   session: 'ready',
@@ -104,6 +106,54 @@ describe('api client', () => {
 
     expect(calls[0]?.url).toBe('/instances/a%2Fb');
     expect(calls[0]?.init?.method).toBe('DELETE');
+  });
+
+  describe('model and effort', () => {
+    it('sends a chosen model on create and leaves out an unchosen one', async () => {
+      const { fetch, calls } = fakeFetch(() => json(instance, 201));
+      const api = createApi(fetch);
+
+      await api.create({ name: 'demo', projectId: 'proj1', model: 'haiku', effort: 'low' });
+      await api.create({ name: 'plain', projectId: 'proj1', model: '', effort: '' });
+
+      expect(sentJson(calls[0])).toEqual({
+        name: 'demo',
+        projectId: 'proj1',
+        model: 'haiku',
+        effort: 'low',
+      });
+      // An empty string is the form's "default" and would fail the server's
+      // enum, so it is dropped rather than sent.
+      expect(sentJson(calls[1])).toEqual({ name: 'plain', projectId: 'proj1' });
+    });
+
+    it('patches the instance itself, with the id escaped', async () => {
+      const { fetch, calls } = fakeFetch(() => json({ ...instance, model: 'opus' }));
+
+      expect((await createApi(fetch).setModelEffort('a/b', { model: 'opus' })).model).toBe('opus');
+
+      expect(calls[0]?.url).toBe('/instances/a%2Fb');
+      expect(calls[0]?.init?.method).toBe('PATCH');
+      expect(sentJson(calls[0])).toEqual({ model: 'opus' });
+    });
+
+    it('keeps an explicit null, because that is how a choice is reset', async () => {
+      const { fetch, calls } = fakeFetch(() => json(instance));
+
+      await createApi(fetch).setModelEffort('abc123', { model: null, effort: null });
+
+      expect(sentJson(calls[0])).toEqual({ model: null, effort: null });
+    });
+
+    it('turns a session that is not up into an ApiCallError', async () => {
+      const { fetch } = fakeFetch(() =>
+        json({ error: 'session_not_ready', message: "the session of 'abc123' is still starting" }, 409),
+      );
+
+      await expect(createApi(fetch).setModelEffort('abc123', { model: 'opus' })).rejects.toMatchObject(
+        { status: 409, code: 'session_not_ready' },
+      );
+    });
   });
 
   describe('stop and start', () => {

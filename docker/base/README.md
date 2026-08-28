@@ -60,6 +60,8 @@ drops.
 | `GIT_USER_NAME`, `GIT_USER_EMAIL` | – | Commit identity for Claude. |
 | `CLAUDE_CODE_OAUTH_TOKEN` | – | Auth for Claude Code (`claude setup-token`). Deliberately **not** an `ANTHROPIC_API_KEY` -- that one overrides the subscription. |
 | `CLAUDE_ARGS` | `--dangerously-skip-permissions` | Arguments for the `claude` start. Only acceptable because of the container isolation, which is what the egress firewall below provides. |
+| `CLAUDE_MODEL` | – | Model alias -- `opus`, `sonnet`, `haiku`, `fable` -- appended as `--model`. Deliberately **not** `ANTHROPIC_MODEL`: see below. |
+| `CLAUDE_EFFORT` | – | Effort level -- `low`, `medium`, `high`, `xhigh`, `max` -- appended as `--effort`. Deliberately **not** `CLAUDE_CODE_EFFORT_LEVEL`: that one outranks `/effort` and would make a switch in the console do nothing. |
 | `FIREWALL_ALLOW` | – | Extra hosts and CIDRs for the egress whitelist, comma- or space-separated, on top of the built-in list in `/etc/claudops/firewall-allow.d`. |
 | `FIREWALL_MODE` | `enforce` | `off` skips the firewall entirely. The operator's escape hatch, never the agent's -- and it is also what makes `CLAUDE_ARGS` unsafe. |
 | `FIREWALL_REFRESH_SECONDS` | `900` | How often the whitelist is re-resolved, because CDN addresses rotate. `0` disables it. |
@@ -115,6 +117,22 @@ drops.
   Console button disabled until then. The start period is five minutes, which is
   a large clone over a slow line; past it, a container that still has no session
   goes `unhealthy` rather than staying on `starting` forever.
+- **The model and the effort level are start arguments, and can be overwritten
+  from outside.** `CLAUDE_MODEL` and `CLAUDE_EFFORT` become `--model` and
+  `--effort` on the `claude` start line. Two files take precedence over them:
+
+  ```bash
+  docker exec claudops-demo sh -c 'mkdir -p ~/.claudops && printf %s sonnet > ~/.claudops/model'
+  ```
+
+  That is what claudops writes when the model is switched from the UI, because
+  Docker cannot change a created container's environment and the next
+  `docker restart` would otherwise bring the old value back. An **empty** file
+  means "no flag"; a file that does not exist falls back to the environment.
+  Anything that is not a plain `[A-Za-z0-9._-]+` word is ignored with a warning,
+  so the file can never grow a second argument. Switching a *running* session is
+  a `/model` or `/effort` typed into it -- claudops does that itself, and from
+  the console you would simply type it.
 - **Restarting the container on the same volume** skips the clone if the target
   directory already is a git repo.
 - **`docker stop`** shuts the tmux server down cleanly via SIGTERM.
@@ -131,8 +149,10 @@ Builds the image, brings up a container and checks the acceptance criteria from
 issue #2 (clone, non-root, detach/reattach with scrollback, running Claude
 process) plus the behaviour of the credential helper and the egress firewall of
 issue #9 -- including a second container started *without* `NET_ADMIN`, to prove
-Claude is withheld when the firewall cannot come up. `SKIP_BUILD=1` skips the
-build.
+Claude is withheld when the firewall cannot come up. The last block is issue
+#16: the chosen model and effort really are on the `claude` process, and a
+`docker restart` reads the override files rather than the environment.
+`SKIP_BUILD=1` skips the build.
 
 The run needs outbound access to `api.github.com/meta`: that is where the
 whitelist gets GitHub's IP ranges, and the clone assertions depend on it.

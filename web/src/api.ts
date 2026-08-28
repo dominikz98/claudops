@@ -15,6 +15,23 @@
  */
 export type SessionReadiness = 'none' | 'starting' | 'ready' | 'failed';
 
+/**
+ * Model aliases and effort levels an instance can run at.
+ *
+ * `INSTANCE_MODELS` / `INSTANCE_EFFORTS` in server/src/instances/service.ts,
+ * which is where the reasoning behind them is. Mirrored rather than fetched:
+ * four strings each, and the server's schema is what actually enforces them.
+ * The absence of a choice is `null`, not a member of either list.
+ */
+export const INSTANCE_MODELS = ['opus', 'sonnet', 'haiku', 'fable'] as const;
+export const INSTANCE_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+
+/** What Claude Code runs as. `null` is Claude Code's own default. */
+export interface ModelChoice {
+  model: string | null;
+  effort: string | null;
+}
+
 /** `InstanceView` in server/src/instances/service.ts. No token field exists on
  *  purpose -- the server never gives one back. */
 export interface Instance {
@@ -28,6 +45,10 @@ export interface Instance {
    *  -- not a live view of the project. */
   repoUrl: string | null;
   repoBranch: string | null;
+  /** What Claude Code was started as, and what it has been switched to since.
+   *  `null` means Claude Code's own default. */
+  model: string | null;
+  effort: string | null;
   createdAt: string;
   /** Raw Docker state -- running, exited, created, ... -- or `missing`. */
   status: string;
@@ -39,6 +60,9 @@ export interface CreateInstanceInput {
   name: string;
   /** Repository, branch and PAT all come from the project. */
   projectId: string;
+  /** Left out, the instance runs whatever Claude Code defaults to. */
+  model?: string | null;
+  effort?: string | null;
 }
 
 /** The optional layers a project image is built with. */
@@ -137,6 +161,15 @@ export interface Api {
    *  Docker reports afterwards. */
   stop(id: string): Promise<Instance>;
   start(id: string): Promise<Instance>;
+  /**
+   * Switches model, effort, or both on a running instance. A field left out
+   * keeps its stored value.
+   *
+   * Needs an attachable session: the server types the change into it as slash
+   * commands, and answers `session_not_ready` or `container_missing` when there
+   * is nothing to type into.
+   */
+  setModelEffort(id: string, changes: Partial<ModelChoice>): Promise<Instance>;
   listProjects(): Promise<Project[]>;
   createProject(input: CreateProjectInput): Promise<Project>;
   updateProject(id: string, input: UpdateProjectInput): Promise<Project>;
@@ -240,8 +273,23 @@ export function createApi(
     create(input: CreateInstanceInput): Promise<Instance> {
       return request<Instance>(
         '/instances',
-        send('POST', { name: input.name, projectId: input.projectId }),
+        // withoutBlanks, so an unchosen model is left out rather than sent as
+        // an empty string the enum would reject.
+        send(
+          'POST',
+          withoutBlanks({
+            name: input.name,
+            projectId: input.projectId,
+            model: input.model,
+            effort: input.effort,
+          }),
+        ),
       );
+    },
+
+    setModelEffort(id: string, changes: Partial<ModelChoice>): Promise<Instance> {
+      // No withoutBlanks here: `null` is the reset and has to travel.
+      return request<Instance>(`/instances/${encodeURIComponent(id)}`, send('PATCH', { ...changes }));
     },
 
     remove(id: string): Promise<void> {

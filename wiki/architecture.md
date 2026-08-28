@@ -155,6 +155,27 @@ start**: a re-run is refused, so the agent inside cannot widen its own whitelist
 If the firewall cannot be established, Claude is not started at all -- the
 session comes up with a plain shell so the console still works for diagnosis.
 
+**The model is a decision, so the database keeps it.** Which model an instance
+runs, and at what effort level, is chosen when it is created and can be changed
+while it runs. That is the one thing about an instance the server stores next to
+its identity, and it is not a contradiction of the rule above: a restarted
+container has no process left to ask what it was started with.
+
+Changing it has to reach two places. The running session gets `/model` and
+`/effort` typed into its tmux pane, the way a person at the console would -- so
+nothing restarts and no scrollback is lost. The next container start gets two
+files, `~/.claudops/model` and `~/.claudops/effort`, which the entrypoint prefers
+over its environment; Docker cannot change the environment of a container that
+already exists, so without them a stop and start would bring the old model back.
+Because the first half needs a session to type into, a switch on an instance
+whose session is not up is refused rather than half-applied.
+
+The values reach the container as `CLAUDE_MODEL` and `CLAUDE_EFFORT`, which the
+entrypoint turns into `--model` and `--effort`. Not as `ANTHROPIC_MODEL` or
+`CLAUDE_CODE_EFFORT_LEVEL`: the effort variable outranks every other way of
+setting the level, including the slash command, so a switch would be accepted and
+change nothing.
+
 **The UI is behind a shared secret.** `POST /login` exchanges
 `CLAUDOPS_LOGIN_SECRET` for a session cookie, and one `onRequest` hook gates
 every endpoint except `/health`, the login endpoints and the SPA shell itself --

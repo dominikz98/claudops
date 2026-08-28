@@ -7,6 +7,7 @@ import {
   ImageBuildFailedError,
   ImageNotFoundError,
   type AttachTerminalOptions,
+  type CommandResult,
   type ContainerHealth,
   type ContainerSpec,
   type ContainerSummary,
@@ -341,6 +342,42 @@ export class DockerodeEngine implements DockerEngine {
     } catch (error) {
       throw this.translateAttach(error, containerId);
     }
+  }
+
+  async runCommand(containerId: string, command: string[]): Promise<CommandResult> {
+    const container = this.docker.getContainer(containerId);
+
+    let exec: Docker.Exec;
+    let stream: Duplex;
+    try {
+      exec = await container.exec({
+        Cmd: command,
+        AttachStdin: false,
+        AttachStdout: true,
+        AttachStderr: true,
+        // With a TTY Docker does not multiplex the two streams, so the body can
+        // be read as it is instead of demuxed. Nothing parses this output --
+        // it exists to put into an error message -- so having stderr mixed into
+        // it is what we want rather than something to undo.
+        Tty: true,
+      });
+      stream = await exec.start({ hijack: true, stdin: false, Tty: true });
+    } catch (error) {
+      throw this.translateAttach(error, containerId);
+    }
+
+    const chunks: Buffer[] = [];
+    for await (const chunk of stream as unknown as AsyncIterable<Buffer | string>) {
+      chunks.push(Buffer.from(chunk));
+    }
+
+    // The stream ends when the command does, but the exit code only appears on
+    // the inspect afterwards.
+    const info = await exec.inspect();
+    return {
+      exitCode: info.ExitCode ?? 0,
+      output: Buffer.concat(chunks).toString('utf8'),
+    };
   }
 
   async buildImage(spec: ImageBuildSpec, onLog: (chunk: string) => void): Promise<void> {

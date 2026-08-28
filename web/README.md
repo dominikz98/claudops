@@ -40,7 +40,7 @@ logs a warning and serves the API only.
 | Route | Page |
 | --- | --- |
 | `#/login` | The shared-secret form. Where the app sends you whenever any request comes back `unauthorized`, whichever page you were on. |
-| `#/` | Instance list: create from a project, status, delete, log out. Polls `GET /instances` every 3 s. |
+| `#/` | Instance list: create from a project, status, model and effort, delete, log out. Polls `GET /instances` every 3 s -- and holds off on repainting the table while a dropdown in it has the focus, because rebuilding the rows underneath an open one closes it. |
 | `#/projects` | Projects: create, edit, delete the templates instances come from, and watch their images being built. Polls only while a build is running. |
 | `#/i/<id>` | The console of one instance, over `GET /instances/<id>/terminal`. |
 

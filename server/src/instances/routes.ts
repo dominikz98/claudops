@@ -1,5 +1,18 @@
 import type { FastifyPluginCallback, FastifyPluginOptions } from 'fastify';
-import { InstanceNotFoundError, type CreateInstanceInput, type InstanceService } from './service.ts';
+import {
+  INSTANCE_EFFORTS,
+  INSTANCE_MODELS,
+  InstanceNotFoundError,
+  type CreateInstanceInput,
+  type InstanceService,
+  type ModelChoiceChanges,
+} from './service.ts';
+
+// `null` is a member of both enums on purpose: it is the third legitimate value
+// -- "whatever Claude Code picks itself" -- and without it in the list a caller
+// resetting a choice would get a 400.
+const modelSchema = { enum: [...INSTANCE_MODELS, null] } as const;
+const effortSchema = { enum: [...INSTANCE_EFFORTS, null] } as const;
 
 // Repository, branch and PAT live on the project now. With
 // additionalProperties: false a caller still sending `gitToken` gets a 400
@@ -12,7 +25,17 @@ const createBodySchema = {
   properties: {
     name: { type: 'string', minLength: 1, maxLength: 100 },
     projectId: { type: 'string', minLength: 1, maxLength: 100 },
+    model: modelSchema,
+    effort: effortSchema,
   },
+} as const;
+
+/** Both optional: a field that is not sent keeps its stored value, exactly like
+ *  `PATCH /projects/:id`. */
+const patchBodySchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: { model: modelSchema, effort: effortSchema },
 } as const;
 
 const idParamsSchema = {
@@ -72,9 +95,33 @@ export const instanceRoutes: FastifyPluginCallback<InstanceRoutesOptions> = (
     },
   );
 
-  // POST rather than a PATCH of a status field: the instance table has no
-  // status to patch. Both ask Docker to do something and answer with what
-  // Docker reports afterwards
+  /**
+   * The one thing on an instance that *is* stored and can be changed. A PATCH
+   * rather than another `POST /:id/...` for exactly that reason -- and the same
+   * reason the two below are not PATCHes.
+   *
+   * A switch needs a session to type into, so a stopped or still-starting
+   * instance is refused with 409 rather than half-applied. A PATCH that changes
+   * nothing is not refused: it never touches the container.
+   */
+  app.patch<{ Params: { id: string }; Body: ModelChoiceChanges }>(
+    '/instances/:id',
+    { schema: { params: idParamsSchema, body: patchBodySchema } },
+    async (request, reply) => {
+      try {
+        return await service.setModelEffort(request.params.id, request.body);
+      } catch (error) {
+        // Everything else -- an unknown value, a missing container, a session
+        // that is not up -- has its answer in the error handler in app.ts.
+        if (error instanceof InstanceNotFoundError) return reply.callNotFound();
+        throw error;
+      }
+    },
+  );
+
+  // POST rather than a PATCH of a status field: neither stop nor start writes
+  // anything. Both ask Docker to do something and answer with what Docker
+  // reports afterwards
   // (knowledge/database-holds-identity-docker-holds-state.md).
   app.post<{ Params: { id: string } }>(
     '/instances/:id/stop',

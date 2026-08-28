@@ -28,6 +28,8 @@ describe('instance REST API', () => {
       },
       cipher: testCipher(),
       logLevel: 'silent',
+      // The pause is for a real TUI reading real keystrokes.
+      sendKeysPauseMs: 0,
     });
     await app.ready();
     projectId = await createTestProject(app, { repoBranch: 'main', gitToken: 'pat-secret' });
@@ -258,6 +260,77 @@ describe('instance REST API', () => {
 
       expect(response.statusCode).toBe(409);
       expect(response.json<{ error: string }>().error).toBe('container_missing');
+    });
+  });
+
+  describe('PATCH /instances/:id', () => {
+    const patch = (id: string, payload: Record<string, unknown>) =>
+      app.inject({ method: 'PATCH', url: `/instances/${id}`, payload });
+
+    it('takes a model and an effort on create and gives them back', async () => {
+      const response = await create({ name: 'demo', projectId, model: 'haiku', effort: 'low' });
+
+      expect(response.statusCode).toBe(201);
+      expect(response.json()).toMatchObject({ model: 'haiku', effort: 'low' });
+    });
+
+    it('reports null for an instance created without either', async () => {
+      expect((await create({ name: 'demo', projectId })).json()).toMatchObject({
+        model: null,
+        effort: null,
+      });
+    });
+
+    it('refuses a value that is in neither list', async () => {
+      const response = await create({ name: 'demo', projectId, model: 'gpt-4' });
+
+      expect(response.statusCode).toBe(400);
+      expect(response.json<{ error: string }>().error).toBe('invalid_request');
+    });
+
+    it('switches a running instance and keeps the field that was not sent', async () => {
+      const id = (await create({ name: 'demo', projectId, model: 'haiku', effort: 'low' })).json<{
+        id: string;
+      }>().id;
+
+      const response = await patch(id, { model: 'opus' });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({ model: 'opus', effort: 'low' });
+      // And it survives the server having a fresh look at the row.
+      expect((await app.inject({ method: 'GET', url: `/instances/${id}` })).json()).toMatchObject({
+        model: 'opus',
+        effort: 'low',
+      });
+    });
+
+    it('answers 404 for an unknown instance and 400 for an unknown value', async () => {
+      expect((await patch('nope', { model: 'opus' })).statusCode).toBe(404);
+
+      const id = (await create({ name: 'demo', projectId })).json<{ id: string }>().id;
+      expect((await patch(id, { effort: 'ludicrous' })).statusCode).toBe(400);
+    });
+
+    it('answers 409 while there is no session to type into', async () => {
+      const body = (await create({ name: 'demo', projectId })).json<{
+        id: string;
+        containerId: string;
+      }>();
+      engine.setHealth(body.containerId, 'starting');
+
+      const response = await patch(body.id, { model: 'opus' });
+
+      expect(response.statusCode).toBe(409);
+      expect(response.json<{ error: string }>().error).toBe('session_not_ready');
+    });
+
+    it('rejects a field that is not a choice', async () => {
+      const id = (await create({ name: 'demo', projectId })).json<{ id: string }>().id;
+
+      // additionalProperties: false, so a caller patching `name` hears about it
+      // instead of watching it be ignored
+      // (knowledge/fastify-strips-unknown-fields.md).
+      expect((await patch(id, { name: 'renamed' })).statusCode).toBe(400);
     });
   });
 

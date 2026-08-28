@@ -5,6 +5,7 @@ import {
   DockerUnavailableError,
   ImageNotFoundError,
   type AttachTerminalOptions,
+  type CommandResult,
   type ContainerHealth,
   type ContainerSpec,
   type ContainerSummary,
@@ -135,6 +136,12 @@ export class FakeDockerEngine implements DockerEngine {
    *  sends immediately would lose its frames. */
   attachDelayMs = 0;
   readonly terminals: FakeTerminalSession[] = [];
+  /** Every one-shot exec that was run, in order -- what a test asserting on the
+   *  model switch reads. */
+  readonly commands: { containerId: string; command: string[] }[] = [];
+  /** What the next runCommand reports. A non-zero exit is a command that ran
+   *  and failed, which is not the same as an exec that could not start. */
+  commandResult: CommandResult = { exitCode: 0, output: '' };
 
   private sequence = 0;
 
@@ -240,6 +247,17 @@ export class FakeDockerEngine implements DockerEngine {
     const session = new FakeTerminalSession(containerId, options);
     this.terminals.push(session);
     return Promise.resolve(session);
+  }
+
+  async runCommand(containerId: string, command: string[]): Promise<CommandResult> {
+    this.guard();
+
+    const container = this.containers.get(containerId);
+    if (container === undefined) throw new ContainerNotFoundError(containerId);
+    if (container.state !== 'running') throw new ContainerNotRunningError(containerId);
+
+    this.commands.push({ containerId, command });
+    return Promise.resolve(this.commandResult);
   }
 
   async buildImage(spec: ImageBuildSpec, onLog: (chunk: string) => void): Promise<void> {

@@ -63,11 +63,54 @@ export const INSTANCE_CAPABILITIES: readonly string[] = ['NET_ADMIN'];
  */
 export type SessionReadiness = 'none' | 'starting' | 'ready' | 'failed';
 
+/**
+ * Model aliases an instance may be started with.
+ *
+ * Aliases rather than model ids: an id goes stale with the next release, an
+ * alias does not. The absence of a choice -- `null` -- is Claude Code's own
+ * default and is deliberately not a member of this list, because "no flag" is
+ * not a value that can be typed into a running session either.
+ *
+ * Mirrored in web/src/api.ts. The route schema validates against this list, and
+ * so does the service: a value that is neither is a bug somewhere, and finding
+ * it here beats finding it as a Claude Code startup warning inside a container.
+ */
+export const INSTANCE_MODELS: readonly string[] = ['opus', 'sonnet', 'haiku', 'fable'];
+
+/**
+ * Effort levels, as Claude Code's `--effort` takes them. `max` is session-only
+ * there, which costs nothing here: every container start passes the flag again.
+ */
+export const INSTANCE_EFFORTS: readonly string[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+/** What Claude Code is asked to run as. `null` on either means "whatever Claude
+ *  Code picks itself" -- no flag at start, nothing typed into a session. */
+export interface ModelChoice {
+  model: string | null;
+  effort: string | null;
+}
+
+/** A PATCH of the above: a field left out keeps what is stored, an explicit
+ *  `null` is a reset to Claude Code's own default. */
+export type ModelChoiceChanges = Partial<ModelChoice>;
+
+/**
+ * How long the container gets between the text of a slash command and the
+ * Enter that submits it. The TUI reads its input in chunks, and an Enter in the
+ * same read as the text it belongs to is swallowed -- the command then sits in
+ * the prompt unsent, which looks exactly like a switch that did nothing.
+ */
+export const SEND_KEYS_PAUSE_MS = 400;
+
 export interface CreateInstanceInput {
   name: string;
   /** Repository, branch and PAT all come from here -- an instance is created
    *  from a project, never configured by hand. */
   projectId: string;
+  /** Both optional: an instance created without them runs whatever Claude Code
+   *  defaults to, which is what every instance did before #16. */
+  model?: string | null | undefined;
+  effort?: string | null | undefined;
 }
 
 /** What the API returns. Deliberately without any token field. */
@@ -79,6 +122,11 @@ export interface InstanceView {
   projectId: string | null;
   repoUrl: string | null;
   repoBranch: string | null;
+  /** What Claude Code was started as, and what it has been switched to since.
+   *  Read from the database, unlike `status` -- a restarted container has no
+   *  process left to ask. */
+  model: string | null;
+  effort: string | null;
   createdAt: string;
   /** Raw Docker state, or `missing`. Never read from the database. */
   status: string;
@@ -118,9 +166,49 @@ export class SessionNotReadyError extends Error {
     super(
       readiness === 'failed'
         ? `the session of instance '${id}' never came up -- see 'docker logs'`
-        : `the session of instance '${id}' is still starting`,
+        : readiness === 'none'
+          ? `instance '${id}' is not running`
+          : `the session of instance '${id}' is still starting`,
     );
     this.name = 'SessionNotReadyError';
+  }
+}
+
+/**
+ * A command the server ran inside a container came back non-zero. Its own error
+ * because "the exec could not start" and "the exec ran and refused" are
+ * different problems: the first is a container that is gone, the second is
+ * `tmux` saying it has no such pane.
+ *
+ * `output` is whatever the command printed. Nothing secret goes into one of
+ * these commands -- a model alias and a tmux target -- so it is safe to repeat.
+ */
+export class ContainerCommandFailedError extends Error {
+  constructor(
+    command: readonly string[],
+    readonly exitCode: number,
+    readonly output: string,
+  ) {
+    const detail = output.trim();
+    super(
+      `'${command.join(' ')}' failed in the container with exit ${String(exitCode)}` +
+        (detail === '' ? '' : `: ${detail}`),
+    );
+    this.name = 'ContainerCommandFailedError';
+  }
+}
+
+/** A model or effort value that is in neither list. Its own error rather than a
+ *  generic one so the route can answer 400 and name the field. */
+export class UnknownChoiceError extends Error {
+  constructor(
+    readonly field: 'model' | 'effort',
+    readonly value: string,
+  ) {
+    super(
+      `'${value}' is not a known ${field} -- one of ${(field === 'model' ? INSTANCE_MODELS : INSTANCE_EFFORTS).join(', ')}`,
+    );
+    this.name = 'UnknownChoiceError';
   }
 }
 
@@ -165,6 +253,48 @@ function sessionOf(summary: ContainerSummary | undefined): SessionReadiness {
   }
 }
 
+/**
+ * The value a PATCH leaves behind: what was asked for, what was stored, or a
+ * refusal. Validated here as well as in the route schema -- the route is one
+ * caller, this is the invariant.
+ */
+function resolveChoice(
+  field: 'model' | 'effort',
+  next: string | null | undefined,
+  stored: string | null,
+): string | null {
+  if (next === undefined) return stored;
+  if (next === null) return null;
+
+  const allowed = field === 'model' ? INSTANCE_MODELS : INSTANCE_EFFORTS;
+  if (!allowed.includes(next)) throw new UnknownChoiceError(field, next);
+  return next;
+}
+
+/**
+ * Writes the two files `docker/base/entrypoint.sh` prefers over its environment
+ * on the next container start.
+ *
+ * An *empty* file rather than a removed one is what a reset writes: a missing
+ * file falls back to the environment, and the environment still carries the
+ * value the instance was created with -- Docker cannot change it afterwards.
+ *
+ * The values travel as arguments, not inside the script text, so nothing here
+ * depends on what they contain.
+ */
+function overrideCommand(choice: ModelChoice): string[] {
+  return [
+    'sh',
+    '-c',
+    'mkdir -p ~/.claudops' +
+      ' && printf %s "$1" > ~/.claudops/model' +
+      ' && printf %s "$2" > ~/.claudops/effort',
+    'sh',
+    choice.model ?? '',
+    choice.effort ?? '',
+  ];
+}
+
 export interface InstanceServiceOptions {
   instanceEnv: InstanceEnvConfig;
   /** Where repository, branch, PAT and the image come from. */
@@ -175,6 +305,9 @@ export interface InstanceServiceOptions {
   limits?: ContainerLimits | undefined;
   generateId?: () => string;
   now?: () => Date;
+  /** How long to wait between the text of a slash command and its Enter.
+   *  A test sets it to 0; nothing else has a reason to change it. */
+  sendKeysPauseMs?: number | undefined;
 }
 
 export class InstanceService {
@@ -184,6 +317,7 @@ export class InstanceService {
   private readonly limits: ContainerLimits;
   private readonly generateId: () => string;
   private readonly now: () => Date;
+  private readonly sendKeysPauseMs: number;
 
   constructor(
     private readonly repository: InstanceRepository,
@@ -196,6 +330,7 @@ export class InstanceService {
     this.limits = options.limits ?? DEFAULT_INSTANCE_LIMITS;
     this.generateId = options.generateId ?? shortId;
     this.now = options.now ?? (() => new Date());
+    this.sendKeysPauseMs = options.sendKeysPauseMs ?? SEND_KEYS_PAUSE_MS;
   }
 
   async create(input: CreateInstanceInput): Promise<InstanceView> {
@@ -210,6 +345,13 @@ export class InstanceService {
       throw new ProjectImageNotReadyError(template.id, template.imageStatus);
     }
 
+    // Refused before the row is written, for the same reason the template is
+    // read first: a typo in a model name must not leave a container behind.
+    const choice: ModelChoice = {
+      model: resolveChoice('model', input.model, null),
+      effort: resolveChoice('effort', input.effort, null),
+    };
+
     const id = this.generateId();
     const record = this.repository.insert({
       id,
@@ -222,6 +364,8 @@ export class InstanceService {
       // readable on the instance even after the project moves on.
       repoUrl: template.repoUrl,
       repoBranch: template.repoBranch,
+      model: choice.model,
+      effort: choice.effort,
       createdAt: this.now().toISOString(),
     });
 
@@ -230,7 +374,7 @@ export class InstanceService {
     // a row without a container shows up as `missing` and is cleanable.
     let containerId: string;
     try {
-      containerId = await this.engine.runContainer(this.specFor(id, template));
+      containerId = await this.engine.runContainer(this.specFor(id, template, choice));
     } catch (error) {
       this.repository.delete(id);
       throw error;
@@ -297,6 +441,60 @@ export class InstanceService {
 
   async start(id: string): Promise<InstanceView> {
     await this.engine.startContainer(this.containerOf(id));
+    return this.get(id);
+  }
+
+  /**
+   * Switches the model, the effort level, or both, on a running instance.
+   *
+   * A switch has to reach two places, and reaching only one of them is worse
+   * than reaching neither: the session that is running right now, through the
+   * slash commands a human would type, and the *next* container start, through
+   * the override files the entrypoint reads. Docker cannot change a created
+   * container's environment, so without the second half a `docker restart`
+   * would quietly bring back the value the instance was created with while the
+   * list kept showing the new one.
+   *
+   * The database comes last for the same reason: a row that claims something
+   * the container was never told is the one failure mode with no way back.
+   */
+  async setModelEffort(id: string, changes: ModelChoiceChanges): Promise<InstanceView> {
+    const record = this.repository.get(id);
+    if (record === undefined) throw new InstanceNotFoundError(id);
+
+    const model = resolveChoice('model', changes.model, record.model);
+    const effort = resolveChoice('effort', changes.effort, record.effort);
+    // Nothing to do, and nothing to refuse over either: a PATCH that changes
+    // nothing must not fail on a container that happens to be stopped.
+    if (model === record.model && effort === record.effort) return this.get(id);
+
+    if (record.containerId === null) throw new ContainerMissingError(id);
+    const containerId = record.containerId;
+
+    // Asked before the first exec, exactly like openTerminal does: `tmux
+    // send-keys` against a session that does not exist yet fails, and by then
+    // the override files are already written.
+    const readiness = sessionOf((await this.containerSummaries()).get(containerId));
+    if (readiness !== 'ready') throw new SessionNotReadyError(id, readiness);
+
+    await this.run(containerId, overrideCommand({ model, effort }));
+
+    // `/model` before `/effort`: which levels a model offers depends on the
+    // model, so the other order can have the level land on the old one.
+    //
+    // A reset to Claude Code's own default has no `/model` to type -- bare
+    // `/model` opens a picker nobody is there to answer -- so it reaches the
+    // running session not at all and the next start through the empty override
+    // file. `/effort` does have `auto` for it. The UI offers a reset on neither,
+    // which is why this asymmetry stays out of sight.
+    if (model !== record.model && model !== null) {
+      await this.sendLine(containerId, `/model ${model}`);
+    }
+    if (effort !== record.effort) {
+      await this.sendLine(containerId, `/effort ${effort ?? 'auto'}`);
+    }
+
+    this.repository.setModelEffort(id, model, effort);
     return this.get(id);
   }
 
@@ -395,6 +593,44 @@ export class InstanceService {
     });
   }
 
+  /**
+   * Types one line into the instance's tmux session and submits it, the way a
+   * human at the console would.
+   *
+   * Two execs rather than one `sh -c`: the line reaches tmux as an argument, so
+   * nothing about it has to survive a shell. `-l` keeps tmux from reading
+   * `/model` as the name of a key.
+   *
+   * The target is the *first* pane of the first window, not the session: bare
+   * `-t <session>` means "wherever the session happens to be focused", and a
+   * second window somebody opened in the console would swallow the command.
+   * Claude runs in the pane the entrypoint's `tmux new-session` created, which
+   * is this one -- `docker/base/tmux.conf` leaves `base-index` at 0.
+   */
+  private async sendLine(containerId: string, line: string): Promise<void> {
+    const target = ['-t', `${this.tmuxSession}:0.0`];
+    await this.run(containerId, ['tmux', 'send-keys', ...target, '-l', '--', line]);
+    if (this.sendKeysPauseMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, this.sendKeysPauseMs));
+    }
+    await this.run(containerId, ['tmux', 'send-keys', ...target, 'Enter']);
+  }
+
+  /**
+   * One command in a container, with its exit code read rather than discarded.
+   *
+   * A `send-keys` that ran and failed -- a pane that is not there, a session
+   * that ended between the readiness check and this -- would otherwise be
+   * indistinguishable from one that worked, and the row would go on to record a
+   * model nobody typed.
+   */
+  private async run(containerId: string, command: string[]): Promise<void> {
+    const result = await this.engine.runCommand(containerId, command);
+    if (result.exitCode !== 0) {
+      throw new ContainerCommandFailedError(command, result.exitCode, result.output);
+    }
+  }
+
   /** The container of an instance that has to have one. Everything that talks
    *  to a running container goes through here, so "no such instance" and "no
    *  container" are one decision rather than four. */
@@ -449,12 +685,12 @@ export class InstanceService {
     };
   }
 
-  private specFor(id: string, template: ProjectTemplate): ContainerSpec {
+  private specFor(id: string, template: ProjectTemplate, choice: ModelChoice): ContainerSpec {
     return {
       instanceId: id,
       name: containerName(id),
       image: template.image,
-      env: this.envFor(template),
+      env: this.envFor(template, choice),
       labels: instanceLabels(id),
       limits: this.limits,
       capAdd: INSTANCE_CAPABILITIES,
@@ -467,7 +703,7 @@ export class InstanceService {
    *  GIT_TOKEN and read by the credential helper, so it never reaches
    *  .git/config or the console
    *  (knowledge/git-token-via-credential-helper.md). */
-  private envFor(template: ProjectTemplate): Record<string, string> {
+  private envFor(template: ProjectTemplate, choice: ModelChoice): Record<string, string> {
     const env: Record<string, string> = {};
     const set = (key: string, value: string | undefined): void => {
       if (value !== undefined && value !== '') env[key] = value;
@@ -480,6 +716,15 @@ export class InstanceService {
     set('GIT_USER_EMAIL', this.instanceEnv.gitUserEmail);
     set('CLAUDE_CODE_OAUTH_TOKEN', this.instanceEnv.claudeOauthToken);
     set('FIREWALL_ALLOW', this.instanceEnv.firewallAllow);
+
+    // Read by the entrypoint and turned into `--model` / `--effort`, not by
+    // Claude Code itself: ANTHROPIC_MODEL and CLAUDE_CODE_EFFORT_LEVEL would be
+    // the obvious variables, and both are wrong here. The effort one outranks
+    // every other way of setting the level, so a later `/effort` in the console
+    // would silently do nothing -- see
+    // knowledge/the-effort-env-var-outranks-the-slash-command.md.
+    set('CLAUDE_MODEL', choice.model ?? undefined);
+    set('CLAUDE_EFFORT', choice.effort ?? undefined);
 
     return env;
   }

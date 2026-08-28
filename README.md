@@ -28,6 +28,7 @@ says whether its Claude session is up rather than only whether its container is.
 | Egress firewall (default-deny whitelist) | Available, smoke-tested |
 | UI login (shared secret) | Available, end-to-end tested |
 | Build and start-up progress | Available, end-to-end tested |
+| Model and effort per instance | Available, end-to-end tested |
 
 ## Quick start
 
