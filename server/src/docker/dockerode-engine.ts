@@ -1,4 +1,4 @@
-import type { Duplex } from 'node:stream';
+import { Writable, type Duplex } from 'node:stream';
 import Docker from 'dockerode';
 import {
   ContainerNotFoundError,
@@ -139,6 +139,37 @@ async function drainBuildLog(
   return failure;
 }
 
+/**
+ * Reads a non-TTY exec to its end.
+ *
+ * Without `Tty: true` Docker multiplexes the two output streams into one
+ * connection and prefixes every chunk with an eight-byte frame header, so the
+ * bytes have to be demultiplexed rather than concatenated -- unlike the
+ * terminal, whose stream is raw exactly because it has a TTY
+ * (knowledge/a-non-tty-exec-is-framed.md). Both halves land in the same buffer:
+ * a command's complaint is as interesting as its answer.
+ */
+async function collectOutput(
+  modem: { demuxStream: (source: NodeJS.ReadableStream, out: Writable, err: Writable) => void },
+  stream: NodeJS.ReadableStream,
+): Promise<string> {
+  const chunks: Buffer[] = [];
+  const sink = new Writable({
+    write(chunk: Buffer, _encoding, callback) {
+      chunks.push(Buffer.from(chunk));
+      callback();
+    },
+  });
+
+  modem.demuxStream(stream, sink, sink);
+  await new Promise<void>((resolve, reject) => {
+    stream.on('end', resolve);
+    stream.on('error', reject);
+  });
+
+  return Buffer.concat(chunks).toString('utf8');
+}
+
 /** How long the attached process gets to exit on its own after `closeInput`
  *  before the stream is pulled out from under it. */
 const CLOSE_GRACE_MS = 500;
@@ -184,6 +215,20 @@ class DockerodeTerminalSession implements TerminalSession {
       clearTimeout(backstop);
     });
   }
+}
+
+/**
+ * The exit code of an exec whose output has already ended. The daemon can still
+ * report `Running` for a moment after the last byte, and treating that as a
+ * zero would call a failed command successful -- so it is asked twice.
+ */
+async function exitCodeOf(exec: Docker.Exec): Promise<number> {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const info = await exec.inspect();
+    if (!info.Running) return info.ExitCode ?? 0;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  return 0;
 }
 
 export class DockerodeEngine implements DockerEngine {
@@ -344,40 +389,34 @@ export class DockerodeEngine implements DockerEngine {
     }
   }
 
-  async runCommand(containerId: string, command: string[]): Promise<CommandResult> {
-    const container = this.docker.getContainer(containerId);
-
-    let exec: Docker.Exec;
-    let stream: Duplex;
+  async putArchive(containerId: string, targetDir: string, archive: Uint8Array): Promise<void> {
     try {
-      exec = await container.exec({
-        Cmd: command,
-        AttachStdin: false,
-        AttachStdout: true,
-        AttachStderr: true,
-        // With a TTY Docker does not multiplex the two streams, so the body can
-        // be read as it is instead of demuxed. Nothing parses this output --
-        // it exists to put into an error message -- so having stderr mixed into
-        // it is what we want rather than something to undo.
-        Tty: true,
-      });
-      stream = await exec.start({ hijack: true, stdin: false, Tty: true });
+      await this.docker
+        .getContainer(containerId)
+        .putArchive(Buffer.from(archive), { path: targetDir });
     } catch (error) {
       throw this.translateAttach(error, containerId);
     }
+  }
 
-    const chunks: Buffer[] = [];
-    for await (const chunk of stream as unknown as AsyncIterable<Buffer | string>) {
-      chunks.push(Buffer.from(chunk));
+  async runCommand(containerId: string, command: string[]): Promise<CommandResult> {
+    try {
+      const exec = await this.docker.getContainer(containerId).exec({
+        Cmd: command,
+        AttachStdout: true,
+        AttachStderr: true,
+        // No TTY: this is a command with an exit code, not a console. The
+        // price is a framed stream, which collectOutput undoes.
+        Tty: false,
+      });
+
+      const stream = await exec.start({ hijack: true, stdin: false });
+      const output = await collectOutput(this.docker.modem, stream);
+
+      return { exitCode: await exitCodeOf(exec), output };
+    } catch (error) {
+      throw this.translateAttach(error, containerId);
     }
-
-    // The stream ends when the command does, but the exit code only appears on
-    // the inspect afterwards.
-    const info = await exec.inspect();
-    return {
-      exitCode: info.ExitCode ?? 0,
-      output: Buffer.concat(chunks).toString('utf8'),
-    };
   }
 
   async buildImage(spec: ImageBuildSpec, onLog: (chunk: string) => void): Promise<void> {

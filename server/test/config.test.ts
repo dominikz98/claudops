@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   ConfigError,
   DEFAULT_INSTANCE_LIMITS,
+  DEFAULT_UPLOAD_LIMITS,
   defaultDockerSocket,
   defaultWebRoot,
   loadConfig,
@@ -181,6 +182,31 @@ describe('loadConfig', () => {
       expect(() => load({ CLAUDOPS_INSTANCE_MEMORY: '4tb' })).toThrow(ConfigError);
       // Docker's own floor is 6 MiB, and its refusal is less clear than ours.
       expect(() => load({ CLAUDOPS_INSTANCE_MEMORY: '1m' })).toThrow(ConfigError);
+    });
+  });
+
+  describe('upload limits', () => {
+    it('allows 25 MiB per file and 200 MiB per instance by default', () => {
+      expect(load({}).uploadLimits).toEqual(DEFAULT_UPLOAD_LIMITS);
+      expect(load({}).uploadLimits).toEqual({
+        maxFileBytes: 25 * 1024 * 1024,
+        maxInstanceBytes: 200 * 1024 * 1024,
+      });
+    });
+
+    it('reads both from the environment, in docker run notation', () => {
+      expect(
+        load({ CLAUDOPS_UPLOAD_MAX_FILE: '2m', CLAUDOPS_UPLOAD_MAX_TOTAL: '64m' }).uploadLimits,
+      ).toEqual({ maxFileBytes: 2 * 1024 * 1024, maxInstanceBytes: 64 * 1024 * 1024 });
+    });
+
+    it('refuses a limit that would refuse every upload', () => {
+      expect(() => load({ CLAUDOPS_UPLOAD_MAX_FILE: 'plenty' })).toThrow(ConfigError);
+      expect(() => load({ CLAUDOPS_UPLOAD_MAX_FILE: '100' })).toThrow(ConfigError);
+      // A total below the per-file limit allows a file the other number forbids.
+      expect(() =>
+        load({ CLAUDOPS_UPLOAD_MAX_FILE: '10m', CLAUDOPS_UPLOAD_MAX_TOTAL: '5m' }),
+      ).toThrow(ConfigError);
     });
   });
 

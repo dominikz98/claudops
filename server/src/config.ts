@@ -26,6 +26,19 @@ export interface InstanceEnvConfig {
   firewallAllow: string | undefined;
 }
 
+/**
+ * What an instance may be handed through `POST /instances/:id/files`. Two
+ * numbers because they answer two different worries: one request that fills the
+ * NUC's disk, and a hundred small ones that do the same over an afternoon.
+ */
+export interface UploadLimits {
+  /** Per request. Also the route's `bodyLimit`, so anything larger is refused
+   *  before it is read into memory. */
+  maxFileBytes: number;
+  /** Everything in one instance's uploads directory, together. */
+  maxInstanceBytes: number;
+}
+
 export interface ServerConfig {
   host: string;
   port: number;
@@ -66,6 +79,8 @@ export interface ServerConfig {
   instanceEnv: InstanceEnvConfig;
   /** CPU and memory ceiling every instance container is created with. */
   instanceLimits: ContainerLimits;
+  /** What may be uploaded into an instance. */
+  uploadLimits: UploadLimits;
 }
 
 export class ConfigError extends Error {}
@@ -85,6 +100,21 @@ export const DEFAULT_INSTANCE_LIMITS: ContainerLimits = {
 /** Docker refuses a memory limit below this, and the message it gives back is
  *  less clear than the one here. */
 const MIN_MEMORY_BYTES = 6 * 1024 * 1024;
+
+/**
+ * A screenshot is a couple of megabytes, a log or a heap dump more; twenty-five
+ * of them is generous for one attachment and still small enough that a mistyped
+ * upload cannot occupy the box. The total is what keeps a session of pasting
+ * from filling the instance's layer.
+ */
+export const DEFAULT_UPLOAD_LIMITS: UploadLimits = {
+  maxFileBytes: 25 * 1024 * 1024,
+  maxInstanceBytes: 200 * 1024 * 1024,
+};
+
+/** Below this an upload limit is a mistake rather than a policy -- a kilobyte
+ *  does not hold a screenshot. */
+const MIN_UPLOAD_BYTES = 1024;
 
 /** Current LTS. A project that needs another one is a `CLAUDOPS_DOTNET_CHANNEL`
  *  away, so this is a default rather than a decision. */
@@ -155,6 +185,40 @@ function instanceLimits(env: NodeJS.ProcessEnv): ContainerLimits {
   }
 
   return { cpus, memoryBytes };
+}
+
+function uploadBytes(env: NodeJS.ProcessEnv, key: string, fallback: number): number {
+  const raw = optional(env, key);
+  const bytes = raw === undefined ? fallback : parseMemory(raw);
+  if (bytes === undefined || bytes < MIN_UPLOAD_BYTES) {
+    throw new ConfigError(
+      `${key} must be a byte count with an optional b/k/m/g suffix, at least 1k, got '${raw ?? ''}'`,
+    );
+  }
+  return bytes;
+}
+
+function uploadLimits(env: NodeJS.ProcessEnv): UploadLimits {
+  const maxFileBytes = uploadBytes(
+    env,
+    'CLAUDOPS_UPLOAD_MAX_FILE',
+    DEFAULT_UPLOAD_LIMITS.maxFileBytes,
+  );
+  const maxInstanceBytes = uploadBytes(
+    env,
+    'CLAUDOPS_UPLOAD_MAX_TOTAL',
+    DEFAULT_UPLOAD_LIMITS.maxInstanceBytes,
+  );
+
+  // A total below the per-file limit is a configuration that refuses every
+  // upload the other number allows, which is never what anybody meant.
+  if (maxInstanceBytes < maxFileBytes) {
+    throw new ConfigError(
+      'CLAUDOPS_UPLOAD_MAX_TOTAL must not be smaller than CLAUDOPS_UPLOAD_MAX_FILE',
+    );
+  }
+
+  return { maxFileBytes, maxInstanceBytes };
 }
 
 /**
@@ -240,6 +304,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     auth: auth(env),
     secureCookie: optional(env, 'CLAUDOPS_SESSION_SECURE') === '1',
     instanceLimits: instanceLimits(env),
+    uploadLimits: uploadLimits(env),
     instanceEnv: {
       claudeOauthToken: optional(env, 'CLAUDE_CODE_OAUTH_TOKEN'),
       gitUserName: optional(env, 'CLAUDOPS_GIT_USER_NAME'),

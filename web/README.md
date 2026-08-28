@@ -42,7 +42,7 @@ logs a warning and serves the API only.
 | `#/login` | The shared-secret form. Where the app sends you whenever any request comes back `unauthorized`, whichever page you were on. |
 | `#/` | Instance list: create from a project, status, model and effort, delete, log out. Polls `GET /instances` every 3 s -- and holds off on repainting the table while a dropdown in it has the focus, because rebuilding the rows underneath an open one closes it. |
 | `#/projects` | Projects: create, edit, delete the templates instances come from, and watch their images being built. Polls only while a build is running. |
-| `#/i/<id>` | The console of one instance, over `GET /instances/<id>/terminal`. |
+| `#/i/<id>` | The console of one instance, over `GET /instances/<id>/terminal`, with **Attach** for files. |
 
 Routes live in the hash on purpose: `/instances/<id>` and `/projects` are already
 REST resources, so a history route would collide with them.
@@ -85,6 +85,26 @@ words. Nothing reconnects by itself -- reload the page, or use the button.
 There is no scrollback and no session state in this package. Both live in the
 container's tmux session, which is why a reload finds the console where it was.
 
+## Attachments
+
+Three ways to hand the instance a file, all of them one `POST` per file with
+the bytes as the body: the **Attach** button, a drop on the terminal, and a
+paste that carries files rather than text. The paste listener sits on the screen
+element in the capture phase and only takes over when `clipboardData.files` is
+non-empty -- a text paste has to reach xterm untouched, because that is where
+bracketed paste comes from.
+
+A clipboard image is called `image.png` in every browser and on every paste, so
+`src/upload.ts` gives it a timestamped name of its own; without that a second
+screenshot would overwrite the first inside the container. Several files go up
+one after the other rather than at once, because the server types each path into
+the prompt and parallel uploads would interleave them.
+
+The status line next to the console header shows the path the server settled on,
+or the server's error -- there is no size check in the browser: the limit is
+configurable on the server, and a second copy of that number here would be wrong
+after the first change to it.
+
 ## Structure
 
 ```
@@ -94,7 +114,8 @@ src/api.ts                the REST client, with an injectable fetch
 src/terminal/session.ts   the WebSocket: frames, close codes, geometry
 src/views/list.ts         instance list and create form
 src/views/projects.ts     projects: form, edit mode, table, image state and build log
-src/views/console.ts      xterm.js, fit addon, status line
+src/views/console.ts      xterm.js, fit addon, status line, attachments
+src/upload.ts             names for the files that arrive without one
 src/dom.ts                the three lines of DOM plumbing the views share
 ```
 
@@ -106,6 +127,7 @@ pnpm --filter @claudops/web test    # vitest, the DOM-free logic
 ```
 
 The unit tests cover the parts worth asserting without a DOM: the API client, the
-routes, the terminal URL and the close-code messages. Everything that needs a
+routes, the terminal URL, the close-code messages and the naming of a pasted
+file. Everything that needs a
 browser is in [`e2e/`](../e2e/run.sh), where it runs against a real server and a
 real container.

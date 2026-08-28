@@ -6,11 +6,12 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { sessionGate } from './auth/gate.ts';
 import { authRoutes } from './auth/routes.ts';
 import type { SessionAuth } from './auth/session.ts';
-import type { InstanceEnvConfig } from './config.ts';
+import { DEFAULT_UPLOAD_LIMITS, type InstanceEnvConfig, type UploadLimits } from './config.ts';
 import type { Database } from './db/index.ts';
 import { InstanceRepository } from './db/instances.ts';
 import {
   ContainerNotFoundError,
+  ContainerNotRunningError,
   DockerUnavailableError,
   ImageNotFoundError,
   type ContainerLimits,
@@ -21,8 +22,10 @@ import {
   ContainerCommandFailedError,
   ContainerMissingError,
   InstanceService,
+  InvalidUploadNameError,
   SessionNotReadyError,
   UnknownChoiceError,
+  UploadTooLargeError,
 } from './instances/service.ts';
 import { ProjectRepository } from './db/projects.ts';
 import {
@@ -66,6 +69,16 @@ function asHttpError(error: unknown): HttpError {
   };
 }
 
+/** Fastify's own refusal of an oversized body, which arrives as an ordinary
+ *  error with a code rather than as a class this module could `instanceof`. */
+function isBodyTooLarge(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    (error as { code?: unknown }).code === 'FST_ERR_CTP_BODY_TOO_LARGE'
+  );
+}
+
 /** Keystrokes and the occasional paste -- a megabyte is already generous, and a
  *  cap keeps a rogue client from making the server buffer without bound. */
 const MAX_WS_PAYLOAD = 1024 * 1024;
@@ -91,6 +104,8 @@ export interface AppOptions {
   /** CPU and memory ceiling per instance. Left out, the service falls back to
    *  the same defaults the config does. */
   instanceLimits?: ContainerLimits | undefined;
+  /** What may be uploaded into an instance. Same fallback as above. */
+  uploadLimits?: UploadLimits | undefined;
   /** Encrypts the project PATs. Left out, the server runs but refuses to store
    *  one -- the same behaviour as a missing CLAUDOPS_SECRET_KEY. */
   cipher?: SecretCipher | undefined;
@@ -154,11 +169,14 @@ export function buildApp(options: AppOptions): FastifyInstance {
       logger: app.log,
     });
 
+  const uploadLimits = options.uploadLimits ?? DEFAULT_UPLOAD_LIMITS;
+
   const service = new InstanceService(new InstanceRepository(options.db), options.engine, {
     instanceEnv: options.instanceEnv,
     projects,
     tmuxSession: options.tmuxSession,
     limits: options.instanceLimits,
+    uploads: uploadLimits,
     sendKeysPauseMs: options.sendKeysPauseMs,
   });
 
@@ -204,6 +222,12 @@ export function buildApp(options: AppOptions): FastifyInstance {
     if (error instanceof ContainerMissingError || error instanceof ContainerNotFoundError) {
       return reply.code(409).send({ error: 'container_missing', message: error.message });
     }
+    // The container exists and is stopped. 409 like the two above -- the
+    // instance is there, its state is what is in the way -- but its own code:
+    // the way out is Start, not Delete.
+    if (error instanceof ContainerNotRunningError) {
+      return reply.code(409).send({ error: 'container_not_running', message: error.message });
+    }
     // A model or effort value that is in neither list. 400 rather than 422: the
     // route schema rejects the same thing, so a request that gets past it and
     // reaches this is malformed in the same way -- just from a caller that went
@@ -213,9 +237,9 @@ export function buildApp(options: AppOptions): FastifyInstance {
         .code(400)
         .send({ error: 'unknown_choice', message: error.message, field: error.field });
     }
-    // Nothing to type a slash command into. 409 for the same reading as a
-    // missing container: the instance exists, its session is what is in the way,
-    // and waiting is what clears it.
+    // Nothing to type a slash command into. 409 for the same reading as the two
+    // above: the instance is there, its session is what is in the way, and
+    // waiting is what clears it.
     if (error instanceof SessionNotReadyError) {
       return reply
         .code(409)
@@ -248,6 +272,19 @@ export function buildApp(options: AppOptions): FastifyInstance {
     }
     if (error instanceof ProjectNameTakenError) {
       return reply.code(409).send({ error: 'project_name_taken', message: error.message });
+    }
+    // 413 for both ceilings, and for the one Fastify enforces itself: a client
+    // that has to shrink a file does not care which of the three refused it.
+    // Fastify's own refusal happens before the handler, drops the rest of the
+    // body and leaves the connection to the client -- the server stays up.
+    if (error instanceof UploadTooLargeError || isBodyTooLarge(error)) {
+      return reply.code(413).send({
+        error: 'upload_too_large',
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+    if (error instanceof InvalidUploadNameError) {
+      return reply.code(400).send({ error: 'invalid_filename', message: error.message });
     }
     // Both messages name the variable rather than the secret: the caller needs
     // to know the server cannot hold a PAT, not what the PAT was.
@@ -311,7 +348,7 @@ export function buildApp(options: AppOptions): FastifyInstance {
   if (auth !== undefined) void app.register(authRoutes, { auth, secureCookie });
 
   void app.register(projectRoutes, { service: projects, images });
-  void app.register(instanceRoutes, { service });
+  void app.register(instanceRoutes, { service, maxUploadBytes: uploadLimits.maxFileBytes });
   void app.register(terminalRoutes, { service, bridge: options.terminalBridge });
 
   // The SPA shares the port with the API. Exact routes win against the

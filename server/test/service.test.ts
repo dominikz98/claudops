@@ -18,9 +18,13 @@ import {
   INSTANCE_MODELS,
   InstanceNotFoundError,
   InstanceService,
+  InvalidUploadNameError,
   MISSING_STATUS,
   SessionNotReadyError,
   UnknownChoiceError,
+  UPLOAD_DIR,
+  uploadFileName,
+  UploadTooLargeError,
 } from '../src/instances/service.ts';
 import { ProjectRepository } from '../src/db/projects.ts';
 import { projectImageTag } from '../src/docker/labels.ts';
@@ -808,8 +812,9 @@ describe('InstanceService', () => {
       await service.create({ name: 'demo', projectId, model: 'haiku' });
       engine.commands.length = 0;
       // What `tmux send-keys` says when the pane it was given is not there --
-      // an exec that ran and failed, not one that could not start.
-      engine.commandResult = { exitCode: 1, output: "can't find pane: main:0.0" };
+      // an exec that ran and failed, not one that could not start. A function,
+      // because the fake answers per command since #15.
+      engine.commandResult = () => ({ exitCode: 1, output: "can't find pane: main:0.0" });
 
       await expect(service.setModelEffort('id-1', { model: 'opus' })).rejects.toThrow(
         ContainerCommandFailedError,
@@ -946,6 +951,176 @@ describe('InstanceService', () => {
 
       expect(second).not.toBe(first);
       expect(engine.terminals).toHaveLength(2);
+    });
+  });
+
+  describe('upload', () => {
+    /** The file bytes of an archive, which start behind its 512-byte header. */
+    const contentOf = (archive: Uint8Array, length: number): string =>
+      new TextDecoder().decode(archive.slice(512, 512 + length));
+
+    const upload = async (name: string, text = 'screenshot') =>
+      await service.upload('id-1', { name, content: new TextEncoder().encode(text) });
+
+    beforeEach(async () => {
+      await service.create({ name: 'demo', projectId });
+    });
+
+    it('puts the file into the uploads directory and answers with its path', async () => {
+      const result = await upload('shot.png');
+
+      expect(result).toEqual({
+        name: 'shot.png',
+        path: `${UPLOAD_DIR}/shot.png`,
+        size: 10,
+        announced: true,
+      });
+      expect(engine.archives).toHaveLength(1);
+      expect(engine.lastArchive()).toMatchObject({
+        containerId: 'container-1',
+        targetDir: UPLOAD_DIR,
+      });
+      expect(contentOf(engine.lastArchive().archive, 10)).toBe('screenshot');
+    });
+
+    it('creates the directory before writing into it', async () => {
+      await upload('shot.png');
+
+      // Docker's extraction does not create the parent of an entry, so the
+      // reading of the current usage doubles as the mkdir.
+      const script = engine.commands[0]?.command.join(' ') ?? '';
+      expect(script).toContain(`mkdir -p ${UPLOAD_DIR}`);
+      expect(script).toContain('-type f');
+    });
+
+    it('types the path into the tmux session without submitting it', async () => {
+      const result = await upload('shot.png');
+
+      expect(engine.tmuxCommands()).toEqual([
+        ['tmux', 'send-keys', '-t', 'main', '-l', `${result.path} `],
+      ]);
+    });
+
+    it('lands outside the clone, so it cannot become a commit', () => {
+      // The clone is /workspace/<repo>; this is its sibling, not its child.
+      expect(UPLOAD_DIR.startsWith('/workspace/')).toBe(true);
+      expect(UPLOAD_DIR).toBe('/workspace/.claudops/uploads');
+    });
+
+    it('uploads but does not announce while the session is still starting', async () => {
+      engine.setHealth('container-1', 'starting');
+
+      const result = await upload('shot.png');
+
+      expect(result.announced).toBe(false);
+      expect(engine.archives).toHaveLength(1);
+      expect(engine.tmuxCommands()).toEqual([]);
+    });
+
+    it('reports a tmux that refused rather than failing the upload', async () => {
+      engine.commandResult = (command) =>
+        command[0] === 'tmux'
+          ? { exitCode: 1, output: "can't find session" }
+          : { exitCode: 0, output: '' };
+
+      const result = await upload('shot.png');
+
+      expect(result.announced).toBe(false);
+      expect(engine.archives).toHaveLength(1);
+    });
+
+    it('refuses a file over the per-file limit without asking Docker', async () => {
+      service = new InstanceService(repository, engine, {
+        instanceEnv,
+        projects,
+        uploads: { maxFileBytes: 4, maxInstanceBytes: 1024 },
+      });
+
+      await expect(upload('shot.png', 'far too much')).rejects.toBeInstanceOf(UploadTooLargeError);
+      expect(engine.archives).toEqual([]);
+      expect(engine.commands).toEqual([]);
+    });
+
+    it('refuses a file the instance no longer has room for', async () => {
+      service = new InstanceService(repository, engine, {
+        instanceEnv,
+        projects,
+        uploads: { maxFileBytes: 1024, maxInstanceBytes: 1024 },
+      });
+      // What find reports for the files already lying there.
+      engine.commandResult = () => ({ exitCode: 0, output: '1000\n20\n' });
+
+      const error = await upload('shot.png').catch((reason: unknown) => reason);
+
+      expect(error).toBeInstanceOf(UploadTooLargeError);
+      expect((error as UploadTooLargeError).scope).toBe('instance');
+      expect(engine.archives).toEqual([]);
+    });
+
+    it('counts what is already there against the limit', async () => {
+      engine.uploadUsage = 40;
+      service = new InstanceService(repository, engine, {
+        instanceEnv,
+        projects,
+        uploads: { maxFileBytes: 1024, maxInstanceBytes: 45 },
+      });
+
+      // 40 + 5 fits, 40 + 6 does not.
+      await expect(upload('a.txt', '12345')).resolves.toMatchObject({ size: 5 });
+      await expect(upload('b.txt', '123456')).rejects.toBeInstanceOf(UploadTooLargeError);
+    });
+
+    it('refuses a name that would escape the uploads directory', async () => {
+      await expect(upload('../../etc/passwd')).resolves.toMatchObject({
+        // Only the last segment survives, and it is not a traversal any more.
+        path: `${UPLOAD_DIR}/passwd`,
+      });
+      await expect(upload('..')).rejects.toBeInstanceOf(InvalidUploadNameError);
+    });
+
+    it('refuses a stopped container and an unknown instance', async () => {
+      await expect(service.upload('nope', { name: 'a.txt', content: new Uint8Array(1) })).rejects
+        .toBeInstanceOf(InstanceNotFoundError);
+
+      await service.stop('id-1');
+      await expect(upload('a.txt')).rejects.toBeInstanceOf(ContainerNotRunningError);
+    });
+
+    it('says so when the uploads directory is not usable', async () => {
+      engine.commandResult = () => ({ exitCode: 1, output: 'Permission denied' });
+
+      await expect(upload('a.txt')).rejects.toThrow('Permission denied');
+      expect(engine.archives).toEqual([]);
+    });
+  });
+
+  describe('uploadFileName', () => {
+    it('keeps a plain name and takes only the last path segment', () => {
+      expect(uploadFileName('report.pdf')).toBe('report.pdf');
+      expect(uploadFileName('C:\\Users\\me\\shot.png')).toBe('shot.png');
+      expect(uploadFileName('/tmp/a/b/log.txt')).toBe('log.txt');
+    });
+
+    it('replaces everything a shell or a console would read as syntax', () => {
+      expect(uploadFileName('my file; rm -rf $HOME.txt')).toBe('my_file__rm_-rf__HOME.txt');
+      expect(uploadFileName('Bericht Öl.pdf')).toBe('Bericht__l.pdf');
+    });
+
+    it('refuses a name that is nothing but dots', () => {
+      expect(() => uploadFileName('..')).toThrow(InvalidUploadNameError);
+      expect(() => uploadFileName('/')).toThrow(InvalidUploadNameError);
+      expect(() => uploadFileName('')).toThrow(InvalidUploadNameError);
+    });
+
+    it('unhides a dotfile rather than letting an upload hide itself', () => {
+      expect(uploadFileName('.env')).toBe('env');
+    });
+
+    it('shortens a long name from the front, keeping the extension', () => {
+      const name = uploadFileName(`${'a'.repeat(200)}.png`);
+
+      expect(name).toHaveLength(80);
+      expect(name.endsWith('.png')).toBe(true);
     });
   });
 });

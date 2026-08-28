@@ -125,6 +125,19 @@ export interface UpdateProjectInput {
   buildingBlocks?: BuildingBlocks;
 }
 
+/** `UploadView` in server/src/instances/service.ts -- one file that made it
+ *  into an instance. */
+export interface Upload {
+  /** What the server settled on. A name it had to sanitise comes back changed. */
+  name: string;
+  /** The absolute path inside the container: what Claude is told. */
+  path: string;
+  size: number;
+  /** Whether the path was typed into the tmux session. `false` means the file
+   *  is there but nothing put it in the prompt -- a session that is not up. */
+  announced: boolean;
+}
+
 /** A request the server answered with an error body: `{ error, message }`. */
 export class ApiCallError extends Error {
   constructor(
@@ -178,6 +191,9 @@ export interface Api {
    *  `image.status`. */
   buildProject(id: string): Promise<Project>;
   projectBuildLog(id: string): Promise<BuildLog>;
+  /** Puts one file into the instance's uploads directory and lets the server
+   *  write its path into the console. One file per call. */
+  upload(id: string, name: string, content: Blob): Promise<Upload>;
 }
 
 interface ErrorBody {
@@ -344,6 +360,20 @@ export function createApi(
 
     projectBuildLog(id: string): Promise<BuildLog> {
       return request<BuildLog>(`/projects/${encodeURIComponent(id)}/build-log`);
+    },
+
+    upload(id: string, name: string, content: Blob): Promise<Upload> {
+      return request<Upload>(
+        `/instances/${encodeURIComponent(id)}/files?name=${encodeURIComponent(name)}`,
+        {
+          method: 'POST',
+          // Deliberately not the blob's own type: the body is the bytes and
+          // nothing else, the name travels in the query, and the server has a
+          // parser for exactly this one content type.
+          headers: { 'content-type': 'application/octet-stream' },
+          body: content,
+        },
+      );
     },
   };
 }

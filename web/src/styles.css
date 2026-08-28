@@ -386,3 +386,38 @@ button.open:disabled {
 .screen .xterm {
   height: 100%;
 }
+
+/* Attachments: the button lives in the console header, the drop target is the
+   screen itself. */
+
+.upload-status {
+  font-family: ui-monospace, monospace;
+  font-size: 0.8125rem;
+  color: var(--muted);
+  max-width: 42ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.upload-status[hidden] {
+  display: none;
+}
+
+.upload-status[data-state='done'] {
+  color: var(--ok);
+}
+
+.upload-status[data-state='warn'] {
+  color: var(--accent);
+}
+
+.upload-status[data-state='error'] {
+  color: var(--danger);
+}
+
+/* Dashed rather than solid, so it reads as "drop here" and not as an error. */
+.screen.dropping {
+  border-style: dashed;
+  border-color: var(--accent);
+}

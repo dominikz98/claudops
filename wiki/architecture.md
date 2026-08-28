@@ -8,6 +8,7 @@ Browser (SPA + xterm.js) <=> HTTP + WebSocket <=> claudops-server (Node/TS)
                                                   |- static: the SPA itself
                                                   |- REST: projects and instances (SQLite)
                                                   |- WS: one TTY per console
+                                                  |- upload: putArchive into the workspace
                                                   |- dockerode -> Docker Engine
                                                   +- image builds per project
 
@@ -42,6 +43,17 @@ attached client, a forgotten 80x24 client shrinks the pane for everyone else. Th
 bridge therefore sends tmux's detach sequence before dropping the stream, and
 pings every 30 seconds so a client that vanished without saying goodbye is
 noticed at all.
+
+**An attachment goes in as an archive, not through the console.** A file picked,
+dropped or pasted in the browser is posted to the server as raw bytes and put
+into the container with Docker's `putArchive` -- the console stays a terminal,
+and nothing has to be squeezed through a TTY. It lands in
+`/workspace/.claudops/uploads/`, a sibling of the clone: an attachment can then
+never show up in the repository's `git status` or be committed by accident, and
+that holds by the path rather than by a `.gitignore` somebody maintains.
+Afterwards the server types the path into the tmux session with
+`tmux send-keys -l` -- typed, not submitted, so a half-written prompt is not
+sent along with it.
 
 **One port, and the browser routes in the fragment.** The server serves the built
 SPA at `/` next to its own API, so there is no second process, no second origin

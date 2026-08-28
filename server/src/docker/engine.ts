@@ -89,16 +89,6 @@ export interface AttachTerminalOptions {
 }
 
 /**
- * What a one-shot `exec` in a running container produced. `output` is stdout and
- * stderr as the container wrote them, kept only so a non-zero exit code can say
- * what went wrong -- nothing reads it for data.
- */
-export interface CommandResult {
-  exitCode: number;
-  output: string;
-}
-
-/**
  * One attached TTY. The stream is a raw duplex -- with `Tty: true` Docker does
  * not multiplex, so bytes written are keystrokes and bytes read are screen
  * output, in both directions unframed.
@@ -114,6 +104,16 @@ export interface TerminalSession {
   /** Ends the session: `closeInput` first if there is one, then the stream.
    *  Idempotent. */
   close(): void;
+}
+
+/**
+ * What a one-shot `docker exec` reported. Not a terminal: no TTY, no stream
+ * to keep, just the output and how the command ended.
+ */
+export interface CommandResult {
+  exitCode: number;
+  /** stdout and stderr, in the order Docker framed them. */
+  output: string;
 }
 
 /** What one `docker build` needs. No build-context contents here: the template
@@ -203,12 +203,15 @@ export interface DockerEngine {
    *  ContainerNotFoundError or ContainerNotRunningError. */
   attachTerminal(containerId: string, options: AttachTerminalOptions): Promise<TerminalSession>;
   /**
-   * Runs one command in a running container and waits for it to end. The
-   * counterpart to `attachTerminal`: nobody is watching this one, it is the
-   * server reaching into a container to change something -- writing a file,
-   * typing into the tmux session. Throws ContainerNotFoundError or
-   * ContainerNotRunningError; a command that ran and failed comes back as a
-   * result with a non-zero `exitCode`, not as an exception.
+   * Extracts a tar archive into `targetDir` inside the container. The
+   * directory has to exist -- Docker's extraction does not create it, which is
+   * what the `mkdir -p` before every upload is for.
+   */
+  putArchive(containerId: string, targetDir: string, archive: Uint8Array): Promise<void>;
+  /**
+   * Runs one command in the container and waits for it. Everything
+   * `attachTerminal` is not: no TTY, no duplex, and an exit code at the end --
+   * which is what a `mkdir`, a `du` or a `tmux send-keys` needs.
    */
   runCommand(containerId: string, command: string[]): Promise<CommandResult>;
   /**

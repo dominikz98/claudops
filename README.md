@@ -12,7 +12,8 @@ prebuilt as an image; instances are created from them, driven, stopped and delet
 from a browser page on the server's own port, a console survives a refresh, each
 instance runs under a CPU and memory ceiling, and leftovers are reconciled away at
 every server start. A build's log grows on the page while it runs, and an instance
-says whether its Claude session is up rather than only whether its container is. Everything else is planned; see the
+says whether its Claude session is up rather than only whether its container is,
+and files or pasted screenshots can be attached to a running instance. Everything else is planned; see the
 [issues](https://github.com/dominikz98/claudops/issues) and
 [EPIC #1](https://github.com/dominikz98/claudops/issues/1).
 
@@ -28,6 +29,7 @@ says whether its Claude session is up rather than only whether its container is.
 | Egress firewall (default-deny whitelist) | Available, smoke-tested |
 | UI login (shared secret) | Available, end-to-end tested |
 | Build and start-up progress | Available, end-to-end tested |
+| File and image attachments | Available, end-to-end tested |
 | Model and effort per instance | Available, end-to-end tested |
 
 ## Quick start

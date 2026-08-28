@@ -272,6 +272,51 @@ close codes are in [server/README.md](../server/README.md#terminal).
 Two consoles on the same instance mirror each other; that is tmux, not a bug.
 Both see the same pane, and the smaller window wins the size.
 
+## Attach a file to an instance
+
+Three ways, all of them the same request underneath. In the console: the
+**Attach** button, dropping a file onto the terminal, or pasting a screenshot
+from the clipboard with `Ctrl-V`. Each one uploads the file, and the server then
+types its path into the session -- so it stands in Claude's prompt with the
+cursor behind it. Write the question after it and press Enter.
+
+From a shell, without the browser:
+
+```bash
+curl -s -b cookies.txt -X POST --data-binary @screenshot.png \
+  -H 'content-type: application/octet-stream' \
+  'http://localhost:8080/instances/<id>/files?name=screenshot.png'
+```
+
+Everything lands in `/workspace/.claudops/uploads/` inside the container, next
+to the clone rather than in it:
+
+```bash
+docker exec claudops-<id> ls -l /workspace/.claudops/uploads
+```
+
+That is deliberate. The clone is `/workspace/<repo>`, so an attachment is never
+part of the repository, never shows up in its `git status` and cannot be
+committed by accident. It is also not a safe place to keep anything: the
+directory lives in the container's own layer, and a **Delete** takes it along.
+
+Two ceilings, both set on the server:
+
+| Variable | Default | What it limits |
+| --- | --- | --- |
+| `CLAUDOPS_UPLOAD_MAX_FILE` | `25m` | One attachment |
+| `CLAUDOPS_UPLOAD_MAX_TOTAL` | `200m` | Everything one instance holds |
+
+A file over either of them answers `413` with a message naming the limit, and
+the console shows that message in red. Nothing is written, and the server keeps
+running -- an oversized body is refused before it is read. What an instance
+holds is read out of the container on every upload, so deleting attachments in
+the console frees the budget straight away:
+
+```bash
+docker exec claudops-<id> rm /workspace/.claudops/uploads/old-screenshot.png
+```
+
 ## Troubleshooting
 
 **The console is empty or Claude is not running.** Attach and look. The pane runs
@@ -293,6 +338,17 @@ reach tmux. Nothing is lost -- reconnect and the session is where it was.
 that size: another console, or a leftover client from a browser that went away
 without closing the socket. `tmux list-clients` names them, `tmux detach-client`
 removes them.
+
+**An attachment did not appear in the prompt.** The answer of the upload says
+whether it was typed: `"announced": false` means the file is in the container
+but the session was not up to type into. Wait for `session: ready` and attach it
+again, or type the path by hand -- the file is at the `path` the answer names
+either way.
+
+**An attachment was refused with 413.** Either the file is over
+`CLAUDOPS_UPLOAD_MAX_FILE`, or the instance's uploads directory is full. The
+message says which; `docker exec claudops-<id> du -sh /workspace/.claudops/uploads`
+is the other half of the answer.
 
 **The clone failed.** The container comes up anyway, on purpose -- the session
 starts in `/workspace` so you can attach and see the cause. Usual suspects: wrong

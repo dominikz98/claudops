@@ -3,6 +3,10 @@
   "compilerOptions": {
     "module": "ESNext",
     "moduleResolution": "bundler",
+    // The DOM half is for what runs *inside* page.evaluate: a spec that builds
+    // a DataTransfer to play a drop or a paste is browser code, even though it
+    // is typed here next to the Node half.
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
     "noEmit": true,
     "declaration": false,
     "sourceMap": false,
