@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# claudops-status -- report what Claude Code is doing to the claudops server.
+#
+# Registered for four hooks in claude-settings.json (UserPromptSubmit,
+# Notification, Stop, SessionEnd) and run by Claude Code with the hook's JSON on
+# stdin. It reads the event name out of that JSON, so all four entries are the
+# same command line and none of them can name an event the hook was not.
+#
+# Where it posts to is worked out here rather than handed over: the claudops
+# server listens on the host, which from in here is the gateway of the docker
+# bridge -- an address only the container can see. CLAUDOPS_STATUS_PORT and
+# CLAUDOPS_INSTANCE_ID come from the environment claudops created the container
+# with, CLAUDOPS_STATUS_TOKEN is what proves the report is this instance's.
+# Without them this does nothing at all: an image running outside claudops has
+# no server to talk to, and a hook that fails is a hook that interrupts a
+# session.
+#
+# Self-contained on purpose. A URL exported by entrypoint.sh would exist only
+# inside the tmux session it started, so the same script run from a `docker
+# exec` -- which is how both smoke tests prove this path -- would silently do
+# nothing.
+#
+# Two rules this script exists to keep:
+#
+#  * Nothing on stdout, ever. A UserPromptSubmit hook's stdout is added to the
+#    conversation as context, so a stray line of curl progress would arrive as
+#    something Claude reads and acts on.
+#  * Never a non-zero exit. Exit code 2 from a UserPromptSubmit hook blocks the
+#    prompt and erases what the user typed.
+set -uo pipefail
+
+# Both rules, in two lines, before anything can break either.
+exec >/dev/null
+trap 'exit 0' EXIT
+
+# The default route's gateway, out of /proc rather than with `ip`: there is no
+# iproute2 in this image, and the four bytes are little-endian hex in that file.
+# init-firewall.sh carries the same lines for the same address -- it runs as
+# root from a file this one cannot read, so the two are deliberately separate.
+default_gateway() {
+  local dest gw
+  while read -r _ dest gw _; do
+    [[ "$dest" == '00000000' ]] || continue
+    [[ "$gw" =~ ^[0-9A-Fa-f]{8}$ ]] || continue
+    printf '%d.%d.%d.%d' "0x${gw:6:2}" "0x${gw:4:2}" "0x${gw:2:2}" "0x${gw:0:2}"
+    return 0
+  done </proc/net/route
+  return 1
+}
+
+# Read before any guard can exit. Claude Code writes the hook's JSON into this
+# process's stdin, and a script that exits without draining it hands the writer
+# an EPIPE for no reason -- the guards below are all reasons to send nothing,
+# none of them is a reason to break the pipe.
+hook="$(cat)"
+
+[[ -n "${CLAUDOPS_STATUS_TOKEN:-}" ]] || exit 0
+
+# Overridable, but only for a caller that already has the container's
+# environment -- there is nothing an agent gains by pointing its own status
+# reports somewhere else.
+url="${CLAUDOPS_STATUS_URL:-}"
+if [[ -z "$url" ]]; then
+  # Checked rather than trusted, the same way entrypoint.sh checks the model
+  # override: both halves go into a URL, and neither is worth a single
+  # surprising character. A value that fails this is a misconfiguration, and the
+  # answer to a misconfiguration here is to report nothing.
+  [[ "${CLAUDOPS_STATUS_PORT:-}" =~ ^[1-9][0-9]{0,4}$ ]] || exit 0
+  [[ "${CLAUDOPS_INSTANCE_ID:-}" =~ ^[A-Za-z0-9._-]+$ ]] || exit 0
+  gateway="$(default_gateway)" || exit 0
+  url="http://${gateway}:${CLAUDOPS_STATUS_PORT}/instances/${CLAUDOPS_INSTANCE_ID}/status"
+fi
+
+# `notification_type` is what tells "Claude is asking you something" from the
+# nag that fires after sixty idle seconds -- the server needs it to decide
+# whether this is "needs input". Absent on the other three events, and dropped
+# here rather than sent as null.
+payload="$(jq -c '{event: .hook_event_name, notificationType: .notification_type}
+                  | with_entries(select(.value != null))' <<<"$hook" 2>/dev/null)" || exit 0
+[[ "$payload" == '{'*'}' ]] || exit 0
+
+# --max-time so a server that hangs cannot hold up a turn: SessionEnd hooks
+# share a budget of a second and a half between them, and this is best-effort
+# reporting, not a handshake. The answer is 204 and there is nothing to read.
+curl -fsS --connect-timeout 1 --max-time 2 \
+  -X POST \
+  -H "authorization: Bearer ${CLAUDOPS_STATUS_TOKEN}" \
+  -H 'content-type: application/json' \
+  --data-binary "$payload" \
+  "$url" >/dev/null 2>&1
+
+exit 0

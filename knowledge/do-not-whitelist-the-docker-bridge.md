@@ -1,9 +1,16 @@
 # Do not whitelist the docker bridge
 
 **Fact.** The egress whitelist contains no part of the container's own subnet.
-Only the nameservers from `/etc/resolv.conf` are allowed, on port 53. An instance
-therefore reaches neither `172.17.0.1:8080` -- the claudops API on the gateway --
-nor any neighbouring instance on the bridge.
+Allowed on it are the nameservers from `/etc/resolv.conf` on port 53, and -- since
+issue #17 -- one tcp port on the gateway alone, the claudops status listener. An
+instance therefore reaches neither `172.17.0.1:8080` -- the claudops API on the
+gateway -- nor any neighbouring instance on the bridge.
+
+The one port is a rule, not an ipset entry, and that is the distinction this file
+is about: the set matches an address, so an entry for the gateway would open the
+API with it. What the status port carries and why it is worth a second listener
+is
+[The status port is the one hole in the egress firewall](the-status-port-is-the-one-hole-in-the-egress-firewall.md).
 
 **Why.** Anthropic's reference `init-firewall.sh` derives `HOST_IP` from
 `ip route | grep default` and ACCEPTs that whole `/24` in both directions,
@@ -24,4 +31,4 @@ ipset, and that a request to it actually fails -- because a whitelist regression
 here is invisible from inside the container.
 
 **Applies to.** `docker/base/init-firewall.sh`, `docker/base/smoke-test.sh`,
-`wiki/architecture.md`, issue #9.
+`wiki/architecture.md`, issues #9 and #17.

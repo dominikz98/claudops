@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Smoke test for claudops-server: checks the acceptance criteria from issues #3,
-# #6, #7, #8 and #15 against a real Docker daemon and a real server process. #8
+# #6, #7, #8, #15, #16 and #17 against a real Docker daemon and a real server
+# process. #8
 # needs two server processes on the same database -- the startup reconcile is
 # only observable across a restart.
 #
@@ -25,6 +26,10 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/smoke-lib.sh"
 IMAGE="${IMAGE:-claudops-base:smoke}"
 PORT="${PORT:-18080}"
 BASE="http://127.0.0.1:$PORT"
+# The second listener, the one instance containers report to (#17). Unlike the
+# API's port it is *not* bound to loopback -- a container reaches it on the
+# docker bridge gateway, which is the whole point of it being a separate port.
+STATUS_PORT="${STATUS_PORT:-18081}"
 
 DB_FILE="$WORK_DIR/claudops.db"
 DB_FILE_NATIVE="$WORK_DIR_NATIVE/claudops.db"
@@ -90,7 +95,8 @@ start_server "$PORT" "$DB_FILE_NATIVE" "$SERVER_LOG" \
   'CLAUDOPS_GIT_USER_NAME=claudops' \
   'CLAUDOPS_GIT_USER_EMAIL=claudops@example.invalid' \
   "CLAUDOPS_UPLOAD_MAX_FILE=$UPLOAD_MAX_FILE" \
-  "CLAUDOPS_UPLOAD_MAX_TOTAL=$UPLOAD_MAX_TOTAL"
+  "CLAUDOPS_UPLOAD_MAX_TOTAL=$UPLOAD_MAX_TOTAL" \
+  "CLAUDOPS_STATUS_PORT=$STATUS_PORT"
 server_pid="$SERVER_PID"
 
 if wait_for_health "$BASE"; then
@@ -540,6 +546,66 @@ else
     "$(status_of PATCH "/instances/$model_id" '{"effort":"ludicrous"}')"
   check "The stored model survived the refusal" "opus" \
     "$(json model <<<"$(body_of GET "/instances/$model_id")")"
+fi
+
+# ------------------------------- #17: the instance says what Claude is doing
+# The whole loop in one place: a hook fires inside the container, the container
+# reaches the status listener on the docker bridge gateway -- the one address
+# its egress firewall lets through -- proves which instance it is with the token
+# claudops created it with, and `GET /instances/:id` answers differently.
+#
+# The hooks are fired by hand, with the JSON Claude Code puts on their stdin,
+# rather than by waiting for Claude to do something: that would need a real
+# OAuth token and a turn to watch, and neither says more about this path than
+# the four events do.
+if [[ -n "$session_ready" ]]; then
+  info "#17: an instance reports what Claude is doing"
+
+  # `docker exec` inherits the container's own environment, which is where the
+  # port, the instance id and the token are -- exactly what a hook has.
+  hook() {
+    docker exec -i "$model_container" /usr/local/bin/claudops-status <<<"$1" 2>&1
+  }
+  activity_of() { json activity <<<"$(body_of GET "/instances/$model_id")"; }
+
+  check "An instance nobody has asked anything is idle" "idle" "$(activity_of)"
+
+  # Nothing on stdout, ever: a UserPromptSubmit hook's output is added to the
+  # conversation as context.
+  check "The hook prints nothing at all" "" \
+    "$(hook '{"hook_event_name":"UserPromptSubmit","user_input":"do it"}')"
+  check "A submitted prompt shows as running" "running" "$(activity_of)"
+
+  hook '{"hook_event_name":"Notification","notification_type":"elicitation_dialog"}' >/dev/null
+  check "AC 1: a question shows as needs input, with no console open" "needs_input" \
+    "$(activity_of)"
+
+  hook '{"hook_event_name":"UserPromptSubmit","user_input":"yes"}' >/dev/null
+  check "AC 2: answering puts it back on running" "running" "$(activity_of)"
+
+  hook '{"hook_event_name":"Stop","last_assistant_message":"finished"}' >/dev/null
+  check "AC 2: finishing shows as done" "done" "$(activity_of)"
+
+  hook '{"hook_event_name":"Notification","notification_type":"idle_prompt"}' >/dev/null
+  check "The sixty-second idle nag is not read as a question" "done" "$(activity_of)"
+
+  # What the token is for: one instance may not speak for another, and nothing
+  # else on the network may speak for any of them.
+  check "A report with the wrong token stays as quiet as any other" "" \
+    "$(docker exec -i -e CLAUDOPS_STATUS_TOKEN=not-the-token "$model_container" \
+        /usr/local/bin/claudops-status <<<'{"hook_event_name":"UserPromptSubmit"}' 2>&1)"
+  check "... and changes nothing" "done" "$(activity_of)"
+  check "The refusal is in the server log" "1" \
+    "$(grep -c 'status report with no valid token' "$SERVER_LOG" | tr -d '\r')"
+  check "The token itself is not" "0" \
+    "$(grep -c 'not-the-token' "$SERVER_LOG" | tr -d '\r')"
+
+  # AC 4: the process that would have sent a Stop is gone with the container,
+  # so the `done` it last reported must not be what the list keeps showing.
+  docker stop "$model_container" >/dev/null 2>&1
+  check "AC 4: a container that died ends in a terminal status" "exited" \
+    "$(json status <<<"$(body_of GET "/instances/$model_id")")"
+  check "AC 4: and reports no activity at all rather than a stale one" "none" "$(activity_of)"
 fi
 
 # Removed again, so the list assertions below still see exactly one instance.

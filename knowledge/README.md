@@ -65,3 +65,7 @@ Format and maintenance rules: skill `domain-knowledge`.
 - [`tmux send-keys` needs the pane, not the session -- and a pause before Enter](send-keys-needs-the-pane-not-the-session.md) - three ways to type a command nobody receives
 - [A warm prompt cache turns a model switch into a dialog, and claudops does not answer it](a-warm-cache-turns-a-model-switch-into-a-dialog.md) - why a blind second Enter is worse than the dialog
 - [A smoke test has to wait for the state it asserts on, not for a sign of it](a-smoke-test-must-wait-for-the-state-it-asserts-on.md) - two waits that were green until the host got busy
+- [The status port is the one hole in the egress firewall, and it is a port](the-status-port-is-the-one-hole-in-the-egress-firewall.md) - why the API and the status route are two listeners
+- [A `Notification` hook is not always a question](a-notification-is-not-always-a-question.md) - the nag that would turn every finished instance amber
+- [A hook that prints is a hook that talks to Claude](a-hook-that-prints-is-a-hook-that-talks-to-claude.md) - stdout becomes context, a non-zero exit eats the prompt
+- [The browser notification is the fallback, not the mechanism](notifications-need-a-secure-context.md) - plain http has no Notification API at all

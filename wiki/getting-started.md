@@ -67,11 +67,19 @@ CLAUDOPS_GIT_USER_EMAIL="you@example.com" \
 node server/dist/index.js
 ```
 
-It listens on port 8080. Open <http://localhost:8080> and the instance list is
-there, with **Projects** in the top right;
+It listens on two ports. Port 8080 is the one you open: <http://localhost:8080>
+has the instance list, with **Projects** in the top right, and
 `curl localhost:8080/health` answers `200` when Docker is reachable and
 `503` when it is not -- that is the first thing to check if anything below
-misbehaves. The full variable table is in
+misbehaves.
+
+Port 8081 is not for you. It carries a single route that instance containers
+report to, so the list can say what Claude is doing in each of them; it is the
+only thing an instance is allowed to reach on the host, which is why it is not on
+the same port as the login. Both are configurable -- `CLAUDOPS_PORT` and
+`CLAUDOPS_STATUS_PORT` -- but the second has to match the `CLAUDOPS_STATUS_PORT`
+the base image was built with, because that is the port each container's firewall
+opens. The full variable table is in
 [server/README.md](../server/README.md).
 
 ## Create a project

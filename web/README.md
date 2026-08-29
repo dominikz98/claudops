@@ -41,6 +41,7 @@ logs a warning and serves the API only.
 | --- | --- |
 | `#/login` | The shared-secret form. Where the app sends you whenever any request comes back `unauthorized`, whichever page you were on. |
 | `#/` | Instance list: create from a project, status, model and effort, delete, log out. Polls `GET /instances` every 3 s -- and holds off on repainting the table while a dropdown in it has the focus, because rebuilding the rows underneath an open one closes it. |
+| | The Status column carries up to three things: the Docker state, whether the session is attachable, and -- once it is -- what Claude is doing (`idle`, `running`, `needs input`, `done`). |
 | `#/projects` | Projects: create, edit, delete the templates instances come from, and watch their images being built. Polls only while a build is running. |
 | `#/i/<id>` | The console of one instance, over `GET /instances/<id>/terminal`, with **Attach** for files. |
 
@@ -58,6 +59,15 @@ offered but disabled, with its state in the option text -- the server would answ
 `422`, and reading why in the picker beats reading it in a banner. With no usable
 project the Create button is off and the hint below says which of the two problems
 it is.
+
+**Alerts** in the header turns the switch to `needs input` into a browser
+notification. It is behind a click because a permission prompt has to come from
+one, and it fires on the *switch* rather than on the state, so an instance that
+is still waiting at the next poll is not announced again. The page's own title
+counts the waiting instances regardless: the Notifications API needs a secure
+context and claudops is normally reached over plain http, where it does not exist
+at all -- then the button says `Alerts n/a` and the count in the tab is the whole
+mechanism.
 
 The projects page shows each project's image as a badge -- `queued`, `building`,
 `ready`, `failed` -- with **Rebuild** and **Build log** next to it; the log opens
@@ -113,6 +123,7 @@ src/router.ts             hash routes
 src/api.ts                the REST client, with an injectable fetch
 src/terminal/session.ts   the WebSocket: frames, close codes, geometry
 src/views/list.ts         instance list and create form
+src/notify.ts             when an instance starts waiting: the notification and the tab count
 src/views/projects.ts     projects: form, edit mode, table, image state and build log
 src/views/console.ts      xterm.js, fit addon, status line, attachments
 src/upload.ts             names for the files that arrive without one

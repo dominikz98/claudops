@@ -14,7 +14,10 @@
 #    the rules flushed -- it fails open while reporting failure.
 #  * The host's /24 is not whitelisted. Here that subnet is the docker bridge:
 #    the claudops API listens on the gateway, and the neighbours are other
-#    instances. Only the nameservers from /etc/resolv.conf are allowed, port 53.
+#    instances. Allowed on it are the nameservers from /etc/resolv.conf on port
+#    53, and one tcp port on the gateway alone -- the claudops status listener,
+#    whose whole surface is a route that takes a hook report and answers 204
+#    (knowledge/the-status-port-is-the-one-hole-in-the-egress-firewall.md).
 #  * No blanket ACCEPT for tcp/22. claudops clones over HTTPS through the
 #    credential helper; an open SSH port is an exfiltration channel.
 #  * IPv6 is rejected wholesale. There is no v6 ipset, and half-filtered v6
@@ -50,6 +53,21 @@ declare -a domains=()
 declare -a resolvers=()
 
 log() { printf '[firewall] %s\n' "$*"; }
+
+# The default route's gateway, out of /proc rather than with `ip`: there is no
+# iproute2 in this image, and the four bytes are little-endian hex in that file.
+# claudops-status carries the same lines for the same address -- it runs as the
+# agent, this file is 0500 root-only, and neither may depend on the other.
+default_gateway() {
+  local dest gw
+  while read -r _ dest gw _; do
+    [[ "$dest" == '00000000' ]] || continue
+    [[ "$gw" =~ ^[0-9A-Fa-f]{8}$ ]] || continue
+    printf '%d.%d.%d.%d' "0x${gw:6:2}" "0x${gw:4:2}" "0x${gw:2:2}" "0x${gw:0:2}"
+    return 0
+  done </proc/net/route
+  return 1
+}
 
 # state <token> [detail ...] -- first line is one word, so a smoke test can read
 # it without parsing.
@@ -263,6 +281,28 @@ for ns in "${resolvers[@]}"; do
   iptables -A "$CHAIN" -d "$ns" -p tcp --dport 53 -j ACCEPT
 done
 iptables -A "$CHAIN" -m set --match-set "$ALLOW_SET" dst -j ACCEPT
+
+# The one address on the bridge an instance may reach, and the reason it is a
+# rule instead of an ipset entry: the set matches a destination address, and the
+# claudops API sits on the same address as the status listener. Only the port
+# separates them, so only a rule can express it.
+#
+# CLAUDOPS_STATUS_PORT arrives through sudoers' env_keep, like FIREWALL_ALLOW,
+# and is as safe as that one for the same reason: the agent may well re-run this
+# with a port of its own choosing, and the sentinel above exits 3 before a
+# single variable is read (knowledge/firewall-sentinel-is-an-iptables-chain.md).
+status_port="${CLAUDOPS_STATUS_PORT:-}"
+if [[ "$status_port" =~ ^[1-9][0-9]{0,4}$ ]] && ((status_port < 65536)); then
+  if status_gateway="$(default_gateway)"; then
+    iptables -A "$CHAIN" -d "$status_gateway" -p tcp --dport "$status_port" -j ACCEPT
+    log "claudops status endpoint allowed: $status_gateway:$status_port."
+  else
+    log 'WARNING: no default route -- the status endpoint stays unreachable.'
+  fi
+elif [[ -n "$status_port" ]]; then
+  log "WARNING: CLAUDOPS_STATUS_PORT='$status_port' is not a port -- ignored."
+fi
+
 # REJECT rather than DROP: the agent gets "connection refused" at once instead of
 # a two-minute hang, and the blocked probe below returns immediately.
 iptables -A "$CHAIN" -j REJECT --reject-with icmp-admin-prohibited

@@ -16,6 +16,17 @@
 export type SessionReadiness = 'none' | 'starting' | 'ready' | 'failed';
 
 /**
+ * What Claude is doing inside the instance, as the instance itself reports it
+ * through its Claude Code hooks -- the third axis next to the Docker status and
+ * the session readiness.
+ *
+ * `InstanceActivity` in server/src/instances/activity.ts, which is where the
+ * rules that produce it are. `none` means the container is not running, so
+ * there is nothing to be doing.
+ */
+export type InstanceActivity = 'none' | 'idle' | 'running' | 'needs_input' | 'done';
+
+/**
  * Model aliases and effort levels an instance can run at.
  *
  * `INSTANCE_MODELS` / `INSTANCE_EFFORTS` in server/src/instances/service.ts,
@@ -54,6 +65,8 @@ export interface Instance {
   status: string;
   /** Whether the console is attachable. `running` alone is not enough. */
   session: SessionReadiness;
+  /** What Claude is doing in there. `none` while the container is not up. */
+  activity: InstanceActivity;
 }
 
 export interface CreateInstanceInput {

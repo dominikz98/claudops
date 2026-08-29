@@ -22,6 +22,11 @@ entrypoint has installed the egress firewall and cloned the repository. **Consol
 stays disabled until that badge says `ready`, because until then there is nothing
 to attach to. See [Is the session up](#is-the-session-up).
 
+Once it is ready, a third badge says what Claude is doing in there -- working,
+waiting for an answer, or finished. **Alerts** in the header turns the waiting
+one into a browser notification. See
+[What is Claude doing in there](#what-is-claude-doing-in-there).
+
 **Projects** in the top right manages the templates instances are created from.
 Each row carries the state of its image, with **Rebuild** and **Build log** next
 to it. The page normally does not poll, because nothing but this page changes a
@@ -124,6 +129,51 @@ An instance started from a project image built before this existed carries no
 healthcheck. It reports `ready` as soon as its container runs, which is the
 behaviour that preceded the field; rebuild the project image to get the real
 answer.
+
+## What is Claude doing in there
+
+The third badge in the Status column, next to the Docker state and the session.
+It is what lets a list of twenty instances be read without opening twenty
+consoles, and it is reported by the instance itself -- Claude Code's hooks inside
+the container post each event to the server.
+
+```bash
+curl -s localhost:8080/instances | grep -o '"activity":"[a-z_]*"'
+```
+
+| Activity | Meaning |
+| --- | --- |
+| `idle` | The session is up and nobody has given it anything to do yet. |
+| `running` | A turn is in flight. Leave it alone. |
+| `needs_input` | Claude asked something and is waiting for an answer. This is the one to act on -- open the console. |
+| `done` | Claude finished its turn, or the session ended. Read what it did, or give it more. |
+| `none` | No running container, so nothing is happening. The Docker status is the whole answer. |
+
+**Notifications.** The **Alerts** button in the header asks the browser for
+permission to notify you when an instance switches to `needs_input`. Browsers
+only offer that over https, so on a plain-http LAN address it reads `Alerts n/a`
+-- the tab title still counts the waiting instances, which works everywhere and
+is visible from another tab.
+
+**An instance that stays on `idle`.** It is not reporting. In order of
+likelihood:
+
+```bash
+docker logs claudops-<id> 2>&1 | grep -i status     # "Status reports go to ..." or "No status endpoint configured"
+docker exec claudops-<id> env | grep CLAUDOPS_STATUS   # port and token present?
+docker exec claudops-<id> cat /home/claude/.claude/settings.json   # the four hooks
+docker logs claudops-<id> 2>&1 | grep 'status endpoint allowed'    # the firewall rule
+```
+
+An image built before this existed has neither the hooks nor the script; rebuild
+the project image. An instance whose hooks are gone still shows `running` while a
+turn is in flight -- the server falls back to reading the tmux pane -- but cannot
+tell `needs_input` from `idle`, because a Claude waiting for an answer prints
+nothing a pane can recognise.
+
+If the server log says `status report with no valid token`, the container is
+reporting with a token from an older `CLAUDOPS_LOGIN_SECRET`. Restarting the
+instance hands it the current one.
 
 ## Project images
 
@@ -540,6 +590,12 @@ The first line of the state file is one word:
 | `active` | The firewall is up. Everything the log listed with a `+` is reachable, nothing else. |
 | `failed` | Setup did not finish, so the container was sealed to loopback. Claude was not started. |
 | `unfiltered` | Not even the seal was possible -- almost always a missing `--cap-add=NET_ADMIN`. Egress is **not** restricted, and Claude was still not started. |
+
+The one address on the docker bridge an instance may reach is the claudops
+status listener, on `CLAUDOPS_STATUS_PORT` on the gateway -- a single rule for a
+single tcp port, which the log names as `status endpoint allowed: <gateway>:<port>`.
+Nothing else on the host is reachable, the claudops API included, and neither is
+any neighbouring instance.
 
 For a host that is genuinely needed, add it to the server's
 `CLAUDOPS_FIREWALL_ALLOW` (comma- or space-separated hosts and CIDRs), restart

@@ -17,6 +17,7 @@ import {
   type ContainerLimits,
   type DockerEngine,
 } from './docker/engine.ts';
+import type { ActivityTracker } from './instances/activity.ts';
 import { instanceRoutes } from './instances/routes.ts';
 import {
   ContainerCommandFailedError,
@@ -47,6 +48,7 @@ import {
   SecretUndecryptableError,
   type SecretCipher,
 } from './secrets/cipher.ts';
+import type { StatusTokens } from './status/tokens.ts';
 import type { BridgeOptions } from './terminal/bridge.ts';
 import { terminalRoutes } from './terminal/routes.ts';
 
@@ -127,6 +129,17 @@ export interface AppOptions {
   /** `Secure` on the session cookie. Only with TLS in front: a browser drops a
    *  Secure cookie that arrived over plain http. */
   secureCookie?: boolean | undefined;
+  /**
+   * Where the instances' hook reports land. Handed in rather than built here
+   * because the status listener -- a second app on a second port -- is the half
+   * that writes it, and both halves have to share the one map.
+   */
+  activity?: ActivityTracker | undefined;
+  /** Issues the token a container reports with. Together with `statusPort`
+   *  this is what puts the three CLAUDOPS_STATUS_* variables into a new
+   *  container; without either, instances are created unable to report. */
+  statusTokens?: StatusTokens | undefined;
+  statusPort?: number | undefined;
 }
 
 export function buildApp(options: AppOptions): FastifyInstance {
@@ -178,6 +191,9 @@ export function buildApp(options: AppOptions): FastifyInstance {
     limits: options.instanceLimits,
     uploads: uploadLimits,
     sendKeysPauseMs: options.sendKeysPauseMs,
+    activity: options.activity,
+    statusTokens: options.statusTokens,
+    statusPort: options.statusPort,
   });
 
   // What a restart interrupted, and what an upgrade left behind: a project from

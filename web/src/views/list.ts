@@ -17,11 +17,18 @@ import {
   INSTANCE_MODELS,
   type Api,
   type Instance,
+  type InstanceActivity,
   type ModelChoice,
   type Project,
   type SessionReadiness,
 } from '../api.ts';
 import { clear, el, relativeTime } from '../dom.ts';
+import {
+  browserNotifications,
+  createNotifier,
+  type Notifier,
+  type NotifyState,
+} from '../notify.ts';
 import { navigate, routeHash } from '../router.ts';
 import type { View } from './view.ts';
 
@@ -43,6 +50,25 @@ const SESSION_HINTS: Record<SessionReadiness, string> = {
   failed: 'The container never reached its session. `docker logs` on it says why.',
 };
 
+/** The third axis: what Claude is doing, as the instance's own hooks report
+ *  it. `none` never reaches a badge -- a container that is not running has its
+ *  Docker status as the whole answer. */
+const ACTIVITY_LABELS: Record<InstanceActivity, string> = {
+  none: '',
+  idle: 'idle',
+  running: 'running',
+  needs_input: 'needs input',
+  done: 'done',
+};
+
+const ACTIVITY_HINTS: Record<InstanceActivity, string> = {
+  none: '',
+  idle: 'The session is up and nobody has asked it for anything yet.',
+  running: 'Claude is working on a turn.',
+  needs_input: 'Claude asked something and is waiting for the answer.',
+  done: 'Claude finished. Open the console to read what it did, or give it more.',
+};
+
 /** What the model dropdowns say when they are disabled. Switching types slash
  *  commands into the session, so there has to be one. */
 const CHOICE_HINTS: Record<SessionReadiness, string> = {
@@ -50,6 +76,17 @@ const CHOICE_HINTS: Record<SessionReadiness, string> = {
   starting: 'The session is still coming up. The model can be changed once it is.',
   ready: '',
   failed: 'The container never reached its session, so there is nothing to type into.',
+};
+
+/** Why the Alerts button reads the way it does. `unsupported` is the common
+ *  case rather than an exotic one: the Notifications API needs a secure
+ *  context, and a NUC on a LAN is reached over plain http. */
+const ALERT_HINTS: Record<NotifyState, string> = {
+  unsupported:
+    'This browser offers no notifications over plain http. The tab title counts the waiting instances instead.',
+  default: 'Get a notification when an instance starts waiting for an answer.',
+  granted: 'Notifications are on for instances that start waiting.',
+  denied: 'Notifications are blocked for this site. The tab title still counts them.',
 };
 
 /** Which way the power button points, by Docker state. `missing` is in neither
@@ -90,6 +127,36 @@ export function mountList(root: HTMLElement, api: Api): View {
       navigate({ view: 'login' });
     })();
   });
+
+  /**
+   * Browser notifications for the switch to "needs input". Off until somebody
+   * asks for them: a permission prompt has to come from a click, and a page
+   * that asks on load is the one every browser trained its users to dismiss.
+   *
+   * The tab title counts the waiting instances either way -- that channel needs
+   * no permission and survives the insecure context a LAN address means.
+   */
+  const notifier: Notifier = createNotifier(browserNotifications());
+
+  const alerts = el('button', { class: 'secondary alerts', 'data-testid': 'alerts' }, 'Alerts');
+  const showAlertState = (state: NotifyState): void => {
+    const labels: Record<NotifyState, string> = {
+      unsupported: 'Alerts n/a',
+      default: 'Alerts off',
+      granted: 'Alerts on',
+      denied: 'Alerts blocked',
+    };
+    alerts.textContent = labels[state];
+    alerts.setAttribute('title', ALERT_HINTS[state]);
+    if (state === 'granted' || state === 'unsupported' || state === 'denied') {
+      alerts.setAttribute('disabled', 'disabled');
+    }
+  };
+  alerts.addEventListener('click', () => {
+    void notifier.enable().then(showAlertState);
+  });
+  showAlertState(notifier.state());
+
   const rows = el('tbody', { 'data-testid': 'instances' });
   const submit = el('button', { type: 'submit', 'data-testid': 'create-submit' }, 'Create');
 
@@ -281,6 +348,23 @@ export function mountList(root: HTMLElement, api: Api): View {
       );
     }
 
+    // Only next to a session that is up. While one is `starting` there is no
+    // Claude yet to be doing anything, and an `idle` badge beside it would be
+    // an answer to a question nobody asked.
+    if (instance.session === 'ready' && instance.activity !== 'none') {
+      cell.append(
+        el(
+          'span',
+          {
+            class: `badge activity ${instance.activity}`,
+            'data-testid': 'activity',
+            title: ACTIVITY_HINTS[instance.activity],
+          },
+          ACTIVITY_LABELS[instance.activity],
+        ),
+      );
+    }
+
     return cell;
   };
 
@@ -415,6 +499,10 @@ export function mountList(root: HTMLElement, api: Api): View {
       instances = await api.list();
       if (destroyed) return;
       clearError();
+      // Before the repaint, and regardless of whether one happens: a dropdown
+      // that has the focus holds the table back, and an instance that started
+      // waiting meanwhile is exactly when the notification matters.
+      notifier.update(instances);
       // The data is kept either way; only the repaint waits.
       if (!busy()) renderRows();
     } catch (error) {
@@ -526,6 +614,7 @@ export function mountList(root: HTMLElement, api: Api): View {
         { class: 'nav', href: routeHash({ view: 'projects' }), 'data-testid': 'projects-link' },
         'Projects →',
       ),
+      alerts,
       logout,
     ),
     form,

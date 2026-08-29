@@ -38,7 +38,7 @@ docker build -t claudops-base docker/base
 | `GET` | `/projects/:id/build-log` | `{ status, builtAt, log }` of the last build. |
 | `DELETE` | `/projects/:id` | Remove a project and its image. `204`, `404` if unknown, `409` while instances point at it. |
 | `POST` | `/instances` | Start an instance from a project. Body: `name`, `projectId` (both required), `model` and `effort` (optional). Answers `201` with the instance. |
-| `GET` | `/instances` | All instances, each with the status Docker reports and whether its session is attachable. |
+| `GET` | `/instances` | All instances, each with the status Docker reports, whether its session is attachable, and what Claude is doing in it. |
 | `GET` | `/instances/:id` | One instance. `404` if unknown. |
 | `PATCH` | `/instances/:id` | Change the model, the effort level, or both, on a running instance. `409` when there is no session to type into; see [Model and effort](#model-and-effort). |
 | `POST` | `/instances/:id/stop` | Stop the container, keep the instance. Answers `200` with its new status. |
@@ -46,6 +46,12 @@ docker build -t claudops-base docker/base
 | `DELETE` | `/instances/:id` | Remove the container, its volumes and the instance. `204`, or `404` if unknown. |
 | `POST` | `/instances/:id/files` | Attach one file. Bytes as the body, name in `?name=`. Answers `201`. See [Attachments](#attachments). |
 | `GET` | `/instances/:id/terminal` | WebSocket: the instance console. See [Terminal](#terminal). |
+
+One route is deliberately not on this port. `POST /instances/:id/status` lives on
+`CLAUDOPS_STATUS_PORT` and takes the hook reports of an instance container,
+authenticated with that instance's own token -- see
+[Activity](#instance-lifecycle). It is the only thing an instance may reach on
+the host, which is why it is not next to the login.
 
 A project first, then an instance from it -- the answer to the first call carries
 the `id` the second one needs:
@@ -199,6 +205,33 @@ terminal endpoint refuses `starting` and `failed` with `session_not_ready` befor
 it creates an exec. An instance whose image carries no healthcheck -- one built
 before this existed -- reports `ready` while its container runs, which is the
 behaviour that preceded the field.
+
+**Activity.** A third field, next to `status` and `session`: what Claude is
+doing in there, as the instance itself reports it.
+
+| `activity` | Meaning |
+| --- | --- |
+| `idle` | The session is up and nobody has asked it for anything yet. |
+| `running` | A turn is in flight. |
+| `needs_input` | Claude asked something and is waiting for an answer. |
+| `done` | The turn finished, or the session ended. |
+| `none` | No running container, so nothing can be happening. |
+
+The reports come from Claude Code's own hooks inside the container --
+`UserPromptSubmit`, `Notification`, `Stop`, `SessionEnd` -- which run
+`/usr/local/bin/claudops-status` and post to the status listener. A container
+that cannot report, or one from an image built before this existed, is read from
+its tmux pane instead: that can tell a turn in flight from a quiet prompt, which
+is all a pane can honestly say.
+
+Two things are worth knowing about the values. A `Notification` also fires after
+sixty idle seconds, and that one deliberately changes nothing -- otherwise every
+finished instance would claim to need input a minute later. And `none` outranks
+whatever was last reported, so a container that died cannot leave a `running`
+standing: the process that would have sent the `Stop` went with it.
+
+Nothing about this is stored. A server restart starts from "nothing reported"
+and reads the panes again.
 
 **Stop and start.** `POST /instances/:id/stop` stops the container and keeps
 everything in it -- the workspace, the clone, the git state. `POST
@@ -389,7 +422,9 @@ drives.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `CLAUDOPS_HOST` | `0.0.0.0` | Listen address. |
-| `CLAUDOPS_PORT` | `8080` | Listen port. |
+| `CLAUDOPS_PORT` | `8080` | Listen port: the API, the WebSocket and the UI. |
+| `CLAUDOPS_STATUS_HOST` | `0.0.0.0` | Listen address of the status listener. It has to be reachable from the docker bridge, so loopback is not an option; the per-instance token is what guards it. |
+| `CLAUDOPS_STATUS_PORT` | `8081` | Listen port of the status listener -- one route, `POST /instances/:id/status`, and the only thing an instance may reach on the host. Must match `CLAUDOPS_STATUS_PORT` in the image, which is what the container's firewall opens and what its hooks dial. |
 | `CLAUDOPS_DB` | `data/claudops.db` | SQLite file. Created together with its directory. |
 | `CLAUDOPS_BASE_IMAGE` | `claudops-base` | What a project image is built `FROM`. Instances start from their project's image. |
 | `CLAUDOPS_PROJECT_CONTEXT` | `docker/project` next to the package | Build context for project images. The tests point this at `docker/project-stub`. |
@@ -428,6 +463,10 @@ src/projects/routes.ts    REST endpoints and their schemas
 src/docker/tar.ts         the one archive putArchive takes: a single file
 src/instances/service.ts  orchestration: rows, containers, status join, attach, uploads
 src/instances/routes.ts   REST endpoints and their schemas
+src/instances/activity.ts what Claude is doing: hook events and pane text -> one word
+src/status/tokens.ts      the per-instance token a container reports with
+src/status/routes.ts      the one route on the status port
+src/status/app.ts         the second Fastify app, on its own port
 src/terminal/protocol.ts  the wire format: frames, close codes
 src/terminal/bridge.ts    one socket to one TTY, both directions
 src/terminal/routes.ts    the WebSocket endpoint

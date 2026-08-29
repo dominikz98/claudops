@@ -31,6 +31,13 @@ SWITCHED_MODEL='sonnet'
 TEST_BRANCH="${TEST_BRANCH:-main}"
 REPO_DIR="/workspace/claudops"
 MARKER="CLAUDOPS_SCROLLBACK_MARKER"
+# Issue #17: what claudops hands a container so its hooks can report what Claude
+# is doing. Nothing listens on the port during this run -- that end-to-end is
+# server/smoke-test.sh. What is checked here is the container's half: the one
+# firewall rule, the hooks, and a script that stays quiet whatever happens.
+STATUS_PORT="19081"
+STATUS_INSTANCE="smoke-instance-id"
+STATUS_TOKEN="smoke-status-token"
 
 pass=0
 fail=0
@@ -71,6 +78,9 @@ docker run -d --name "$CONTAINER" \
   -e GIT_USER_EMAIL="claudops@example.invalid" \
   -e CLAUDE_MODEL="$START_MODEL" \
   -e CLAUDE_EFFORT="$START_EFFORT" \
+  -e CLAUDOPS_STATUS_PORT="$STATUS_PORT" \
+  -e CLAUDOPS_INSTANCE_ID="$STATUS_INSTANCE" \
+  -e CLAUDOPS_STATUS_TOKEN="$STATUS_TOKEN" \
   ${CLAUDE_CODE_OAUTH_TOKEN:+-e CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN"} \
   "$IMAGE" >/dev/null || { bad "docker run"; exit 1; }
 
@@ -211,6 +221,49 @@ if [[ "$gateway_rc" != "0" ]]; then
 else
   bad "The container reached the docker bridge gateway"
 fi
+
+# ------------------------------------------- AC (#17): the one deliberate hole
+# The status listener is the single address:port an instance may reach on the
+# host, and it is a rule rather than an ipset entry because the set matches an
+# address and the API sits on the same one. Both halves are asserted: that the
+# rule is there, and -- above -- that the API's port on the same gateway still
+# is not.
+info "AC (#17): the container may reach the status port and nothing else on the host"
+check "The status port is allowed on the gateway" "0" \
+  "$(docker exec -u root "$CONTAINER" \
+      iptables -C CLAUDOPS-EGRESS -d "$gateway" -p tcp --dport "$STATUS_PORT" -j ACCEPT \
+      >/dev/null 2>&1; echo $?)"
+check "No rule opens the API's port on the same address" "1" \
+  "$(docker exec -u root "$CONTAINER" \
+      iptables -C CLAUDOPS-EGRESS -d "$gateway" -p tcp --dport 8080 -j ACCEPT \
+      >/dev/null 2>&1; echo $?)"
+check "The firewall says which endpoint it opened" "1" \
+  "$(docker logs "$CONTAINER" 2>&1 | grep -c "status endpoint allowed: $gateway:$STATUS_PORT" | tr -d '\r')"
+
+info "AC (#17): Claude Code is configured to report what it is doing"
+for event in UserPromptSubmit Notification Stop SessionEnd; do
+  check "$event runs claudops-status" "/usr/local/bin/claudops-status" \
+    "$(dexec jq -r ".hooks.${event}[0].hooks[0].command" \
+        /home/claude/.claude/settings.json 2>/dev/null | tr -d '\r')"
+done
+
+# Three ways a hook can go wrong inside a container, and none of them may reach
+# the session: stdout is added to the conversation as context on
+# UserPromptSubmit, and a non-zero exit there erases what the user typed. The
+# server is not listening in this run, so this is the failing path throughout.
+info "AC (#17): a hook that cannot report is silent and successful anyway"
+hook_out="$(dexec sh -c \
+  'printf %s "{\"hook_event_name\":\"UserPromptSubmit\"}" | /usr/local/bin/claudops-status' 2>&1)"
+check "It prints nothing, not even an error" "" "$(tr -d '\r' <<<"$hook_out")"
+check "It exits 0 with no server there" "0" \
+  "$(dexec sh -c 'printf %s "{\"hook_event_name\":\"Stop\"}" | /usr/local/bin/claudops-status' \
+      >/dev/null 2>&1; echo $?)"
+check "It exits 0 on stdin that is not JSON" "0" \
+  "$(dexec sh -c 'printf %s "not json" | /usr/local/bin/claudops-status' >/dev/null 2>&1; echo $?)"
+check "It exits 0 with no endpoint configured at all" "0" \
+  "$(docker exec -e CLAUDOPS_STATUS_TOKEN= -e CLAUDOPS_STATUS_PORT= "$CONTAINER" \
+      sh -c 'printf %s "{\"hook_event_name\":\"Stop\"}" | /usr/local/bin/claudops-status' \
+      >/dev/null 2>&1; echo $?)"
 
 info "AC (#9): the agent cannot widen its own whitelist"
 check "Re-running the firewall is refused" "3" \

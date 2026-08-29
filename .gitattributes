@@ -5,6 +5,7 @@
 Dockerfile        text eol=lf
 .dockerignore     text eol=lf
 git-credential-*  text eol=lf
+claudops-status   text eol=lf
 
 # Server sources. Not run in the image today, but the dev host is Windows with
 # autocrlf on, and CRLF would arrive the moment one of these is copied into a
