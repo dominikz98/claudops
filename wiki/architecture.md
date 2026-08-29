@@ -5,12 +5,15 @@ NUC and mirrors their consoles into the browser.
 
 ```
 Browser (SPA + xterm.js) <=> HTTP + WebSocket <=> claudops-server (Node/TS)
-                                                  |- static: the SPA itself
+                                       :8080      |- static: the SPA itself
                                                   |- REST: projects and instances (SQLite)
                                                   |- WS: one TTY per console
                                                   |- upload: putArchive into the workspace
                                                   |- dockerode -> Docker Engine
                                                   +- image builds per project
+
+Instance container ------------------> claudops-server
+  Claude Code hooks       :8081        +- POST /instances/<id>/status, and nothing else
 
 claudops-base -> docker/project + building blocks -> claudops-project-<id>
 Container per instance: project image -> clone repo -> tmux -> claude
@@ -126,6 +129,32 @@ repository size at once. The same check is what turns an entrypoint that never
 reaches tmux into a terminal state rather than a permanent "starting", once its
 start period has passed.
 
+**What Claude is doing is reported by the instance, on its own port.** A third
+field next to the Docker status and the session readiness says whether a turn is
+running, whether Claude has asked something and is waiting, or whether it has
+finished -- so a list of twenty instances can be read without opening twenty
+consoles. Nothing outside the container can see any of that, so the container
+says it: Claude Code's `UserPromptSubmit`, `Notification`, `Stop` and `SessionEnd`
+hooks run a small script that posts the event to the server.
+
+That report is the one thing an instance is allowed to send to the host, and it
+goes to a **second listener on its own port** (`CLAUDOPS_STATUS_PORT`, 8081)
+rather than to the API. The container's egress firewall filters by address and
+port and cannot filter by path: opening the API's port would hand every instance
+the login endpoint to guess at, so the hole in the firewall is a port that
+carries exactly one route. Which instance a report is about is proved by a token
+derived from the login secret and handed to the container when it is created --
+it stops an instance from speaking for another, and the rest of the network from
+speaking for any.
+
+The status itself is kept in memory, not in the database: it is about a process
+that is running now, and a row would outlive both the process and the server.
+What a restart loses is read back from the tmux pane, which is also the fallback
+for a container from an image that has no hooks -- it can tell a turn in flight
+from a quiet prompt, which is as much as a pane can honestly say. A container
+that is not running reports no activity at all, so a `running` cannot outlive the
+Claude that reported it.
+
 **Cleaning up is a startup pass, not a poller.** Docker and the database can only
 drift apart when something dies between two steps: a killed server, a `docker rm`
 by hand, a create that failed after its container was up. Once, at startup, the
@@ -162,8 +191,11 @@ image lets the unprivileged entrypoint reach `iptables`.
 Two properties of it are worth knowing. **The docker bridge is not on the
 whitelist**, so an instance can reach neither the claudops API on the gateway nor
 its neighbours -- the terminal bridge is a `docker exec`, not a connection into
-the container. And **the firewall is configured exactly once per container
-start**: a re-run is refused, so the agent inside cannot widen its own whitelist.
+the container. The single exception is the status port described above, opened as
+one rule for one tcp port on the gateway alone, which is why it is a separate
+listener from the API in the first place. And **the firewall is configured
+exactly once per container start**: a re-run is refused, so the agent inside
+cannot widen its own whitelist.
 If the firewall cannot be established, Claude is not started at all -- the
 session comes up with a plain shell so the console still works for diagnosis.
 

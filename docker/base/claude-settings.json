@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "/usr/local/bin/claudops-status" }] }
+    ],
+    "Notification": [
+      { "hooks": [{ "type": "command", "command": "/usr/local/bin/claudops-status" }] }
+    ],
+    "Stop": [
+      { "hooks": [{ "type": "command", "command": "/usr/local/bin/claudops-status" }] }
+    ],
+    "SessionEnd": [
+      { "hooks": [{ "type": "command", "command": "/usr/local/bin/claudops-status" }] }
+    ]
+  }
+}

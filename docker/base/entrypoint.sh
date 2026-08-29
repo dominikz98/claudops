@@ -19,6 +19,8 @@ CLAUDE_MODEL="${CLAUDE_MODEL:-}"
 CLAUDE_EFFORT="${CLAUDE_EFFORT:-}"
 OVERRIDE_DIR="$HOME/.claudops"
 FIREWALL_MODE="${FIREWALL_MODE:-enforce}"
+CLAUDOPS_STATUS_PORT="${CLAUDOPS_STATUS_PORT:-}"
+CLAUDOPS_INSTANCE_ID="${CLAUDOPS_INSTANCE_ID:-}"
 FIREWALL_SCRIPT='/usr/local/bin/init-firewall.sh'
 FIREWALL_STATE='/run/claudops-firewall.state'
 
@@ -31,6 +33,20 @@ host_from_url() {
   local rest="${1#*://}"
   rest="${rest#*@}"
   printf '%s' "${rest%%/*}"
+}
+
+# Says in `docker logs` whether this container can report what Claude is doing,
+# which is the first thing to look at when an instance stays on `idle` in the
+# list. The address itself is not worked out here: claudops-status finds the
+# gateway when a hook fires, so that it works from a `docker exec` too.
+report_status_endpoint() {
+  if [[ -z "$CLAUDOPS_STATUS_PORT" || -z "$CLAUDOPS_INSTANCE_ID" ]]; then
+    log 'No status endpoint configured -- the instance will not report what it is doing.'
+    return 0
+  fi
+
+  log "Status reports go to the docker bridge gateway on port ${CLAUDOPS_STATUS_PORT}."
+  return 0
 }
 
 repo_dir_for() {
@@ -176,6 +192,8 @@ main() {
   fi
 
   trust_workspace "$start_dir"
+
+  report_status_endpoint
 
   trap shutdown TERM INT
 

@@ -80,6 +80,34 @@ describe('loadConfig', () => {
     expect(() => load({ CLAUDOPS_PORT: 'http' })).toThrow(ConfigError);
     expect(() => load({ CLAUDOPS_PORT: '0' })).toThrow(ConfigError);
     expect(() => load({ CLAUDOPS_PORT: '70000' })).toThrow(ConfigError);
+    expect(() => load({ CLAUDOPS_STATUS_PORT: 'http' })).toThrow(ConfigError);
+    expect(() => load({ CLAUDOPS_STATUS_PORT: '70000' })).toThrow(ConfigError);
+  });
+
+  describe('the status listener', () => {
+    it('sits next to the API on its own port', () => {
+      expect(load({})).toMatchObject({ statusHost: '0.0.0.0', statusPort: 8081 });
+      expect(load({ CLAUDOPS_STATUS_HOST: '172.17.0.1', CLAUDOPS_STATUS_PORT: '9001' })).toMatchObject(
+        { statusHost: '172.17.0.1', statusPort: 9001 },
+      );
+    });
+
+    /** Not just a binding conflict: the container's firewall opens the status
+     *  port, so one port for both would hand every instance the login. */
+    it('refuses to share a port with the API', () => {
+      expect(() => load({ CLAUDOPS_STATUS_PORT: '8080' })).toThrow(ConfigError);
+      expect(() => load({ CLAUDOPS_PORT: '9000', CLAUDOPS_STATUS_PORT: '9000' })).toThrow(
+        ConfigError,
+      );
+    });
+
+    it('derives the instance tokens from the login secret, and stores none of it', () => {
+      const token = load({}).statusTokens.issue('id-1');
+
+      expect(load({}).statusTokens.verify('id-1', token)).toBe(true);
+      expect(load({}).statusTokens.verify('id-2', token)).toBe(false);
+      expect(JSON.stringify(load())).not.toContain(LOGIN_SECRET);
+    });
   });
 
   it('picks up the instance environment without ever inventing an API key', () => {

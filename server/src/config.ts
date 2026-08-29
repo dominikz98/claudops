@@ -3,6 +3,7 @@ import { createSessionAuth, type SessionAuth } from './auth/session.ts';
 import type { ContainerLimits } from './docker/engine.ts';
 import { defaultProjectContext } from './projects/images.ts';
 import { createCipher, parseSecretKey, type SecretCipher } from './secrets/cipher.ts';
+import { createStatusTokens, type StatusTokens } from './status/tokens.ts';
 
 /**
  * Server configuration, read from the environment exactly once at startup.
@@ -42,6 +43,15 @@ export interface UploadLimits {
 export interface ServerConfig {
   host: string;
   port: number;
+  /**
+   * Address and port of the second listener, the one instance containers report
+   * their status to. Its own port because a container's egress firewall filters
+   * by address and port and not by path: on the API's port the hole would carry
+   * `POST /login` and every other endpoint with it
+   * (knowledge/the-status-port-is-the-one-hole-in-the-egress-firewall.md).
+   */
+  statusHost: string;
+  statusPort: number;
   logLevel: string;
   databaseFile: string;
   /** What a project image is built `FROM`. Instances themselves start from
@@ -72,6 +82,9 @@ export interface ServerConfig {
    * Never the secret itself, for the same reason `cipher` is not the key.
    */
   auth: SessionAuth;
+  /** Proves a status report came from the instance it claims. Derived from the
+   *  same shared secret as `auth`, so nothing new is stored. */
+  statusTokens: StatusTokens;
   /** `Secure` on the session cookie. Only with TLS in front -- a browser
    *  silently discards a Secure cookie that arrived over plain http, and the
    *  login would appear to do nothing. */
@@ -86,6 +99,11 @@ export interface ServerConfig {
 export class ConfigError extends Error {}
 
 const DEFAULT_PORT = 8080;
+
+/** The status listener, next to the API's port. Mirrored as the default of
+ *  CLAUDOPS_STATUS_PORT in docker/base/Dockerfile: the container has to dial
+ *  the same number the server listens on. */
+const DEFAULT_STATUS_PORT = 8081;
 
 /**
  * Two cores and four gigabytes: enough for a `pnpm install` plus a test run,
@@ -142,13 +160,13 @@ function optional(env: NodeJS.ProcessEnv, key: string): string | undefined {
   return value === undefined || value === '' ? undefined : value;
 }
 
-function port(env: NodeJS.ProcessEnv): number {
-  const raw = optional(env, 'CLAUDOPS_PORT');
-  if (raw === undefined) return DEFAULT_PORT;
+function port(env: NodeJS.ProcessEnv, key: string, fallback: number): number {
+  const raw = optional(env, key);
+  if (raw === undefined) return fallback;
 
   const parsed = Number(raw);
   if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
-    throw new ConfigError(`CLAUDOPS_PORT must be a port number, got '${raw}'`);
+    throw new ConfigError(`${key} must be a port number, got '${raw}'`);
   }
   return parsed;
 }
@@ -251,7 +269,7 @@ const MIN_LOGIN_SECRET = 16;
  * forgot an environment variable does not have that property. Refusing at
  * startup is also the only failure a human sees immediately.
  */
-function auth(env: NodeJS.ProcessEnv): SessionAuth {
+function loginSecret(env: NodeJS.ProcessEnv): string {
   const raw = optional(env, 'CLAUDOPS_LOGIN_SECRET');
   if (raw === undefined) {
     throw new ConfigError(
@@ -263,7 +281,7 @@ function auth(env: NodeJS.ProcessEnv): SessionAuth {
       `CLAUDOPS_LOGIN_SECRET must be at least ${String(MIN_LOGIN_SECRET)} characters`,
     );
   }
-  return createSessionAuth(raw);
+  return raw;
 }
 
 /** Hosts and CIDRs only. Validated here rather than in the container, because
@@ -289,9 +307,27 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     optional(env, 'DOCKER_SOCKET') ??
     (optional(env, 'DOCKER_HOST') !== undefined ? undefined : defaultDockerSocket());
 
+  // Read once and used twice: the session cookie and the status token are both
+  // derived from it, each with its own HKDF info.
+  const secret = loginSecret(env);
+
+  const apiPort = port(env, 'CLAUDOPS_PORT', DEFAULT_PORT);
+  const statusPort = port(env, 'CLAUDOPS_STATUS_PORT', DEFAULT_STATUS_PORT);
+  // Caught here rather than as an EADDRINUSE stack trace from the second
+  // listen, and the two must not be one port for a reason beyond binding: the
+  // container's firewall opens the status port, so sharing it with the API
+  // would hand every instance the login endpoint.
+  if (apiPort === statusPort) {
+    throw new ConfigError(
+      'CLAUDOPS_STATUS_PORT must differ from CLAUDOPS_PORT -- the status port is reachable from inside every instance, the API port deliberately is not',
+    );
+  }
+
   return {
     host: optional(env, 'CLAUDOPS_HOST') ?? '0.0.0.0',
-    port: port(env),
+    port: apiPort,
+    statusHost: optional(env, 'CLAUDOPS_STATUS_HOST') ?? '0.0.0.0',
+    statusPort,
     logLevel: optional(env, 'CLAUDOPS_LOG_LEVEL') ?? 'info',
     databaseFile: optional(env, 'CLAUDOPS_DB') ?? 'data/claudops.db',
     baseImage: optional(env, 'CLAUDOPS_BASE_IMAGE') ?? 'claudops-base',
@@ -301,7 +337,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     tmuxSession: optional(env, 'CLAUDOPS_TMUX_SESSION') ?? 'main',
     dockerSocket,
     cipher: cipher(env),
-    auth: auth(env),
+    auth: createSessionAuth(secret),
+    statusTokens: createStatusTokens(secret),
     secureCookie: optional(env, 'CLAUDOPS_SESSION_SECURE') === '1',
     instanceLimits: instanceLimits(env),
     uploadLimits: uploadLimits(env),

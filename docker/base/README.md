@@ -65,6 +65,9 @@ drops.
 | `FIREWALL_ALLOW` | – | Extra hosts and CIDRs for the egress whitelist, comma- or space-separated, on top of the built-in list in `/etc/claudops/firewall-allow.d`. |
 | `FIREWALL_MODE` | `enforce` | `off` skips the firewall entirely. The operator's escape hatch, never the agent's -- and it is also what makes `CLAUDE_ARGS` unsafe. |
 | `FIREWALL_REFRESH_SECONDS` | `900` | How often the whitelist is re-resolved, because CDN addresses rotate. `0` disables it. |
+| `CLAUDOPS_STATUS_PORT` | `8081` | Port of the claudops status listener on the docker bridge gateway -- the one address the firewall opens, and where the hooks report what Claude is doing. Has to match the server's `CLAUDOPS_STATUS_PORT`. |
+| `CLAUDOPS_INSTANCE_ID` | – | Which instance this container is, for its status reports. Without it, and without the token, the container reports nothing. |
+| `CLAUDOPS_STATUS_TOKEN` | – | Proves a status report is this instance's. An HMAC claudops derives from its login secret; it authorises nothing but that one route. |
 | `WORKSPACE_DIR` | `/workspace` | Base directory for clones. |
 | `TMUX_SESSION` | `main` | Session name the bridge attaches to, and the one the healthcheck looks for. |
 | `TERM` | `xterm-256color` | Without it `tmux attach` from a `docker exec` fails with "terminal does not support clear". A client with its own `TERM` overrides it. |
@@ -82,7 +85,10 @@ drops.
   ranges and the host of `REPO_URL` into an ipset, then sets the `INPUT`,
   `OUTPUT` and `FORWARD` policies to DROP. The container's own subnet is
   deliberately **not** whitelisted, so an instance reaches neither the claudops
-  API on the docker gateway nor its neighbours. Requires `NET_ADMIN`.
+  API on the docker gateway nor its neighbours. Requires `NET_ADMIN`. The single
+  exception is one rule for `CLAUDOPS_STATUS_PORT` on the gateway -- a rule
+  rather than an ipset entry, because the set matches an address and the API is
+  on the same one.
 - **The firewall is configured once per container start.** A second run is
   refused, so the agent in the container cannot widen its own whitelist. The
   guard is the `CLAUDOPS-EGRESS` chain itself; `docker restart` is the only way to
@@ -133,6 +139,22 @@ drops.
   so the file can never grow a second argument. Switching a *running* session is
   a `/model` or `/effort` typed into it -- claudops does that itself, and from
   the console you would simply type it.
+- **The container reports what Claude is doing.** `~/.claude/settings.json`
+  registers four Claude Code hooks -- `UserPromptSubmit`, `Notification`, `Stop`
+  and `SessionEnd` -- on `/usr/local/bin/claudops-status`, which posts the event
+  to the claudops status listener on the docker bridge gateway. It works out that
+  address itself from `/proc/net/route`, so it behaves the same from a
+  `docker exec` as it does from a hook:
+
+  ```bash
+  docker exec -i claudops-demo /usr/local/bin/claudops-status <<<'{"hook_event_name":"Stop"}'
+  ```
+
+  It prints nothing and always exits 0, whatever happens -- a `UserPromptSubmit`
+  hook's stdout is added to the conversation as context, and a non-zero exit
+  there erases the prompt the user just typed. Without
+  `CLAUDOPS_STATUS_PORT`, `CLAUDOPS_INSTANCE_ID` and `CLAUDOPS_STATUS_TOKEN` it
+  does nothing at all, which is what an image running outside claudops wants.
 - **Restarting the container on the same volume** skips the clone if the target
   directory already is a git repo.
 - **`docker stop`** shuts the tmux server down cleanly via SIGTERM.

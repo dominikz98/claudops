@@ -8,6 +8,9 @@
   --accent: #9ecbff;
   --danger: #ff8080;
   --ok: #7ee787;
+  /* Neither good nor broken: something is waiting for a person. The one badge
+     that has to be found by someone scanning a list of twenty rows. */
+  --attention: #ffc266;
   font-family: ui-sans-serif, system-ui, "Segoe UI", sans-serif;
 }
 
@@ -49,7 +52,8 @@ header {
   font-size: 0.875rem;
 }
 
-/* Sits next to .nav, which already took the auto margin. */
+/* Both sit next to .nav, which already took the auto margin. */
+.alerts,
 .logout {
   margin-left: 1rem;
   font-size: 0.875rem;
@@ -257,8 +261,8 @@ td.choice select:disabled {
   cursor: not-allowed;
 }
 
-/* Two words in one cell: the Docker state, and -- when there is a running
-   container to ask -- whether its session is up. */
+/* Up to three words in one cell: the Docker state, whether the session behind
+   it is up, and -- once it is -- what Claude is doing in there. */
 .status {
   align-items: baseline;
   display: flex;
@@ -306,6 +310,32 @@ td.choice select:disabled {
 .badge.starting {
   border-color: var(--accent);
   color: var(--accent);
+}
+
+/* What Claude is doing, as the instance reports it through its hooks. Only
+   `needs input` is filled in: it is the one state that is about the operator
+   rather than about the instance, and the whole reason the badge exists is
+   being seen without reading the row. */
+.badge.activity.needs_input {
+  background: var(--attention);
+  border-color: var(--attention);
+  color: var(--bg);
+  font-weight: 600;
+}
+
+.badge.activity.running {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.badge.activity.done {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
+/* Nothing has happened here yet, which is worth as little ink as possible. */
+.badge.activity.idle {
+  color: var(--muted);
 }
 
 /* The build log, in a row of its own so a wide line cannot push the columns

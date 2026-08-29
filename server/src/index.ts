@@ -1,16 +1,26 @@
 import { openDatabase } from './db/index.ts';
+import { InstanceRepository } from './db/instances.ts';
 import { DockerodeEngine } from './docker/dockerode-engine.ts';
 import { buildApp } from './app.ts';
 import { ConfigError, loadConfig } from './config.ts';
+import { ActivityTracker } from './instances/activity.ts';
+import { buildStatusApp } from './status/app.ts';
 
 async function main(): Promise<void> {
   const config = loadConfig();
   const db = openDatabase(config.databaseFile);
   const engine = new DockerodeEngine(config.dockerSocket);
 
+  // One tracker, two apps: the status listener writes what the containers
+  // report, the API reads it into every instance view.
+  const activity = new ActivityTracker();
+
   const app = buildApp({
     db,
     engine,
+    activity,
+    statusTokens: config.statusTokens,
+    statusPort: config.statusPort,
     baseImage: config.baseImage,
     projectContext: config.projectContext,
     dotnetChannel: config.dotnetChannel,
@@ -41,9 +51,22 @@ async function main(): Promise<void> {
     app.log.warn({ err: error }, 'Docker Engine unreachable at startup');
   }
 
+  /**
+   * The port instance containers report to. Separate from the API's because a
+   * container's egress firewall can only be opened per address and port: this
+   * one carries a single route that takes a hook report and answers 204, and
+   * the API's carries the login and everything behind it.
+   */
+  const statusApp = buildStatusApp({
+    instances: new InstanceRepository(db),
+    activity,
+    tokens: config.statusTokens,
+    logLevel: config.logLevel,
+  });
+
   const shutdown = async (signal: string): Promise<void> => {
     app.log.info({ signal }, 'shutting down');
-    await app.close();
+    await Promise.allSettled([app.close(), statusApp.close()]);
     db.close();
     process.exit(0);
   };
@@ -52,6 +75,7 @@ async function main(): Promise<void> {
   process.on('SIGINT', () => void shutdown('SIGINT'));
 
   await app.listen({ host: config.host, port: config.port });
+  await statusApp.listen({ host: config.statusHost, port: config.statusPort });
 }
 
 main().catch((error: unknown) => {

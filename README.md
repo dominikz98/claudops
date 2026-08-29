@@ -31,6 +31,7 @@ and files or pasted screenshots can be attached to a running instance. Everythin
 | Build and start-up progress | Available, end-to-end tested |
 | File and image attachments | Available, end-to-end tested |
 | Model and effort per instance | Available, end-to-end tested |
+| Instance status (running, needs input, done) | Available, smoke-tested |
 
 ## Quick start
 

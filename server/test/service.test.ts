@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { DEFAULT_INSTANCE_LIMITS, type InstanceEnvConfig } from '../src/config.ts';
 import { InstanceRepository } from '../src/db/instances.ts';
+import { ActivityTracker } from '../src/instances/activity.ts';
 import { migrate } from '../src/db/migrations.ts';
 import {
   ContainerNotFoundError,
@@ -35,8 +36,18 @@ import {
   type CreateProjectInput,
 } from '../src/projects/service.ts';
 import { SecretUndecryptableError } from '../src/secrets/cipher.ts';
+import { createStatusTokens } from '../src/status/tokens.ts';
 import { FakeDockerEngine } from './fake-engine.ts';
 import { TEST_REPO_URL, testCipher } from './fixtures.ts';
+
+/**
+ * The activity fallback reads the tmux pane on a view whose instance has not
+ * reported anything yet, so `engine.commands` is no longer empty just because
+ * nothing was done to the container. A capture-pane changes nothing in there,
+ * which is what a test asking "was anything done to it" means.
+ */
+const changesSomething = (entry: { command: string[] }): boolean =>
+  !entry.command.includes('capture-pane');
 
 const instanceEnv: InstanceEnvConfig = {
   claudeOauthToken: 'oauth-token',
@@ -747,7 +758,7 @@ describe('InstanceService', () => {
 
       await service.setModelEffort('id-1', { model: 'haiku' });
 
-      expect(engine.commands).toEqual([]);
+      expect(engine.commands.filter(changesSomething)).toEqual([]);
     });
 
     it('resets the effort with /effort auto and the model with the file alone', async () => {
@@ -1123,6 +1134,145 @@ describe('InstanceService', () => {
       expect(name.endsWith('.png')).toBe(true);
     });
   });
+
+  /**
+   * The third axis. What the tracker itself decides is tested in
+   * activity.test.ts; this is about the join -- that a view carries it, that
+   * Docker outranks it, and that a container is created able to report at all.
+   */
+  describe('activity', () => {
+    /** The tracker the status listener would write into, shared with a service
+     *  built on the same repository and engine. */
+    let activity: ActivityTracker;
+    let reporting: InstanceService;
+
+    /** The pane probe is deliberately not awaited by the view, so a test that
+     *  wants its answer has to let the microtask and timer queues run. */
+    const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
+
+    beforeEach(() => {
+      activity = new ActivityTracker();
+      reporting = new InstanceService(repository, engine, {
+        instanceEnv,
+        projects,
+        generateId: () => ids.shift() ?? 'exhausted',
+        now: () => new Date('2026-08-25T08:00:00.000Z'),
+        sendKeysPauseMs: 0,
+        activity,
+        statusTokens: createStatusTokens('a-shared-secret-long-enough'),
+        statusPort: 8081,
+      });
+    });
+
+    it('starts out idle, because nothing has been asked of it yet', async () => {
+      const instance = await reporting.create({ name: 'demo', projectId });
+
+      expect(instance.activity).toBe('idle');
+      expect(await reporting.get('id-1')).toMatchObject({ activity: 'idle' });
+    });
+
+    it('reports what the instance last said about itself', async () => {
+      await reporting.create({ name: 'demo', projectId });
+
+      activity.record('id-1', { event: 'UserPromptSubmit' });
+      expect(await reporting.get('id-1')).toMatchObject({ activity: 'running' });
+
+      activity.record('id-1', { event: 'Notification', notificationType: 'permission_prompt' });
+      expect((await reporting.list())[0]).toMatchObject({ activity: 'needs_input' });
+
+      activity.record('id-1', { event: 'Stop' });
+      expect((await reporting.list())[0]).toMatchObject({ activity: 'done' });
+    });
+
+    /**
+     * The ticket's fourth criterion. A container that died takes its Claude
+     * with it, so the `running` it last reported would otherwise stand forever
+     * -- there is no process left to send the Stop that would clear it.
+     */
+    it('stops reporting an activity once the container is not running', async () => {
+      await reporting.create({ name: 'demo', projectId });
+      activity.record('id-1', { event: 'UserPromptSubmit' });
+
+      await reporting.stop('id-1');
+
+      expect(await reporting.get('id-1')).toMatchObject({ status: 'exited', activity: 'none' });
+    });
+
+    it('says the same about a container Docker no longer has', async () => {
+      await reporting.create({ name: 'demo', projectId });
+      activity.record('id-1', { event: 'UserPromptSubmit' });
+
+      engine.forget('container-1');
+
+      expect(await reporting.get('id-1')).toMatchObject({
+        status: MISSING_STATUS,
+        activity: 'none',
+      });
+    });
+
+    it('asks the pane when the hooks have said nothing', async () => {
+      await reporting.create({ name: 'demo', projectId });
+      engine.commandResult = () => ({
+        exitCode: 0,
+        output: '✳ Building… (esc to interrupt)',
+      });
+
+      await reporting.get('id-1');
+      await settle();
+
+      expect(engine.commands.at(-1)?.command).toEqual([
+        'tmux',
+        'capture-pane',
+        '-p',
+        '-t',
+        'main',
+      ]);
+      expect(await reporting.get('id-1')).toMatchObject({ activity: 'running' });
+    });
+
+    it('keeps answering when the probe fails, because it is a fallback', async () => {
+      await reporting.create({ name: 'demo', projectId });
+      engine.failNextCommand = new Error('container is gone');
+
+      expect(await reporting.get('id-1')).toMatchObject({ activity: 'idle' });
+      await settle();
+      expect(await reporting.get('id-1')).toMatchObject({ activity: 'idle' });
+    });
+
+    it('forgets everything about a deleted instance', async () => {
+      await reporting.create({ name: 'demo', projectId });
+      activity.record('id-1', { event: 'UserPromptSubmit' });
+
+      await reporting.delete('id-1');
+
+      expect(activity.activityOf('id-1')).toBeUndefined();
+    });
+
+    it('hands the container what it needs to report, and no more', async () => {
+      await reporting.create({ name: 'demo', projectId });
+
+      const env = engine.specFor('id-1')?.env ?? {};
+      expect(env).toMatchObject({
+        CLAUDOPS_INSTANCE_ID: 'id-1',
+        CLAUDOPS_STATUS_PORT: '8081',
+        CLAUDOPS_STATUS_TOKEN: createStatusTokens('a-shared-secret-long-enough').issue('id-1'),
+      });
+      // The URL is not in here: the address is the gateway of the bridge this
+      // container ends up on, which only the container can see.
+      expect(env).not.toHaveProperty('CLAUDOPS_STATUS_URL');
+    });
+
+    it('gives a container no token at all when there is no endpoint to report to', async () => {
+      // `service`, not `reporting`: built without the two status options, which
+      // is every instance created before this existed.
+      await service.create({ name: 'demo', projectId });
+
+      const env = engine.specFor('id-1')?.env ?? {};
+      expect(env).not.toHaveProperty('CLAUDOPS_STATUS_TOKEN');
+      expect(env).not.toHaveProperty('CLAUDOPS_STATUS_PORT');
+    });
+  });
+
 });
 
 /**

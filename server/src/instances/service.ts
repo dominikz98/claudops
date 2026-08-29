@@ -23,6 +23,8 @@ import {
   type ProjectService,
   type ProjectTemplate,
 } from '../projects/service.ts';
+import type { StatusTokens } from '../status/tokens.ts';
+import { ActivityTracker, type InstanceActivity } from './activity.ts';
 
 /** A container claudops knows about but Docker no longer has. The startup
  *  reconcile forgets the container id of such a row, so this is what the
@@ -157,6 +159,9 @@ export interface InstanceView {
   /** Whether the console is attachable, as the container reports it. Read from
    *  Docker on every request, exactly like `status`. */
   session: SessionReadiness;
+  /** What Claude is doing in there, as the instance's own hooks report it.
+   *  `none` whenever the container is not running -- see `activityOf`. */
+  activity: InstanceActivity;
 }
 
 /** Bytes as a person reads them, for a message that has to say what was too
@@ -422,6 +427,15 @@ export interface InstanceServiceOptions {
   /** How long to wait between the text of a slash command and its Enter.
    *  A test sets it to 0; nothing else has a reason to change it. */
   sendKeysPauseMs?: number | undefined;
+  /** Where the hook reports land. The same instance has to be shared with the
+   *  status listener -- that one writes it, this one reads it. */
+  activity?: ActivityTracker | undefined;
+  /** Issues the per-instance token a container reports with. Left out, no
+   *  container is given one and no instance can report -- which is what the
+   *  tests that predate this do. */
+  statusTokens?: StatusTokens | undefined;
+  /** The port the status listener is on, as the container has to dial it. */
+  statusPort?: number | undefined;
 }
 
 export class InstanceService {
@@ -433,6 +447,9 @@ export class InstanceService {
   private readonly generateId: () => string;
   private readonly now: () => Date;
   private readonly sendKeysPauseMs: number;
+  private readonly activity: ActivityTracker;
+  private readonly statusTokens: StatusTokens | undefined;
+  private readonly statusPort: number | undefined;
 
   constructor(
     private readonly repository: InstanceRepository,
@@ -447,6 +464,9 @@ export class InstanceService {
     this.generateId = options.generateId ?? shortId;
     this.now = options.now ?? (() => new Date());
     this.sendKeysPauseMs = options.sendKeysPauseMs ?? SEND_KEYS_PAUSE_MS;
+    this.activity = options.activity ?? new ActivityTracker();
+    this.statusTokens = options.statusTokens;
+    this.statusPort = options.statusPort;
   }
 
   async create(input: CreateInstanceInput): Promise<InstanceView> {
@@ -507,7 +527,9 @@ export class InstanceService {
     // `starting`, without asking Docker: the container was started microseconds
     // ago, so no healthcheck has run yet and the answer is known. Saying
     // anything else here would hand the caller a console it cannot attach to.
-    return { ...record, containerId, status: 'running', session: 'starting' };
+    // `idle` for the same reason: Claude Code is not up yet, so there is
+    // nothing it could have reported.
+    return { ...record, containerId, status: 'running', session: 'starting', activity: 'idle' };
   }
 
   async list(): Promise<InstanceView[]> {
@@ -542,6 +564,10 @@ export class InstanceService {
     }
 
     this.repository.delete(id);
+    // Last, and only once the row is gone: a report that arrives from the
+    // container while the delete is still running belongs to an instance that
+    // still exists.
+    this.activity.forget(id);
   }
 
   /**
@@ -869,10 +895,10 @@ export class InstanceService {
     return new Map(containers.map((container) => [container.containerId, container]));
   }
 
-  /** The database row plus the two things only Docker knows. Both are joined in
-   *  one place so `list` and `get` cannot drift apart. */
+  /** The database row plus the three things the row does not know. All of them
+   *  are joined in one place so `list` and `get` cannot drift apart. */
   private view(
-    record: Omit<InstanceView, 'status' | 'session'>,
+    record: Omit<InstanceView, 'status' | 'session' | 'activity'>,
     containers: Map<string, ContainerSummary>,
   ): InstanceView {
     const summary = record.containerId === null ? undefined : containers.get(record.containerId);
@@ -880,7 +906,58 @@ export class InstanceService {
       ...record,
       status: summary?.state ?? MISSING_STATUS,
       session: sessionOf(summary),
+      activity: this.activityOf(record.id, summary),
     };
+  }
+
+  /**
+   * What Claude is doing, and the one place that can say "nothing". Also where
+   * the pane fallback is kicked off, because this is the one place that knows
+   * both that there is a container to ask and what the tracker has on it.
+   *
+   * A container that is not running outranks whatever was last reported: the
+   * process that would have sent a `Stop` is gone, so a `running` left behind
+   * by a killed container would stand forever. That is the ticket's "a
+   * container that died ends in a terminal status" -- the status is `exited` or
+   * `missing`, and this says there is no activity behind it.
+   *
+   * An instance nobody has reported on is `idle` rather than "unknown": for the
+   * operator those are the same thing, and one word fewer in the UI is worth
+   * more than the distinction.
+   */
+  private activityOf(id: string, summary: ContainerSummary | undefined): InstanceActivity {
+    if (summary === undefined || summary.state !== 'running') return 'none';
+
+    this.probePane(id, summary.containerId);
+    return this.activity.activityOf(id) ?? 'idle';
+  }
+
+  /**
+   * Asks the pane what is going on, for an instance whose hooks have not said.
+   *
+   * Deliberately not awaited. This is a fallback, and a `GET /instances` that
+   * waits for an exec in every container would be slower and more fragile than
+   * the thing it is a fallback for -- a container can die between the list and
+   * the exec, and that must not fail the request. The answer lands in the
+   * tracker and the next poll, three seconds later, reports it.
+   *
+   * `beginProbe` is what keeps this from being one exec per request per
+   * instance: it answers true at most every few seconds, and only for an
+   * instance whose state is missing or stale.
+   */
+  private probePane(id: string, containerId: string): void {
+    if (!this.activity.beginProbe(id)) return;
+
+    void this.engine
+      .runCommand(containerId, ['tmux', 'capture-pane', '-p', '-t', this.tmuxSession])
+      .then((result) => {
+        if (result.exitCode === 0) this.activity.observePane(id, result.output);
+      })
+      .catch(() => {
+        // Every failure here is a legitimate state, not an error to report: a
+        // container that has just stopped, a session that is not up yet, a
+        // daemon that went away. The instance keeps whatever it last said.
+      });
   }
 
   private specFor(id: string, template: ProjectTemplate, choice: ModelChoice): ContainerSpec {
@@ -888,7 +965,7 @@ export class InstanceService {
       instanceId: id,
       name: containerName(id),
       image: template.image,
-      env: this.envFor(template, choice),
+      env: this.envFor(id, template, choice),
       labels: instanceLabels(id),
       limits: this.limits,
       capAdd: INSTANCE_CAPABILITIES,
@@ -901,7 +978,11 @@ export class InstanceService {
    *  GIT_TOKEN and read by the credential helper, so it never reaches
    *  .git/config or the console
    *  (knowledge/git-token-via-credential-helper.md). */
-  private envFor(template: ProjectTemplate, choice: ModelChoice): Record<string, string> {
+  private envFor(
+    id: string,
+    template: ProjectTemplate,
+    choice: ModelChoice,
+  ): Record<string, string> {
     const env: Record<string, string> = {};
     const set = (key: string, value: string | undefined): void => {
       if (value !== undefined && value !== '') env[key] = value;
@@ -923,6 +1004,19 @@ export class InstanceService {
     // knowledge/the-effort-env-var-outranks-the-slash-command.md.
     set('CLAUDE_MODEL', choice.model ?? undefined);
     set('CLAUDE_EFFORT', choice.effort ?? undefined);
+
+    // What the container's hooks report with. The id and the port are not
+    // secrets -- the token is what proves a report is this instance's. The
+    // address is deliberately not among them: it is the gateway of whichever
+    // bridge the container ends up on, which only the container can see, so
+    // claudops-status works it out when a hook fires. All three or none: the
+    // script treats a half-configured environment as "do not report" rather
+    // than guessing at the missing half.
+    if (this.statusTokens !== undefined && this.statusPort !== undefined) {
+      set('CLAUDOPS_INSTANCE_ID', id);
+      set('CLAUDOPS_STATUS_PORT', String(this.statusPort));
+      set('CLAUDOPS_STATUS_TOKEN', this.statusTokens.issue(id));
+    }
 
     return env;
   }
