@@ -179,6 +179,38 @@ If the server log says `status report with no valid token`, the container is
 reporting with a token from an older `CLAUDOPS_LOGIN_SECRET`. Restarting the
 instance hands it the current one.
 
+## What a project hands its instances
+
+Beyond repository, branch and PAT, a project carries two things every instance
+made from it gets:
+
+| Field | Reaches the container as | Shown back |
+| --- | --- | --- |
+| Variables | one environment variable per name | names only -- the values are encrypted like the PAT |
+| Egress hosts | `FIREWALL_ALLOW`, after the server-wide list | in full: hosts are not secret |
+
+Variables are how a repository's own `.mcp.json` gets its credentials: a
+`${NAME}` in that file resolves against the container's environment, so the
+server declared in the repository starts with a token the repository does not
+hold. Such a server usually also needs a host that is not on the base image's
+whitelist, which is what the egress hosts are for.
+
+What claudops sets itself cannot be taken over. `POST` and `PATCH` answer `409
+reserved_env_name` for `GIT_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `REPO_URL`,
+`FIREWALL_ALLOW`, the `CLAUDOPS_*` and the `CLAUDE_*` ones -- and for
+`ANTHROPIC_API_KEY`, which claudops never sets and which would override the
+subscription token if a project did.
+
+Both are read once, when the container starts. Changing either changes what the
+*next* instance of the project gets; an instance already running keeps what it
+came up with, and recreating it is what applies the change.
+
+To check what actually arrived:
+
+```bash
+docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' <container>
+```
+
 ## Project images
 
 The environment of a project is a prebuilt image, `claudops-project-<id>`. The
@@ -659,10 +691,25 @@ single tcp port, which the log names as `status endpoint allowed: <gateway>:<por
 Nothing else on the host is reachable, the claudops API included, and neither is
 any neighbouring instance.
 
-For a host that is genuinely needed, add it to the server's
-`CLAUDOPS_FIREWALL_ALLOW` (comma- or space-separated hosts and CIDRs), restart
-the server and **recreate the instance** -- the whitelist is read once at
-container start, so an existing container keeps the one it came up with.
+For a host that is genuinely needed, there are two places to put it:
+
+| Where | Reaches | Changed by |
+| --- | --- | --- |
+| `CLAUDOPS_FIREWALL_ALLOW` on the server | every instance on the box | editing the environment and restarting the server |
+| **Egress hosts** on the project | every instance of that project | the Projects page or `PATCH /projects/<id>` |
+
+The container gets both, the server-wide list first: a project widens the
+whitelist, it never narrows it. Either way, **recreate the instance** -- the
+whitelist is read once at container start, so an existing container keeps the one
+it came up with. `docker inspect` shows what a given container was handed:
+
+```bash
+docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' <container> | grep FIREWALL_ALLOW
+```
+
+An entry that is neither a hostname nor a CIDR is refused when it is saved rather
+than skipped inside the container: a URL, a wildcard or a `host:port` would
+otherwise sit in the list looking configured while doing nothing.
 
 A host that worked and then stopped is usually a CDN whose addresses rotated. The
 container re-resolves its whitelist every 15 minutes for exactly that; a shorter

@@ -25,6 +25,7 @@ produced is readable back from the console page. Everything else is planned; see
 | Terminal bridge (WebSocket) | Available, smoke-tested |
 | Web UI (xterm.js) | Available, end-to-end tested |
 | Projects (repo, branch, PAT) | Available, end-to-end tested |
+| Project environment (variables, egress hosts) | Available, end-to-end tested |
 | Project images from building blocks | Available, smoke-tested |
 | Lifecycle, limits, recycling | Available, end-to-end tested |
 | Egress firewall (default-deny whitelist) | Available, smoke-tested |

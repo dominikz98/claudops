@@ -92,7 +92,8 @@ a {
 }
 
 input,
-select {
+select,
+textarea {
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 4px;
@@ -103,8 +104,34 @@ select {
 }
 
 input:focus-visible,
-select:focus-visible {
+select:focus-visible,
+textarea:focus-visible {
   outline: 1px solid var(--accent);
+}
+
+/* Variables and egress hosts are lists, so they get a box that grows downwards
+   rather than a line that scrolls sideways. Monospace: what is typed in here is
+   NAME=value and hostnames, where an l and a 1 have to be told apart. */
+textarea {
+  font-family: ui-monospace, monospace;
+  font-size: 0.8125rem;
+  resize: vertical;
+  min-height: 2.5rem;
+}
+
+/* The variables that are stored, each one its own remove button. Narrower than
+   an ordinary secondary button: this is a list of names, not an action bar. */
+.hint.chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+button.chip {
+  font-size: 0.75rem;
+  padding: 0.1rem 0.4rem;
+  font-family: ui-monospace, monospace;
 }
 
 /* The building blocks: a checkbox sits next to its label, not above it. */

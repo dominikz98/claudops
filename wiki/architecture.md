@@ -27,7 +27,7 @@ Container per instance: project image -> clone repo -> tmux -> claude
 | `claudops-server` | Fastify: project and instance REST, the image builds, the terminal bridge and the UI | Available |
 | Project images `claudops-project-<id>` | One template Dockerfile plus the building blocks of a project, prebuilt | Available |
 | Web UI | Vite SPA served by the server on the same port: projects, instance list, console and the files panel next to it | Available |
-| SQLite | Metadata for projects and instances, the encrypted project PATs, the state of each image | Available |
+| SQLite | Metadata for projects and instances, the encrypted project PATs and variables, the state of each image | Available |
 
 ## Decisions worth knowing
 
@@ -95,15 +95,34 @@ does not rewrite the history of an instance already running. A project cannot be
 deleted while instances still point at it; the request answers `409` with the
 count rather than leaving them without an origin.
 
-**The project PAT is the one secret in the database, and it is encrypted.**
+**The secrets in the database are the project's, and they are encrypted.**
 Everything else claudops handles passes straight through into a container and is
-forgotten. A template has to outlive its instances, so its credential is stored
--- as an AES-256-GCM blob whose key comes from `CLAUDOPS_SECRET_KEY` and never
-touches the database. The file on disk therefore holds no readable token, which
-is what makes a copied database or a backup uninteresting. No response ever
-carries the PAT back: a project reports only whether one is set. Without a key
-the server still runs; it just refuses to store a PAT instead of keeping it in
-the clear.
+forgotten. A template has to outlive its instances, so its credentials are stored
+-- the PAT and the project's environment variables, each as an AES-256-GCM blob
+whose key comes from `CLAUDOPS_SECRET_KEY` and never touches the database, and
+each bound to its own purpose so a blob from one column does not open as the
+other. The file on disk therefore holds no readable secret, which is what makes a
+copied database or a backup uninteresting. No response ever carries one back: a
+project reports whether a PAT is set and the *names* of its variables, never a
+value. Without a key the server still runs; it just refuses to store either
+instead of keeping them in the clear.
+
+**A project also decides what its instances may reach.** Its egress hosts are
+merged into the container's whitelist behind the server-wide list, so a project
+widens what an instance may reach and never narrows it, and they are not secret
+-- unlike a variable, they come back as they went in. Variables and hosts belong
+in one place because they are usually one thing: a repository that declares an
+MCP server in its own `.mcp.json` needs a credential the repository must not hold
+and a host the base image does not whitelist. The `${NAME}` in that file resolves
+against the container's environment, which is where the project's variables
+arrive.
+
+Neither can take over what claudops itself writes. The names of the managed
+variables are refused when a project is saved, and the container environment is
+assembled with the project's variables filtered rather than merely overwritten --
+the fixed set leaves a variable out when there is nothing to say, so overwriting
+alone would leave `ANTHROPIC_API_KEY` and an unset `GIT_TOKEN` open to a
+project.
 
 **Environments are prebuilt images.** A project defines its environment through
 building blocks (dotnet, Playwright). The server builds `claudops-project-<id>`
@@ -204,7 +223,8 @@ none of the three dialogs can be answered from the instance list -- the console
 would simply open on a wizard. The container installs
 that whitelist on itself: the entrypoint runs `init-firewall.sh` before it clones
 anything, which resolves a built-in host list plus GitHub's published ranges plus
-the project's own repository host, then sets the default policy to DROP. The
+the project's own repository host and the hosts of `FIREWALL_ALLOW` -- the
+server-wide list plus the project's own -- then sets the default policy to DROP. The
 container is created with `NET_ADMIN` for it, and one `sudo` entry inside the
 image lets the unprivileged entrypoint reach `iptables`.
 

@@ -67,6 +67,27 @@ describe('SecretCipher with a key', () => {
       SecretUndecryptableError,
     );
   });
+
+  // A nonce and a tag with nothing after them. Not "too short to hold a tag" --
+  // it is exactly what an empty project variable seals to, and one of those is
+  // a legitimate thing to hand a container.
+  it('round-trips an empty value', () => {
+    expect(cipher.open(cipher.seal('', 'project.env'), 'project.env')).toBe('');
+  });
+
+  it('does not open a variable as a PAT, or a PAT as a variable', () => {
+    const variable = cipher.seal('value', 'project.env');
+    const token = cipher.seal(PAT);
+
+    expect(() => cipher.open(variable)).toThrow(SecretUndecryptableError);
+    expect(() => cipher.open(token, 'project.env')).toThrow(SecretUndecryptableError);
+  });
+
+  // The PAT's scope is the default, so every blob sealed before scopes existed
+  // still opens.
+  it('leaves the PAT on the scope it was always sealed with', () => {
+    expect(cipher.open(cipher.seal(PAT), 'project.git_token')).toBe(PAT);
+  });
 });
 
 describe('SecretCipher without a key', () => {

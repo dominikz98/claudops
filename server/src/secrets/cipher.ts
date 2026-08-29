@@ -1,13 +1,15 @@
 import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
 
 /**
- * The one secret claudops has to keep rather than pass through: a project's PAT.
+ * The secrets claudops has to keep rather than pass through: a project's PAT and
+ * the environment variables its instances are given.
  *
  * Instances get their tokens handed straight into the container environment and
  * nothing keeps them (knowledge/auth-token-handling.md). A project is a template
- * that outlives every instance made from it, so its PAT has to survive a restart
- * -- and it does so encrypted, which is what keeps the database file itself free
- * of readable secrets even when it ends up in a backup or on a laptop.
+ * that outlives every instance made from it, so what it hands them has to
+ * survive a restart -- and it does so encrypted, which is what keeps the
+ * database file itself free of readable secrets even when it ends up in a backup
+ * or on a laptop.
  */
 
 /** AES-256-GCM: 32-byte key, 12-byte nonce, 16-byte tag. */
@@ -19,13 +21,28 @@ const TAG_BYTES = 16;
  *  arriving as a decryption failure. */
 const SEALED_PREFIX = 'v1:';
 
-/** Bound into the tag: a blob resealed from somewhere else would not
- *  authenticate here. */
-const AAD = Buffer.from('claudops.project.git_token');
+/**
+ * What a sealed blob is for. Bound into the tag, so a value sealed for one
+ * purpose does not open as another: a project variable moved into the
+ * `git_token` column would fail to authenticate rather than quietly become the
+ * PAT every instance clones with.
+ *
+ * The names are part of the stored format -- `project.git_token` is what every
+ * PAT sealed before this existed was bound to, so it stays exactly that string.
+ */
+export type SecretScope = 'project.git_token' | 'project.env';
+
+const DEFAULT_SCOPE: SecretScope = 'project.git_token';
+
+function aadFor(scope: SecretScope): Buffer {
+  return Buffer.from(`claudops.${scope}`);
+}
 
 export class SecretKeyMissingError extends Error {
   constructor() {
-    super('no CLAUDOPS_SECRET_KEY is configured -- a project PAT cannot be stored without one');
+    super(
+      'no CLAUDOPS_SECRET_KEY is configured -- a project PAT or variable cannot be stored without one',
+    );
     this.name = 'SecretKeyMissingError';
   }
 }
@@ -43,10 +60,11 @@ export interface SecretCipher {
    *  never needs to ask. */
   readonly available: boolean;
   /** Encrypts for the database. Throws SecretKeyMissingError without a key. */
-  seal(plain: string): string;
-  /** The inverse. Throws SecretKeyMissingError without a key and
-   *  SecretUndecryptableError for anything that does not authenticate. */
-  open(sealed: string): string;
+  seal(plain: string, scope?: SecretScope): string;
+  /** The inverse, and it has to be given the same scope. Throws
+   *  SecretKeyMissingError without a key and SecretUndecryptableError for
+   *  anything that does not authenticate -- a wrong scope among it. */
+  open(sealed: string, scope?: SecretScope): string;
 }
 
 /**
@@ -80,23 +98,27 @@ export function createCipher(key: Buffer | undefined): SecretCipher {
   return {
     available: true,
 
-    seal(plain: string): string {
+    seal(plain: string, scope: SecretScope = DEFAULT_SCOPE): string {
       const iv = randomBytes(IV_BYTES);
       const cipher = createCipheriv('aes-256-gcm', key, iv);
-      cipher.setAAD(AAD);
+      cipher.setAAD(aadFor(scope));
       const ciphertext = Buffer.concat([cipher.update(plain, 'utf8'), cipher.final()]);
       return SEALED_PREFIX + Buffer.concat([iv, cipher.getAuthTag(), ciphertext]).toString('base64');
     },
 
-    open(sealed: string): string {
+    open(sealed: string, scope: SecretScope = DEFAULT_SCOPE): string {
       if (!sealed.startsWith(SEALED_PREFIX)) throw new SecretUndecryptableError();
 
       const blob = Buffer.from(sealed.slice(SEALED_PREFIX.length), 'base64');
-      if (blob.length <= IV_BYTES + TAG_BYTES) throw new SecretUndecryptableError();
+      // `<`, not `<=`: a nonce and a tag with nothing after them is what an
+      // empty value seals to, and an empty project variable is a legitimate
+      // thing to store. Anything shorter cannot be a blob of ours at all;
+      // anything this length that was not sealed here fails the tag below.
+      if (blob.length < IV_BYTES + TAG_BYTES) throw new SecretUndecryptableError();
 
       try {
         const decipher = createDecipheriv('aes-256-gcm', key, blob.subarray(0, IV_BYTES));
-        decipher.setAAD(AAD);
+        decipher.setAAD(aadFor(scope));
         decipher.setAuthTag(blob.subarray(IV_BYTES, IV_BYTES + TAG_BYTES));
         return (
           decipher.update(blob.subarray(IV_BYTES + TAG_BYTES), undefined, 'utf8') +

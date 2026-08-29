@@ -16,7 +16,8 @@ in [server/README.md](../server/README.md).
 
 ## Current state
 
-A project holds a repository, a branch, its credential and an environment that the
+A project holds a repository, a branch, its credential, the variables and egress
+hosts its instances run with, and an environment that the
 server prebuilds as its own image; an instance is created from it, driven, stopped
 and deleted from a browser page, its console survives a refresh, it runs under a
 CPU and memory ceiling, and what a restart or a hand on the NUC leaves behind is
@@ -30,7 +31,11 @@ Claude is doing in each instance -- working, waiting for an answer, or finished 
 reported by the instance itself, with a browser notification for the one that is
 waiting. What a run produced is readable from the console page: a file tree of
 the workspace next to the terminal, with Markdown rendered, images shown and
-everything else downloadable, without any of it having been committed.
+everything else downloadable, without any of it having been committed. A project
+also carries what its instances need beyond the repository: named variables,
+sealed like the PAT and never shown again, and the hosts its instances may reach
+on top of the server-wide whitelist -- which together are what lets a repository's
+own `.mcp.json` start with a credential it does not hold.
 Everything else is planned
 and marked with its issue number on the pages below. The component status table lives in the
 [root README](../README.md#state) -- kept in one place so the two cannot drift

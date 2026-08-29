@@ -30,8 +30,8 @@ docker build -t claudops-base docker/base
 | --- | --- | --- |
 | `GET` | `/` | The web UI, from `CLAUDOPS_WEB_ROOT`. See [Web UI](#web-ui). |
 | `GET` | `/health` | Readiness: `200` when the Docker daemon answers, `503` when it does not. |
-| `POST` | `/projects` | Create a project. Body: `name`, `repoUrl` (both required), `repoBranch`, `gitToken`, `buildingBlocks`. Answers `201`. |
-| `GET` | `/projects` | All projects, each with `hasGitToken` and `instanceCount`. |
+| `POST` | `/projects` | Create a project. Body: `name`, `repoUrl` (both required), `repoBranch`, `gitToken`, `buildingBlocks`, `env`, `egressHosts`. Answers `201`. |
+| `GET` | `/projects` | All projects, each with `hasGitToken`, `envNames`, `egressHosts` and `instanceCount`. |
 | `GET` | `/projects/:id` | One project. `404` if unknown. |
 | `PATCH` | `/projects/:id` | Change a project. Every field optional; see [Projects](#projects). |
 | `POST` | `/projects/:id/build` | Rebuild the project image. Answers `202` -- the build runs afterwards. |
@@ -80,9 +80,10 @@ is not running, `413` for an attachment over one of the two upload limits,
 ## Projects
 
 A project is the template an instance is created from: repository, branch,
-environment building blocks and the PAT for a private repository. `POST
-/instances` takes nothing but a `name` and a `projectId` -- an old caller sending
-`repoUrl` or `gitToken` gets a `400` rather than a silently ignored field.
+environment building blocks, the variables and egress hosts its instances run
+with, and the PAT for a private repository. `POST /instances` takes nothing but a
+`name` and a `projectId` -- an old caller sending `repoUrl` or `gitToken` gets a
+`400` rather than a silently ignored field.
 
 ```json
 {
@@ -90,7 +91,9 @@ environment building blocks and the PAT for a private repository. `POST
   "repoUrl": "https://github.com/dominikz98/claudops.git",
   "repoBranch": "main",
   "gitToken": "ghp_…",
-  "buildingBlocks": { "dotnet": true, "playwright": false }
+  "buildingBlocks": { "dotnet": true, "playwright": false },
+  "env": { "DATABASE_URL": "postgres://user:secret@db.internal/app" },
+  "egressHosts": ["db.internal", "api.example.com"]
 }
 ```
 
@@ -102,14 +105,37 @@ instead. Without a key the server still runs, but a request carrying a `gitToken
 answers `422 secret_key_missing`; a project whose PAT no longer decrypts (a
 rotated key) fails instance creation with `422 secret_undecryptable`.
 
+`env` is write-only in exactly the same way, sealed under its own scope so a blob
+from one column does not open as the other. A project answers with `envNames`,
+sorted, and never with a value. Every instance created from the project is started
+with them, which is also what makes a `${NAME}` in the repository's own
+`.mcp.json` resolve. The names claudops writes itself are refused with `409
+reserved_env_name` -- `REPO_URL`, `REPO_BRANCH`, `GIT_TOKEN`, `GIT_USER_NAME`,
+`GIT_USER_EMAIL`, `CLAUDE_CODE_OAUTH_TOKEN`, `FIREWALL_ALLOW`, `CLAUDE_MODEL`,
+`CLAUDE_EFFORT`, the three `CLAUDOPS_*`, and `ANTHROPIC_API_KEY`, which nothing
+sets and which would override the subscription token.
+
+`egressHosts` are not a secret and do come back. They are merged into
+`FIREWALL_ALLOW` after the server-wide `CLAUDOPS_FIREWALL_ALLOW`, so a project
+widens the container's whitelist and never narrows it. An entry that is neither a
+hostname nor a CIDR answers `400 invalid_egress_host` rather than being passed to
+a firewall script that would skip it in silence; more than 50 answers `400
+too_many_egress_hosts`.
+
+Both are read once, when a container starts: changing either changes what the
+next instance of the project gets, not what a running one has.
+
 `PATCH` sends only what changes. A field that is not in the body keeps its stored
 value -- which is what makes an untouched password field leave the PAT alone --
-and `null` removes it:
+and `null` removes it. `env` works per name, one level down: a name that is not
+mentioned keeps its value, `null` removes that one variable. `egressHosts` is the
+exception, replaced as a whole, because there is nothing to address a single
+entry by:
 
 ```bash
 curl -s -X PATCH localhost:8080/projects/<id> \
   -H 'content-type: application/json' \
-  -d '{"repoBranch":"develop","gitToken":null}'
+  -d '{"repoBranch":"develop","gitToken":null,"env":{"DATABASE_URL":null,"API_URL":"https://api.example.com"}}'
 ```
 
 An instance keeps a snapshot of the repository and branch it was started with, so
@@ -524,10 +550,10 @@ drives.
 | `CLAUDOPS_UPLOAD_MAX_FILE` | `25m` | Largest single attachment, same notation. At least `1k`. |
 | `CLAUDOPS_UPLOAD_MAX_TOTAL` | `200m` | Everything one instance's uploads directory may hold. Must not be smaller than the per-file limit. |
 | `CLAUDOPS_FILE_MAX_READ` | `10m` | Largest file `GET /instances/:id/files/content` hands back, same notation. At least `1k`. |
-| `CLAUDOPS_SECRET_KEY` | – | 32 bytes, base64 or hex: encrypts the PAT a project stores. Without it a project can be created but not with a `gitToken`. |
+| `CLAUDOPS_SECRET_KEY` | – | 32 bytes, base64 or hex: encrypts the PAT and the variables a project stores. Without it a project can be created but not with a `gitToken` or an `env`. |
 | `CLAUDOPS_LOGIN_SECRET` | – | **Required**, at least 16 characters. The shared secret `POST /login` takes. Without it the server exits 2 -- unlike the key above, because "unusable without a login" cannot hold if the login can be forgotten. |
 | `CLAUDOPS_SESSION_SECURE` | – | `1` marks the session cookie `Secure`. Only behind TLS: over plain HTTP the browser discards it and the login appears to do nothing. |
-| `CLAUDOPS_FIREWALL_ALLOW` | – | Extra hosts and CIDRs for an instance's egress whitelist, comma- or space-separated. Handed over as `FIREWALL_ALLOW`; rejected at startup if it is not a host list. |
+| `CLAUDOPS_FIREWALL_ALLOW` | – | Extra hosts and CIDRs for every instance's egress whitelist, comma- or space-separated. Handed over as `FIREWALL_ALLOW`, with the project's own hosts after it; rejected at startup if it is not a host list. |
 | `CLAUDOPS_LOG_LEVEL` | `info` | Fastify log level. |
 | `DOCKER_SOCKET` | platform default | `/var/run/docker.sock` on Linux, `//./pipe/docker_engine` on Windows. |
 | `DOCKER_HOST` | – | If set and `DOCKER_SOCKET` is not, the transport is left to dockerode. |
@@ -547,6 +573,7 @@ src/auth/cookie.ts        reading and writing that one cookie by hand
 src/auth/gate.ts          the onRequest hook, and what is public without a login
 src/auth/routes.ts        login, logout, session
 src/projects/service.ts   projects: CRUD, the PAT, the in-use check
+src/projects/env.ts       project variables and egress hosts: names, validation, the merge
 src/projects/images.ts    the image builds: queue, status, log, startup sweep
 src/projects/routes.ts    REST endpoints and their schemas
 src/docker/tar.ts         the one archive putArchive takes: a single file

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Smoke test for claudops-base: checks the acceptance criteria from issue #2
-# against a genuinely running container.
+# against a genuinely running container, plus the container's half of #32 -- an
+# extra host on the whitelist and a repository's own MCP servers.
 #
 #   ./docker/base/smoke-test.sh              # builds the image and tests
 #   SKIP_BUILD=1 ./docker/base/smoke-test.sh # uses an existing image
@@ -38,6 +39,14 @@ MARKER="CLAUDOPS_SCROLLBACK_MARKER"
 STATUS_PORT="19081"
 STATUS_INSTANCE="smoke-instance-id"
 STATUS_TOKEN="smoke-status-token"
+# Issue #32: what claudops passes a container on behalf of its project -- an
+# extra host for the egress whitelist, and a variable a repository's `.mcp.json`
+# refers to as ${MCP_PROBE}. nuget rather than an invented name: it is a host
+# the base image does not whitelist and a real project would ask for.
+EXTRA_HOST="api.nuget.org"
+MCP_PROBE_VALUE="smoke-mcp-value"
+MCP_PROBE_DIR="/workspace/mcp-probe"
+MCP_PROBE_MARKER="/tmp/claudops-mcp-resolved"
 
 pass=0
 fail=0
@@ -81,6 +90,8 @@ docker run -d --name "$CONTAINER" \
   -e CLAUDOPS_STATUS_PORT="$STATUS_PORT" \
   -e CLAUDOPS_INSTANCE_ID="$STATUS_INSTANCE" \
   -e CLAUDOPS_STATUS_TOKEN="$STATUS_TOKEN" \
+  -e FIREWALL_ALLOW="$EXTRA_HOST" \
+  -e MCP_PROBE="$MCP_PROBE_VALUE" \
   ${CLAUDE_CODE_OAUTH_TOKEN:+-e CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN"} \
   "$IMAGE" >/dev/null || { bad "docker run"; exit 1; }
 
@@ -148,6 +159,43 @@ check "The clone directory is trusted" "true" \
 check "No Claude token in the config" "0" \
   "$(dexec grep -c 'sk-ant' /home/claude/.claude.json 2>/dev/null | tr -d '\r')"
 
+# --------------------------------------------- AC (#32): a repository's MCP servers
+# The fourth first-start question, and the only one that needs a repository to
+# appear at all: a `.mcp.json` in the clone makes Claude ask whether to trust the
+# servers it declares. Pre-approved in the image, so an instance whose work needs
+# an MCP server has one.
+info "AC (#32): a repository's .mcp.json starts, with its \${VAR} resolved"
+check "Project MCP servers are pre-approved" "true" \
+  "$(dexec jq -r '.enableAllProjectMcpServers' /home/claude/.claude/settings.json 2>/dev/null | tr -d '\r')"
+
+# A stand-in for a real MCP server: it writes its own environment down and then
+# blocks on stdin, which is what a stdio server does. `claude mcp list` starts
+# every server to health-check it, so the marker is what says the ${MCP_PROBE} in
+# the file was resolved from the container's environment rather than passed
+# through as thirteen literal characters.
+#
+# Built as one line and written with printf: `docker exec` without -i forwards no
+# stdin, so a heredoc would arrive nowhere. The JSON deliberately holds no single
+# quote and no $ but that one, which is what keeps the quoting readable.
+mcp_json="{\"mcpServers\":{\"probe\":{\"command\":\"sh\",\"args\":[\"-c\",\"env > $MCP_PROBE_MARKER; exec cat\"],\"env\":{\"PROBE_ARG\":\"\${MCP_PROBE}\"}}}}"
+dexec sh -c "mkdir -p $MCP_PROBE_DIR && printf %s '$mcp_json' > $MCP_PROBE_DIR/.mcp.json" \
+  >/dev/null 2>&1
+
+mcp_out="$(dexec sh -c "cd $MCP_PROBE_DIR && claude mcp list" 2>&1 | tr -d '\r')"
+resolved=''
+for _ in $(seq 1 15); do
+  resolved="$(dexec sh -c "grep -a '^PROBE_ARG=' $MCP_PROBE_MARKER" 2>/dev/null | tr -d '\r')"
+  [[ -n "$resolved" ]] && break
+  sleep 1
+done
+
+if [[ "$resolved" == "PROBE_ARG=$MCP_PROBE_VALUE" ]]; then
+  ok "The MCP server was started with \${MCP_PROBE} resolved"
+else
+  bad "The MCP server did not start with the resolved value (got '$resolved') -- claude mcp list said:"
+  printf '%s\n' "$mcp_out" | sed 's/^/        /'
+fi
+
 # ------------------------------------------------ AC (#25): readiness reporting
 info "AC (#25): the container reports whether its session is up"
 
@@ -201,6 +249,12 @@ check "api.anthropic.com is reachable" "0" \
   "$(dexec curl -sS --max-time 15 -o /dev/null https://api.anthropic.com/ >/dev/null 2>&1; echo $?)"
 check "DNS still resolves" "0" \
   "$(dexec getent ahostsv4 registry.npmjs.org >/dev/null 2>&1; echo $?)"
+
+# What claudops passes on behalf of a project (#32). A host that is in neither
+# the image's list nor the GitHub ranges, so reaching it can only come from
+# FIREWALL_ALLOW.
+check "A host from FIREWALL_ALLOW is reachable" "0" \
+  "$(dexec curl -sS --max-time 15 -o /dev/null "https://$EXTRA_HOST/v3/index.json" >/dev/null 2>&1; echo $?)"
 
 blocked_rc="$(dexec curl -sS --max-time 5 -o /dev/null https://example.com >/dev/null 2>&1; echo $?)"
 if [[ "$blocked_rc" != "0" ]]; then

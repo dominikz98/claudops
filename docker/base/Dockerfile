@@ -141,10 +141,22 @@ RUN printf '%s' \
       > "/home/${USER_NAME}/.claude.json" \
  && chmod 0600 "/home/${USER_NAME}/.claude.json"
 
-# The four hooks that make an instance say what it is doing -- a turn starting,
-# a question, a turn ending, the session ending. Claude Code reads them from
-# ~/.claude/settings.json; the script they all run is claudops-status, which
-# stays quiet unless the container was given a status endpoint to report to.
+# Two things Claude Code reads from ~/.claude/settings.json.
+#
+# `enableAllProjectMcpServers` is the fourth first-start question, and it only
+# appears for a repository that brings a `.mcp.json`: Claude asks whether to
+# trust the servers it declares, and until somebody answers, a project whose
+# work needs an MCP server does not have one. Nothing in the instance list can
+# answer it, for the same reason as the other three
+# (knowledge/claude-onboarding-must-be-pre-seeded.md). Approving them wholesale
+# is defensible for the same reason `--dangerously-skip-permissions` is: the
+# servers come out of the repository this container was created for, they run
+# inside its isolation, and their egress is the container's whitelist.
+#
+# The four hooks are what make an instance say what it is doing -- a turn
+# starting, a question, a turn ending, the session ending. The script they all
+# run is claudops-status, which stays quiet unless the container was given a
+# status endpoint to report to.
 #
 # Owned by the agent, like .claude.json, and that is deliberate rather than an
 # oversight: Claude Code writes this file itself when a setting is changed from

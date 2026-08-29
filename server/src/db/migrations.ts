@@ -69,6 +69,35 @@ const MIGRATIONS: readonly string[] = [
   // answer for them: they were started without either flag.
   `ALTER TABLE instances ADD COLUMN model  TEXT;
    ALTER TABLE instances ADD COLUMN effort TEXT;`,
+
+  // 5 -- what a project's instances get beyond the fixed set: named environment
+  // variables and the hosts their egress firewall lets through.
+  //
+  // `value` holds the sealed blob from src/secrets/cipher.ts, for the same
+  // reason `projects.git_token` does: a project template outlives its instances,
+  // so what it hands them has to survive a restart -- and a variable is a
+  // secret until somebody says otherwise (a connection string usually is). It
+  // is sealed under its own scope, so a blob lifted out of `git_token` does not
+  // open as a variable and the other way round.
+  //
+  // Its own table rather than a JSON column: a name is a key, and a UNIQUE over
+  // (project_id, name) is what keeps a project from carrying the same variable
+  // twice. ON DELETE CASCADE is documented rather than relied on -- the
+  // repository deletes these rows itself, because a database opened without
+  // `foreign_keys = ON` would silently keep them
+  // (knowledge/sqlite-fk-needs-the-pragma-in-tests.md).
+  //
+  // The hosts are a plain column: they are not secret, they are read as one
+  // list and written as one, and FIREWALL_ALLOW is a comma-separated string at
+  // both ends of the wire anyway. Empty by default, which is what every project
+  // from before this migration means.
+  `CREATE TABLE project_env (
+     project_id TEXT NOT NULL REFERENCES projects (id) ON DELETE CASCADE,
+     name       TEXT NOT NULL,
+     value      TEXT NOT NULL,
+     PRIMARY KEY (project_id, name)
+   );
+   ALTER TABLE projects ADD COLUMN egress_hosts TEXT NOT NULL DEFAULT '';`,
 ];
 
 export function schemaVersion(db: Database): number {

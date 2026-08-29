@@ -73,3 +73,6 @@ Format and maintenance rules: skill `domain-knowledge`.
 - [A path check in the server is about a string; a symlink is about the container](a-server-side-path-check-cannot-see-a-symlink.md) - why the path is resolved twice, in two places
 - [What an instance produced is served as text or as a download, never as a document](instance-files-must-not-be-served-as-html.md) - an agent's HTML would run on claudops' own origin
 - [A directory listing read through an exec has to be NUL-separated](a-listing-out-of-an-exec-is-nul-separated.md) - the one byte a filename cannot contain
+- [Overwriting a managed variable is not enough -- it has to be dropped](a-managed-variable-must-be-dropped-not-overwritten.md) - the empty slot an ANTHROPIC_API_KEY would land in
+- [An empty value seals to exactly a nonce and a tag, and a `<=` guard refuses it](an-empty-value-seals-to-nonce-plus-tag.md) - the variable that stores and never reads back
+- [A repository's `.mcp.json` is a fourth first-start question](a-repo-mcp-json-is-a-fourth-first-start-question.md) - and `${VAR}` is how its server gets a secret the repo must not hold

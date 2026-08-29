@@ -1,4 +1,5 @@
 {
+  "enableAllProjectMcpServers": true,
   "hooks": {
     "UserPromptSubmit": [
       { "hooks": [{ "type": "command", "command": "/usr/local/bin/claudops-status" }] }

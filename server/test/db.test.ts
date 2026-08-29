@@ -57,6 +57,13 @@ describe('migrations', () => {
                id TEXT PRIMARY KEY, name TEXT NOT NULL, image TEXT NOT NULL,
                container_id TEXT, repo_url TEXT, repo_branch TEXT,
                created_at TEXT NOT NULL, project_id TEXT);
+             CREATE TABLE projects (
+               id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, repo_url TEXT NOT NULL,
+               repo_branch TEXT, block_dotnet INTEGER NOT NULL DEFAULT 0,
+               block_playwright INTEGER NOT NULL DEFAULT 0, git_token TEXT,
+               created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+               image_status TEXT NOT NULL DEFAULT 'pending', image_log TEXT,
+               image_built_at TEXT);
              INSERT INTO instances (id, name, image, created_at)
                VALUES ('old', 'from-before', 'claudops-base', '2026-08-01T00:00:00.000Z');`);
     db.pragma('user_version = 3');
@@ -84,7 +91,38 @@ describe('migrations', () => {
       'image_status',
       'image_log',
       'image_built_at',
+      // Migration 5. The variables are their own table -- this one is the host
+      // list, which is not secret and is read and written whole.
+      'egress_hosts',
     ]);
+  });
+
+  it('keeps the project variables in their own table, values sealed', () => {
+    expect(columnsOf(freshDb(), 'project_env')).toEqual(['project_id', 'name', 'value']);
+  });
+
+  it('leaves a project from before migration 5 without variables or hosts', () => {
+    const db = new Database(':memory:');
+    // The schema as it stood after migration 3, plus one row -- what an upgrade
+    // of a running installation actually finds.
+    db.exec(`CREATE TABLE projects (
+               id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, repo_url TEXT NOT NULL,
+               repo_branch TEXT, block_dotnet INTEGER NOT NULL DEFAULT 0,
+               block_playwright INTEGER NOT NULL DEFAULT 0, git_token TEXT,
+               created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+               image_status TEXT NOT NULL DEFAULT 'pending', image_log TEXT,
+               image_built_at TEXT);
+             CREATE TABLE instances (
+               id TEXT PRIMARY KEY, name TEXT NOT NULL, image TEXT NOT NULL,
+               container_id TEXT, repo_url TEXT, repo_branch TEXT,
+               created_at TEXT NOT NULL, project_id TEXT);
+             INSERT INTO projects (id, name, repo_url, created_at, updated_at)
+               VALUES ('old', 'legacy', 'https://host/x.git', 'then', 'then');`);
+    db.pragma('user_version = 4');
+
+    migrate(db);
+
+    expect(new ProjectRepository(db).get('old')).toMatchObject({ env: {}, egressHosts: [] });
   });
 
   it('leaves a project from before project images needing a build', () => {
@@ -224,6 +262,8 @@ describe('ProjectRepository', () => {
     repoBranch: 'main',
     buildingBlocks: { dotnet: true, playwright: false },
     sealedGitToken: 'v1:sealed-blob',
+    env: {},
+    egressHosts: [],
     image: { status: 'pending', log: null, builtAt: null },
     createdAt: '2026-08-25T08:00:00.000Z',
     updatedAt: '2026-08-25T08:00:00.000Z',
@@ -306,6 +346,72 @@ describe('ProjectRepository', () => {
 
     expect(projects.delete('proj-1')).toBe(true);
     expect(projects.delete('proj-1')).toBe(false);
+  });
+
+  describe('variables and egress hosts', () => {
+    const withEnv: NewProject = {
+      ...newProject,
+      env: { API_URL: 'v1:sealed-url', TOKEN: 'v1:sealed-token' },
+      egressHosts: ['api.example.com', '10.1.0.0/16'],
+    };
+
+    it('stores them with the project and reads them back', () => {
+      projects.insert(withEnv);
+
+      expect(projects.get('proj-1')).toEqual(withEnv);
+      expect(projects.list()[0]).toEqual(withEnv);
+    });
+
+    it('writes only the variables a change names', () => {
+      projects.insert(withEnv);
+
+      const updated = projects.update('proj-1', {
+        env: { API_URL: 'v1:new-url', ADDED: 'v1:added' },
+        updatedAt: 'x',
+      });
+
+      expect(updated?.env).toEqual({
+        ADDED: 'v1:added',
+        API_URL: 'v1:new-url',
+        TOKEN: 'v1:sealed-token',
+      });
+    });
+
+    it('removes the one variable it is handed null for', () => {
+      projects.insert(withEnv);
+
+      expect(projects.update('proj-1', { env: { TOKEN: null }, updatedAt: 'x' })?.env).toEqual({
+        API_URL: 'v1:sealed-url',
+      });
+    });
+
+    it('replaces the host list as a whole, and clears it with an empty one', () => {
+      projects.insert(withEnv);
+
+      expect(projects.update('proj-1', { egressHosts: ['only.example.com'], updatedAt: 'x' })
+        ?.egressHosts).toEqual(['only.example.com']);
+      expect(projects.update('proj-1', { egressHosts: [], updatedAt: 'y' })?.egressHosts).toEqual(
+        [],
+      );
+    });
+
+    // Not left to ON DELETE CASCADE: this database was opened without
+    // `foreign_keys = ON`, exactly like the one in
+    // knowledge/sqlite-fk-needs-the-pragma-in-tests.md.
+    it('takes the variables with it when the project goes', () => {
+      projects.insert(withEnv);
+      projects.delete('proj-1');
+
+      expect(projects.env('proj-1')).toEqual({});
+    });
+
+    it("keeps one project's variables out of another's", () => {
+      projects.insert(withEnv);
+      projects.insert({ ...newProject, id: 'proj-2', name: 'other', env: { OTHER: 'v1:other' } });
+
+      expect(projects.env('proj-1')).toEqual(withEnv.env);
+      expect(projects.env('proj-2')).toEqual({ OTHER: 'v1:other' });
+    });
   });
 
   describe('the image state', () => {

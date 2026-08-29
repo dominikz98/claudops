@@ -10,7 +10,9 @@
  * beat, because the server writes it away as the build produces it.
  *
  * The PAT is write-only: the server answers with `hasGitToken` and never with
- * the value, so this page can show that one is stored but never what it is.
+ * the value, so this page can show that one is stored but never what it is. The
+ * same holds for the project's environment variables -- the server answers with
+ * their names, so they are listed and removable here, but never shown.
  */
 
 import {
@@ -56,6 +58,43 @@ interface Field {
   wrapper: HTMLElement;
 }
 
+interface AreaField {
+  input: HTMLTextAreaElement;
+  wrapper: HTMLElement;
+}
+
+/**
+ * `NAME=value` per line, which is how these are written everywhere else -- a
+ * `.env` file, a `docker run -e`, the table in docker/base/README.md.
+ *
+ * Only the first `=` splits, so a value may contain one; a blank line and a
+ * `#` comment are skipped. Anything else throws, because a line that was meant
+ * to be a variable and is silently dropped is worse than a refused save.
+ */
+export function parseEnv(text: string): Record<string, string> {
+  const env: Record<string, string> = {};
+
+  for (const raw of text.split('\n')) {
+    const line = raw.trim();
+    if (line === '' || line.startsWith('#')) continue;
+
+    const at = line.indexOf('=');
+    if (at < 1) throw new Error(`'${line}' is not a NAME=value line`);
+    env[line.slice(0, at).trim()] = line.slice(at + 1).trim();
+  }
+
+  return env;
+}
+
+/** Commas, spaces and newlines all separate -- the same characters the
+ *  container's firewall script splits FIREWALL_ALLOW on. */
+export function parseHosts(text: string): string[] {
+  return text
+    .split(/[\s,;]+/)
+    .map((host) => host.trim())
+    .filter((host) => host !== '');
+}
+
 export function mountProjects(root: HTMLElement, api: Api): View {
   let projects: Project[] = [];
   /** The project the form is editing, or `undefined` while it creates. */
@@ -95,6 +134,18 @@ export function mountProjects(root: HTMLElement, api: Api): View {
     return { input, wrapper: el('label', {}, el('span', {}, label), input) };
   };
 
+  const areaField = (label: string, name: string, placeholder: string): AreaField => {
+    const input = el('textarea', {
+      name,
+      placeholder,
+      rows: '3',
+      autocomplete: 'off',
+      spellcheck: 'false',
+      'data-testid': `project-${name}`,
+    });
+    return { input, wrapper: el('label', {}, el('span', {}, label), input) };
+  };
+
   const checkField = (label: string, name: string): Field => {
     const input = el('input', { type: 'checkbox', name, 'data-testid': `block-${name}` });
     return {
@@ -111,6 +162,17 @@ export function mountProjects(root: HTMLElement, api: Api): View {
   const gitToken = textField('Git token', 'gitToken', 'password', 'PAT for a private repository');
   const dotnet = checkField('dotnet SDK', 'dotnet');
   const playwright = checkField('Playwright + Chromium', 'playwright');
+  // Write-only like the PAT, and for the same reason: what is typed here is
+  // sealed server-side and never comes back. The box is therefore empty on
+  // every edit -- what is stored shows as names below it.
+  const env = areaField('Variables', 'env', 'NAME=value, one per line');
+  const envNames = el('p', { class: 'hint chips', 'data-testid': 'env-names' });
+  // Not secret, so this one really does show what is stored.
+  const egressHosts = areaField(
+    'Egress hosts',
+    'egressHosts',
+    'api.example.com, 10.1.0.0/16 -- on top of the server-wide list',
+  );
 
   const submit = el('button', { type: 'submit', 'data-testid': 'project-submit' }, 'Create');
   const cancel = el(
@@ -139,6 +201,9 @@ export function mountProjects(root: HTMLElement, api: Api): View {
       dotnet.wrapper,
       playwright.wrapper,
     ),
+    env.wrapper,
+    envNames,
+    egressHosts.wrapper,
     el('span', { class: 'actions' }, submit, cancel, removeToken),
     tokenHint,
   );
@@ -162,6 +227,47 @@ export function mountProjects(root: HTMLElement, api: Api): View {
     playwright: playwright.input.checked,
   });
 
+  /**
+   * The names of the variables the project being edited carries, each with the
+   * button that removes it. Names only -- the values are write-only, exactly
+   * like the PAT.
+   *
+   * A removal goes straight to the server rather than waiting for Save, which
+   * is what the token's own Remove button does: both are "drop this stored
+   * secret", and a pending removal sitting in a form is a way to lose track of
+   * whether it happened.
+   */
+  const renderEnvNames = (): void => {
+    clear(envNames);
+
+    const stored = editing?.envNames ?? [];
+    if (stored.length === 0) {
+      envNames.append(
+        editing === undefined
+          ? 'Variables are sealed and never shown again -- only their names.'
+          : 'No variables stored.',
+      );
+      return;
+    }
+
+    envNames.append('Stored: ');
+    for (const variable of stored) {
+      const drop = el(
+        'button',
+        {
+          type: 'button',
+          class: 'secondary chip',
+          'data-testid': 'remove-variable',
+          'data-variable': variable,
+          title: `Remove ${variable}`,
+        },
+        `${variable} ×`,
+      );
+      drop.addEventListener('click', () => void dropVariable(variable));
+      envNames.append(drop);
+    }
+  };
+
   const stopEditing = (): void => {
     editing = undefined;
     form.reset();
@@ -171,6 +277,7 @@ export function mountProjects(root: HTMLElement, api: Api): View {
     tokenHint.textContent = '';
     show(cancel, false);
     show(removeToken, false);
+    renderEnvNames();
     renderRows();
   };
 
@@ -182,12 +289,17 @@ export function mountProjects(root: HTMLElement, api: Api): View {
     gitToken.input.value = '';
     dotnet.input.checked = project.buildingBlocks.dotnet;
     playwright.input.checked = project.buildingBlocks.playwright;
+    // Empty on purpose: there is nothing to put back, and a box that showed the
+    // names without their values would look like an edit that then wiped them.
+    env.input.value = '';
+    egressHosts.input.value = project.egressHosts.join(', ');
     submit.textContent = 'Save';
     tokenHint.textContent = project.hasGitToken
       ? 'A token is stored. Leave the field empty to keep it.'
       : 'No token stored.';
     show(cancel, true);
     show(removeToken, project.hasGitToken);
+    renderEnvNames();
     renderRows();
     name.input.focus();
   };
@@ -283,8 +395,20 @@ export function mountProjects(root: HTMLElement, api: Api): View {
   };
 
   const save = async (): Promise<void> => {
-    const value = (field: Field): string => field.input.value.trim();
+    const value = (field: Field | AreaField): string => field.input.value.trim();
     const target = editing;
+
+    // Before the button is disabled: a malformed line is this page's own
+    // refusal, and it must leave the form exactly as it was so the line can be
+    // corrected rather than retyped.
+    let typed: Record<string, string>;
+    try {
+      typed = parseEnv(env.input.value);
+    } catch (error) {
+      showError(error);
+      return;
+    }
+    const hosts = parseHosts(egressHosts.input.value);
 
     submit.setAttribute('disabled', 'disabled');
     try {
@@ -295,6 +419,8 @@ export function mountProjects(root: HTMLElement, api: Api): View {
           repoBranch: value(repoBranch),
           gitToken: value(gitToken),
           buildingBlocks: blocks(),
+          env: typed,
+          egressHosts: hosts,
         });
       } else {
         await api.updateProject(target.id, {
@@ -307,6 +433,12 @@ export function mountProjects(root: HTMLElement, api: Api): View {
           // separate button.
           ...(value(gitToken) === '' ? {} : { gitToken: value(gitToken) }),
           buildingBlocks: blocks(),
+          // An empty box is "change nothing", like the password field above it:
+          // what is stored is not shown, so it cannot be edited in place either.
+          ...(Object.keys(typed).length === 0 ? {} : { env: typed }),
+          // The hosts do show what is stored, so an emptied field is a removal
+          // -- the same reading as the branch.
+          egressHosts: hosts,
         });
       }
       clearError();
@@ -325,6 +457,22 @@ export function mountProjects(root: HTMLElement, api: Api): View {
       await api.updateProject(editing.id, { gitToken: null });
       clearError();
       stopEditing();
+      await refresh();
+    } catch (error) {
+      showError(error);
+    }
+  };
+
+  /** Removes one variable and stays in the form: unlike the token, a project
+   *  usually has several, and dropping one is rarely the last thing you do. */
+  const dropVariable = async (variable: string): Promise<void> => {
+    const target = editing;
+    if (target === undefined) return;
+
+    try {
+      editing = await api.updateProject(target.id, { env: { [variable]: null } });
+      clearError();
+      renderEnvNames();
       await refresh();
     } catch (error) {
       showError(error);
@@ -406,10 +554,22 @@ export function mountProjects(root: HTMLElement, api: Api): View {
       );
       logButton.addEventListener('click', () => void toggleLog(project.id));
 
+      // Everything the instances of this project get beyond the base image, in
+      // one cell: the prebuilt blocks, how many variables they are handed and
+      // how many extra hosts they may reach. Counts rather than values --
+      // a variable's value is never shown, and the full lists are on the hover.
       const chosen = [
         project.buildingBlocks.dotnet ? 'dotnet' : undefined,
         project.buildingBlocks.playwright ? 'playwright' : undefined,
+        project.envNames.length === 0
+          ? undefined
+          : `${String(project.envNames.length)} var${project.envNames.length === 1 ? '' : 's'}`,
+        project.egressHosts.length === 0
+          ? undefined
+          : `${String(project.egressHosts.length)} host${project.egressHosts.length === 1 ? '' : 's'}`,
       ].filter((block) => block !== undefined);
+
+      const environmentTitle = [...project.envNames, ...project.egressHosts].join(', ');
 
       rows.append(
         el(
@@ -418,7 +578,14 @@ export function mountProjects(root: HTMLElement, api: Api): View {
           el('td', { class: 'name' }, project.name),
           el('td', { class: 'repo' }, project.repoUrl),
           el('td', {}, project.repoBranch ?? '--'),
-          el('td', {}, chosen.length === 0 ? '--' : chosen.join(', ')),
+          el(
+            'td',
+            {
+              'data-testid': 'project-environment',
+              ...(environmentTitle === '' ? {} : { title: environmentTitle }),
+            },
+            chosen.length === 0 ? '--' : chosen.join(', '),
+          ),
           el(
             'td',
             {},
@@ -456,6 +623,7 @@ export function mountProjects(root: HTMLElement, api: Api): View {
     event.preventDefault();
     void save();
   });
+  renderEnvNames();
   cancel.addEventListener('click', stopEditing);
   removeToken.addEventListener('click', () => void dropToken());
 

@@ -46,6 +46,12 @@ import {
   ProjectImageBuilder,
   type ProjectImages,
 } from './projects/images.ts';
+import {
+  InvalidEgressHostError,
+  InvalidEnvNameError,
+  ReservedEnvNameError,
+  TooManyEgressHostsError,
+} from './projects/env.ts';
 import { projectRoutes } from './projects/routes.ts';
 import {
   ProjectImageNotReadyError,
@@ -303,6 +309,31 @@ export function buildApp(options: AppOptions): FastifyInstance {
     }
     if (error instanceof ProjectNameTakenError) {
       return reply.code(409).send({ error: 'project_name_taken', message: error.message });
+    }
+    // A variable claudops writes itself. 409 rather than 400: the name is
+    // well-formed and the request is understood -- what is in the way is that
+    // the environment already has that variable, and no wording of the request
+    // changes it.
+    if (error instanceof ReservedEnvNameError) {
+      return reply
+        .code(409)
+        .send({ error: 'reserved_env_name', message: error.message, variable: error.variable });
+    }
+    // The three malformed ones. 400 for the same reading as UnknownChoiceError:
+    // the route schema rejects the same input, so anything that reaches here
+    // came from a caller that went around it.
+    if (error instanceof InvalidEnvNameError) {
+      return reply
+        .code(400)
+        .send({ error: 'invalid_env_name', message: error.message, variable: error.variable });
+    }
+    if (error instanceof InvalidEgressHostError) {
+      return reply
+        .code(400)
+        .send({ error: 'invalid_egress_host', message: error.message, host: error.host });
+    }
+    if (error instanceof TooManyEgressHostsError) {
+      return reply.code(400).send({ error: 'too_many_egress_hosts', message: error.message });
     }
     // A path that is not in the workspace, whether it said so plainly or got
     // there through a symlink the container resolved. 400 rather than 404: the

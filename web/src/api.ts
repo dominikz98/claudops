@@ -105,7 +105,8 @@ export interface BuildLog {
 }
 
 /** `ProjectView` in server/src/projects/service.ts. The PAT appears only as
- *  `hasGitToken`: it is stored encrypted server-side and never sent back. */
+ *  `hasGitToken` and a variable only as its name: both are stored encrypted
+ *  server-side and never sent back. */
 export interface Project {
   id: string;
   name: string;
@@ -114,6 +115,11 @@ export interface Project {
   buildingBlocks: BuildingBlocks;
   image: ProjectImage;
   hasGitToken: boolean;
+  /** The names of this project's environment variables, sorted. */
+  envNames: string[];
+  /** Hosts and CIDRs this project's instances may reach on top of the
+   *  server-wide list. Not secret, so these do come back. */
+  egressHosts: string[];
   instanceCount: number;
   createdAt: string;
   updatedAt: string;
@@ -125,6 +131,9 @@ export interface CreateProjectInput {
   repoBranch?: string;
   gitToken?: string;
   buildingBlocks: BuildingBlocks;
+  /** Variable name to value. Write-only, like the PAT. */
+  env?: Record<string, string>;
+  egressHosts?: string[];
 }
 
 export interface UpdateProjectInput {
@@ -136,6 +145,11 @@ export interface UpdateProjectInput {
    *  means. `null` removes it, a string replaces it. */
   gitToken?: string | null;
   buildingBlocks?: BuildingBlocks;
+  /** Per name, the same reading as `gitToken`: a name not mentioned keeps its
+   *  value, `null` removes that one variable. */
+  env?: Record<string, string | null>;
+  /** The whole list, replaced. `[]` clears it. */
+  egressHosts?: string[];
 }
 
 /** `UploadView` in server/src/instances/service.ts -- one file that made it
@@ -403,6 +417,8 @@ export function createApi(
             repoBranch: input.repoBranch,
             gitToken: input.gitToken,
             buildingBlocks: input.buildingBlocks,
+            env: input.env,
+            egressHosts: input.egressHosts,
           }),
         ),
       );
