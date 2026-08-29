@@ -116,6 +116,46 @@ export interface CommandResult {
   output: string;
 }
 
+/**
+ * One file read out of a container, as `getArchive` handed it over.
+ *
+ * A read is not a `runCommand`: an exec's output is decoded as UTF-8 on its
+ * way out, so a screenshot that came back through `cat` would arrive as
+ * replacement characters. The archive carries bytes.
+ */
+export interface ContainerFile {
+  /** The entry name inside the archive, which is the basename of the path. */
+  name: string;
+  content: Uint8Array;
+}
+
+/**
+ * The file is bigger than the caller allowed. Read from the archive's header,
+ * before its body -- so this is the answer that keeps a heap dump in the
+ * container instead of in the server's memory.
+ */
+export class FileTooLargeError extends Error {
+  constructor(
+    readonly path: string,
+    readonly limitBytes: number,
+    readonly actualBytes: number,
+  ) {
+    super(
+      `'${path}' is ${String(actualBytes)} bytes, the limit for reading one is ${String(limitBytes)}`,
+    );
+    this.name = 'FileTooLargeError';
+  }
+}
+
+/** The path is not something whose bytes can be handed back: a directory, a
+ *  symlink, a device. */
+export class NotARegularFileError extends Error {
+  constructor(readonly path: string) {
+    super(`'${path}' is not a regular file`);
+    this.name = 'NotARegularFileError';
+  }
+}
+
 /** What one `docker build` needs. No build-context contents here: the template
  *  in docker/project has no COPY, so the context is the Dockerfile and nothing
  *  else. */
@@ -208,6 +248,16 @@ export interface DockerEngine {
    * what the `mkdir -p` before every upload is for.
    */
   putArchive(containerId: string, targetDir: string, archive: Uint8Array): Promise<void>;
+  /**
+   * Reads one file out of the container.
+   *
+   * `maxBytes` is enforced from the archive's header, so an oversized file is
+   * refused with FileTooLargeError without its body being transferred. Throws
+   * NotARegularFileError for a directory or a symlink, ContainerNotFoundError
+   * for a path the container does not have -- Docker answers 404 for both, and
+   * the caller has already established which of the two it is.
+   */
+  readFile(containerId: string, path: string, maxBytes: number): Promise<ContainerFile>;
   /**
    * Runs one command in the container and waits for it. Everything
    * `attachTerminal` is not: no TTY, no duplex, and an exit code at the end --

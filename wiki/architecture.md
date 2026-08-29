@@ -26,7 +26,7 @@ Container per instance: project image -> clone repo -> tmux -> claude
 | `claudops-base` | Base image: Node, Claude Code CLI, git, tmux, non-root user, entrypoint | Available |
 | `claudops-server` | Fastify: project and instance REST, the image builds, the terminal bridge and the UI | Available |
 | Project images `claudops-project-<id>` | One template Dockerfile plus the building blocks of a project, prebuilt | Available |
-| Web UI | Vite SPA served by the server on the same port: projects, instance list and console | Available |
+| Web UI | Vite SPA served by the server on the same port: projects, instance list, console and the files panel next to it | Available |
 | SQLite | Metadata for projects and instances, the encrypted project PATs, the state of each image | Available |
 
 ## Decisions worth knowing
@@ -57,6 +57,26 @@ that holds by the path rather than by a `.gitignore` somebody maintains.
 Afterwards the server types the path into the tmux session with
 `tmux send-keys -l` -- typed, not submitted, so a half-written prompt is not
 sent along with it.
+
+**Reading a file back out is the same trick in reverse, and the same reason.** A
+screenshot Claude took or a report it wrote is fetched with Docker's
+`getArchive` and served as raw bytes, so the browser can show it without the
+file having been committed or copied off the NUC by hand. It cannot go through
+the console either: an exec's output is decoded as text on the way out, and a
+PNG does not survive that. The directory listing behind the file tree is one
+`find` per open folder rather than a walk of the whole workspace -- the clone in
+there has a `node_modules`.
+
+**A path from the browser is checked twice, in two places.** The server
+normalises it and refuses anything that does not resolve under `/workspace`;
+the container then resolves it again with `realpath` and refuses it a second
+time if what it points at has left the workspace. The two are not redundant:
+the first is a statement about a string, and a symlink is a fact about the
+container's filesystem that no amount of string handling can see. What comes
+back is served as an image, as plain text, or as a download -- never as
+`text/html` or `image/svg+xml`, because it is content an agent wrote being
+served from claudops' own origin to a browser that carries the operator's
+session.
 
 **One port, and the browser routes in the fragment.** The server serves the built
 SPA at `/` next to its own API, so there is no second process, no second origin

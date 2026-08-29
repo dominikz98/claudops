@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# End-to-end tests for the web UI: the acceptance criteria of issue #5 in a real
-# browser, against a real server, a real Docker daemon and a real container.
+# End-to-end tests for the web UI: the browser-interactive acceptance criteria
+# -- issue #5 and every ticket since whose claim is about what a person sees --
+# against a real server, a real Docker daemon and a real container.
 #
 #   ./e2e/run.sh                # builds base image, server and UI, then tests
 #   SKIP_BUILD=1 ./e2e/run.sh   # uses what is already built

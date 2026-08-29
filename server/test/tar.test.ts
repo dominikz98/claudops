@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   CONTAINER_GID,
   CONTAINER_UID,
+  MalformedArchiveError,
+  readFirstEntry,
   singleFileArchive,
 } from '../src/docker/tar.ts';
 
@@ -80,5 +82,102 @@ describe('singleFileArchive', () => {
 
   it('refuses a name that does not fit the header rather than truncating it', () => {
     expect(() => singleFileArchive('x'.repeat(100), new Uint8Array(0))).toThrow(RangeError);
+  });
+});
+
+/** The archive as a stream, in pieces -- what a socket hands over, and what
+ *  the reader has to survive: a header split across two chunks is the normal
+ *  case, not the odd one. */
+function* inChunks(archive: Uint8Array, size: number): Generator<Uint8Array> {
+  for (let at = 0; at < archive.length; at += size) {
+    yield archive.slice(at, at + size);
+  }
+}
+
+/** A tar entry of a type this module never writes -- typeflag `5` is a
+ *  directory, which is what `getArchive` of a folder starts with. */
+function directoryArchive(name: string): Uint8Array {
+  const archive = singleFileArchive(name, new Uint8Array(0));
+  archive[156] = '5'.charCodeAt(0);
+  return archive;
+}
+
+describe('readFirstEntry', () => {
+  const content = new TextEncoder().encode('# Report\n\nAll green.\n');
+  const archive = singleFileArchive('report.md', content);
+
+  it('reads the entry back out of what singleFileArchive wrote', async () => {
+    const entry = await readFirstEntry(inChunks(archive, archive.length), 1024);
+
+    expect(entry).toEqual({
+      kind: 'file',
+      name: 'report.md',
+      size: content.length,
+      content,
+    });
+  });
+
+  it('does not care where the chunk boundaries fall', async () => {
+    // 100 bytes puts a boundary inside the header, inside the content and
+    // inside the padding -- all three at once.
+    for (const size of [1, 7, 100, 512, 513]) {
+      const entry = await readFirstEntry(inChunks(archive, size), 1024);
+      expect(entry.kind, `chunks of ${String(size)}`).toBe('file');
+      expect(entry.kind === 'file' && entry.content).toEqual(content);
+    }
+  });
+
+  it('refuses an oversized entry from its header, before its body', async () => {
+    const big = singleFileArchive('heap.bin', new Uint8Array(4096));
+    let delivered = 0;
+
+    const counted = function* (): Generator<Uint8Array> {
+      for (const chunk of inChunks(big, 512)) {
+        delivered += chunk.length;
+        yield chunk;
+      }
+    };
+
+    expect(await readFirstEntry(counted(), 1024)).toEqual({
+      kind: 'too-large',
+      name: 'heap.bin',
+      size: 4096,
+    });
+    // The header and nothing else: this is what keeps a heap dump out of the
+    // server's memory.
+    expect(delivered).toBe(512);
+  });
+
+  it('says a directory is not a file rather than reading it', async () => {
+    expect(await readFirstEntry(inChunks(directoryArchive('src'), 512), 1024)).toEqual({
+      kind: 'other',
+      name: 'src',
+      typeflag: '5',
+    });
+  });
+
+  it('reports an archive that holds nothing', async () => {
+    expect(await readFirstEntry(inChunks(new Uint8Array(1024), 512), 1024)).toEqual({
+      kind: 'empty',
+    });
+    expect(await readFirstEntry(inChunks(new Uint8Array(0), 512), 1024)).toEqual({ kind: 'empty' });
+  });
+
+  it('refuses a stream that is not a tar, and one that ends mid-entry', async () => {
+    const notTar = new Uint8Array(512).fill(0x41);
+    await expect(readFirstEntry(inChunks(notTar, 512), 1024)).rejects.toThrow(
+      MalformedArchiveError,
+    );
+
+    // The header promises more content than the stream carries.
+    const truncated = archive.slice(0, 512 + 4);
+    await expect(readFirstEntry(inChunks(truncated, 512), 1024)).rejects.toThrow(
+      MalformedArchiveError,
+    );
+  });
+
+  it('takes an entry of exactly the limit', async () => {
+    const exact = singleFileArchive('edge.txt', new Uint8Array(1024).fill(0x61));
+    expect((await readFirstEntry(inChunks(exact, 512), 1024)).kind).toBe('file');
   });
 });

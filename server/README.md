@@ -45,6 +45,8 @@ docker build -t claudops-base docker/base
 | `POST` | `/instances/:id/start` | Start it again. `200`, `409` when the instance has no container. |
 | `DELETE` | `/instances/:id` | Remove the container, its volumes and the instance. `204`, or `404` if unknown. |
 | `POST` | `/instances/:id/files` | Attach one file. Bytes as the body, name in `?name=`. Answers `201`. See [Attachments](#attachments). |
+| `GET` | `/instances/:id/files` | One directory of the instance's workspace, one level deep. `?path=` defaults to `/workspace`. See [Files](#files). |
+| `GET` | `/instances/:id/files/content` | The bytes of one file. `?path=` is required, `?download=1` forces a Save as. |
 | `GET` | `/instances/:id/terminal` | WebSocket: the instance console. See [Terminal](#terminal). |
 
 One route is deliberately not on this port. `POST /instances/:id/status` lives on
@@ -370,6 +372,92 @@ into memory. What an instance holds is read out of the container on every
 upload rather than counted in the database -- a `rm` in the console has to be
 visible immediately.
 
+## Files
+
+The other direction from an attachment: what the instance produced. A run
+leaves a screenshot, a report, a coverage file or a heap dump in `/workspace`,
+and these two endpoints are how they get looked at without a commit and without
+a `docker cp`.
+
+```bash
+curl -s 'localhost:8080/instances/<id>/files?path=/workspace/claudops'
+```
+
+```json
+{
+  "path": "/workspace/claudops",
+  "parent": "/workspace",
+  "truncated": false,
+  "entries": [
+    { "name": "src", "path": "/workspace/claudops/src", "kind": "directory",
+      "size": 4096, "modifiedAt": "2026-08-29T09:12:03.000Z" },
+    { "name": "REPORT.md", "path": "/workspace/claudops/REPORT.md", "kind": "file",
+      "size": 182, "modifiedAt": "2026-08-29T09:41:55.000Z" }
+  ]
+}
+```
+
+**One directory per request.** Not a tree: the workspace holds a clone with its
+`node_modules` and its `.git`, and a recursive walk of that is megabytes of
+output for one click. Directories come first, then entries by name. `kind` is
+`file`, `directory`, or `other` -- a symlink, a socket, a device, which is
+neither browsable nor readable. A directory with more than 500 entries answers
+the first 500 and sets `truncated`.
+
+**The path.** Relative paths are relative to `/workspace`; absolute ones have to
+be under it. Everything else answers `400 path_outside_workspace`, and so does a
+path that *resolves* out of the workspace inside the container -- a symlink to
+`/etc`. The two checks are separate on purpose: the first is about the string
+the caller sent, the second about what it points at, and only the container can
+answer the second
+(knowledge/a-server-side-path-check-cannot-see-a-symlink.md).
+
+**Reading one file.**
+
+```bash
+curl -s -OJ 'localhost:8080/instances/<id>/files/content?path=/workspace/shot.png&download=1'
+```
+
+The body is the bytes, not JSON: a screenshot in a JSON field is a third bigger
+and has to be decoded before it can be shown, while a raw body is what an
+`<img src>` and a download link both already understand.
+
+**What it is served as.** One of three content types, chosen from the bytes
+rather than from the name:
+
+| Bytes | `content-type` | `content-disposition` |
+| --- | --- | --- |
+| A PNG, JPEG, GIF, WebP, AVIF, BMP or ICO by extension | `image/…` | `inline` |
+| Anything that is valid UTF-8 without a NUL | `text/plain; charset=utf-8` | `inline` |
+| Everything else | `application/octet-stream` | `attachment` |
+
+`text/html` and `image/svg+xml` are never sent, whatever the file is called: this
+is content an agent wrote, served from claudops' own origin to a browser
+carrying the session cookie, and both of them execute. Markdown therefore
+arrives as text and is rendered in the browser. Every response also carries
+`X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none';
+sandbox` and `Cache-Control: no-store`. `?download=1` keeps the type and turns
+the disposition into `attachment`.
+
+**Refusals.**
+
+| Status | `error` | When |
+| --- | --- | --- |
+| `400` | `path_outside_workspace` | The path is not under `/workspace`, or resolves out of it |
+| `400` | `wrong_path_kind` | A directory asked for its bytes, a file asked for its listing, a symlink either way |
+| `404` | `path_not_found` | The instance is there, the path in it is not |
+| `409` | `container_not_running` | Nothing to read from |
+| `413` | `file_too_large` | Over `CLAUDOPS_FILE_MAX_READ` |
+
+**The limit.** `CLAUDOPS_FILE_MAX_READ`, ten megabytes by default. Its own
+number rather than the upload limit: the two travel in opposite directions and
+are bounded for different reasons -- an upload to keep the NUC's disk, a read to
+keep the server's memory, because a read is buffered before it is sent. The size
+is read out of the container first, and the archive's own header is checked
+again while it streams, so an oversized file is refused without its bytes
+entering the server
+(knowledge/reading-a-file-needs-getarchive-not-cat.md).
+
 ## Terminal
 
 `GET /instances/:id/terminal` upgrades to a WebSocket and attaches a
@@ -435,6 +523,7 @@ drives.
 | `CLAUDOPS_INSTANCE_MEMORY` | `4g` | Memory ceiling per instance: a byte count or a `b`/`k`/`m`/`g` suffix, at least `6m`. Swap is capped at the same value. |
 | `CLAUDOPS_UPLOAD_MAX_FILE` | `25m` | Largest single attachment, same notation. At least `1k`. |
 | `CLAUDOPS_UPLOAD_MAX_TOTAL` | `200m` | Everything one instance's uploads directory may hold. Must not be smaller than the per-file limit. |
+| `CLAUDOPS_FILE_MAX_READ` | `10m` | Largest file `GET /instances/:id/files/content` hands back, same notation. At least `1k`. |
 | `CLAUDOPS_SECRET_KEY` | – | 32 bytes, base64 or hex: encrypts the PAT a project stores. Without it a project can be created but not with a `gitToken`. |
 | `CLAUDOPS_LOGIN_SECRET` | – | **Required**, at least 16 characters. The shared secret `POST /login` takes. Without it the server exits 2 -- unlike the key above, because "unusable without a login" cannot hold if the login can be forgotten. |
 | `CLAUDOPS_SESSION_SECURE` | – | `1` marks the session cookie `Secure`. Only behind TLS: over plain HTTP the browser discards it and the login appears to do nothing. |
@@ -481,9 +570,9 @@ scripts/ws-probe.ts       WebSocket client for the smoke test
 
 ```bash
 pnpm test                          # vitest, no Docker needed
-./server/smoke-test.sh             # the issue #3, #6, #7, #8 and #15 acceptance criteria against real Docker
+./server/smoke-test.sh             # the issue #3, #6, #7, #8, #15 and #18 acceptance criteria against real Docker
 ./server/terminal-smoke-test.sh    # the issue #4 acceptance criteria, real container and socket
-./e2e/run.sh                       # the issue #5, #6, #7, #8 and #15 acceptance criteria, in a real browser
+./e2e/run.sh                       # the issue #5, #6, #7, #8, #15 and #18 acceptance criteria, in a real browser
 ./docker/project/smoke-test.sh     # the toolchains, really inside a project image
 ```
 

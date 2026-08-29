@@ -128,3 +128,150 @@ export function singleFileArchive(
 
   return archive;
 }
+
+/* ------------------------------------------------------------------ reading */
+
+/**
+ * The other direction: what `getArchive` hands back.
+ *
+ * Docker answers a read of one path with a tar stream, so a file that has to
+ * reach the browser has to come out of one. Only the first entry is ever
+ * looked at -- claudops asks for a single path, and a directory is refused
+ * before the request goes out rather than assembled from its entries here.
+ */
+
+/** The second spelling of "regular file". `singleFileArchive` writes `0`, but
+ *  a reader meets `\0` too -- older writers use it, and Docker's tar of a file
+ *  is not written by this module. */
+const TYPEFLAG_ALTERNATIVE_REGULAR = '\0';
+
+/** What one read of an archive produced. A union rather than four throws: the
+ *  three refusals are ordinary answers about a path, and their HTTP codes are
+ *  the caller's decision, not this module's. */
+export type ArchiveRead =
+  | { kind: 'file'; name: string; size: number; content: Uint8Array }
+  /** The header says the entry is bigger than the caller allows. Decided from
+   *  the header, so the body is never read -- which is the whole point of
+   *  parsing the stream rather than buffering it. */
+  | { kind: 'too-large'; name: string; size: number }
+  /** A directory, a symlink, a device: an entry that is not bytes. */
+  | { kind: 'other'; name: string; typeflag: string }
+  /** The archive held nothing -- two zero blocks and no entry. */
+  | { kind: 'empty' };
+
+/** The stream is not a tar. A daemon that answers something else is a bug or a
+ *  proxy in the way, not a state a caller can do anything about. */
+export class MalformedArchiveError extends Error {
+  constructor(detail: string) {
+    super(`the archive could not be read: ${detail}`);
+    this.name = 'MalformedArchiveError';
+  }
+}
+
+/** A field as text, up to its first NUL or space. Tar pads with either. */
+function readAscii(header: Uint8Array, field: { at: number; width: number }): string {
+  const bytes = header.subarray(field.at, field.at + field.width);
+  let end = bytes.length;
+  for (let index = 0; index < bytes.length; index += 1) {
+    const byte = bytes[index];
+    if (byte === 0 || byte === 0x20) {
+      end = index;
+      break;
+    }
+  }
+  return new TextDecoder().decode(bytes.subarray(0, end));
+}
+
+/**
+ * A size field as a number.
+ *
+ * Octal, except when it is not: tar encodes a size that does not fit into
+ * eleven digits in base 256, marked by the high bit of the first byte. Nothing
+ * that small a field cannot hold is ever going to pass a size limit, so such an
+ * entry is reported as the largest safe integer rather than decoded.
+ */
+function readSize(header: Uint8Array): number {
+  const first = header[SIZE.at] ?? 0;
+  if ((first & 0x80) !== 0) return Number.MAX_SAFE_INTEGER;
+
+  const digits = readAscii(header, SIZE);
+  const value = Number.parseInt(digits, 8);
+  if (!Number.isFinite(value) || value < 0) {
+    throw new MalformedArchiveError(`'${digits}' is not a size`);
+  }
+  return value;
+}
+
+function isZeroBlock(block: Uint8Array): boolean {
+  return block.every((byte) => byte === 0);
+}
+
+/**
+ * The first entry of a tar stream, refusing one the header says is over
+ * `maxBytes` before its body is read.
+ *
+ * `source` is consumed only as far as the entry needs. The caller closes it --
+ * for an oversized file that is what keeps a gigabyte in the container instead
+ * of in the server's heap.
+ */
+export async function readFirstEntry(
+  // Both, because `for await` takes both: the engine hands over a socket, a
+  // test hands over the chunks it wants the boundaries to fall on.
+  source: AsyncIterable<Uint8Array> | Iterable<Uint8Array>,
+  maxBytes: number,
+): Promise<ArchiveRead> {
+  const chunks: Uint8Array[] = [];
+  let held = 0;
+  let header: Uint8Array | undefined;
+  let name = '';
+  let size = 0;
+
+  const joined = (): Uint8Array => {
+    if (chunks.length > 1) {
+      const all = new Uint8Array(held);
+      let at = 0;
+      for (const chunk of chunks) {
+        all.set(chunk, at);
+        at += chunk.length;
+      }
+      chunks.length = 0;
+      chunks.push(all);
+    }
+    return chunks[0] ?? new Uint8Array(0);
+  };
+
+  for await (const chunk of source) {
+    chunks.push(chunk);
+    held += chunk.length;
+
+    if (header === undefined) {
+      if (held < BLOCK) continue;
+
+      header = joined().subarray(0, BLOCK);
+      if (isZeroBlock(header)) return { kind: 'empty' };
+      if (readAscii(header, MAGIC) !== 'ustar') {
+        throw new MalformedArchiveError('no ustar magic in the first block');
+      }
+
+      name = readAscii(header, { at: NAME.at, width: NAME.width });
+      const typeflag = readAscii(header, TYPEFLAG);
+      if (typeflag !== REGULAR_FILE && typeflag !== TYPEFLAG_ALTERNATIVE_REGULAR) {
+        return { kind: 'other', name, typeflag };
+      }
+
+      size = readSize(header);
+      // Before the body: the caller destroys the stream on this answer, so the
+      // rest of an oversized file is never transferred at all.
+      if (size > maxBytes) return { kind: 'too-large', name, size };
+    }
+
+    if (held >= BLOCK + size) {
+      return { kind: 'file', name, size, content: joined().slice(BLOCK, BLOCK + size) };
+    }
+  }
+
+  if (header === undefined) return { kind: 'empty' };
+  throw new MalformedArchiveError(
+    `the entry claims ${String(size)} bytes and the stream ended after ${String(held - BLOCK)}`,
+  );
+}

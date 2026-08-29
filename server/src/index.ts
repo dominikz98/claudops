@@ -27,6 +27,7 @@ async function main(): Promise<void> {
     instanceEnv: config.instanceEnv,
     instanceLimits: config.instanceLimits,
     uploadLimits: config.uploadLimits,
+    maxReadBytes: config.maxReadBytes,
     cipher: config.cipher,
     auth: config.auth,
     secureCookie: config.secureCookie,

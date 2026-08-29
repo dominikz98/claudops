@@ -27,6 +27,10 @@ waiting for an answer, or finished. **Alerts** in the header turns the waiting
 one into a browser notification. See
 [What is Claude doing in there](#what-is-claude-doing-in-there).
 
+**Files** in the console header opens a panel beside the terminal that shows
+what the instance produced. See
+[Look at what an instance produced](#look-at-what-an-instance-produced).
+
 **Projects** in the top right manages the templates instances are created from.
 Each row carries the state of its image, with **Rebuild** and **Build log** next
 to it. The page normally does not poll, because nothing but this page changes a
@@ -356,6 +360,7 @@ Two ceilings, both set on the server:
 | --- | --- | --- |
 | `CLAUDOPS_UPLOAD_MAX_FILE` | `25m` | One attachment |
 | `CLAUDOPS_UPLOAD_MAX_TOTAL` | `200m` | Everything one instance holds |
+| `CLAUDOPS_FILE_MAX_READ` | `10m` | One file read back out of an instance |
 
 A file over either of them answers `413` with a message naming the limit, and
 the console shows that message in red. Nothing is written, and the server keeps
@@ -366,6 +371,44 @@ the console frees the budget straight away:
 ```bash
 docker exec claudops-<id> rm /workspace/.claudops/uploads/old-screenshot.png
 ```
+
+## Look at what an instance produced
+
+**Files** in the console header opens a panel next to the terminal: a tree of
+`/workspace` on top, one file at a time below it. The terminal keeps working and
+only gets narrower; **Files** again closes the panel and gives the width back.
+
+- A folder opens on click and is read then, not before -- the clone in there has
+  a `node_modules`, and a directory over 500 entries is cut with a note saying
+  so.
+- A `.md` file renders as Markdown. A PNG, JPEG, GIF, WebP or BMP is shown as a
+  picture. Anything else readable is shown as text, and anything that is not is
+  offered as **Download**.
+- **Refresh** re-reads the folders that are open. Nothing polls: a run writes
+  files for minutes and a panel that re-read them every three seconds would be a
+  `find` per instance per beat.
+- A symlink is listed and greyed out. What it points at is decided in the
+  container, so it is neither browsable nor readable.
+
+The same two endpoints from a shell:
+
+```bash
+curl -s -b cookies.txt 'http://localhost:8080/instances/<id>/files?path=/workspace/claudops'
+curl -s -b cookies.txt -OJ \
+  'http://localhost:8080/instances/<id>/files/content?path=/workspace/shot.png&download=1'
+```
+
+Only `/workspace` is reachable, and only while the container runs. A path
+outside it answers `400`, and so does one that *leads* outside -- a symlink to
+`/etc` is refused by the container, not by the name. One ceiling:
+
+| Variable | Default | What it limits |
+| --- | --- | --- |
+| `CLAUDOPS_FILE_MAX_READ` | `10m` | One file read back out of an instance |
+
+Reading changes nothing in the container. It is also not a backup: everything in
+there goes with a **Delete**, so anything worth keeping is a commit and a push,
+or a **Download**.
 
 ## Troubleshooting
 
@@ -399,6 +442,25 @@ either way.
 `CLAUDOPS_UPLOAD_MAX_FILE`, or the instance's uploads directory is full. The
 message says which; `docker exec claudops-<id> du -sh /workspace/.claudops/uploads`
 is the other half of the answer.
+
+**The files panel says `file_too_large`.** The file is over
+`CLAUDOPS_FILE_MAX_READ`. There is no Save as for it either -- the download goes
+through the same endpoint and the same limit. Raise the variable and restart, or
+get the file out of the container directly:
+`docker cp claudops-<id>:/workspace/big.bin .`
+
+**The files panel says `container_not_running`.** Reading needs a running
+container -- the workspace lives in it. **Start** the instance and open the
+panel again.
+
+**An HTML report shows up as text instead of as a page.** On purpose. What an
+instance produced is served as plain text or as a download, never as a document,
+because it would otherwise run as a page on claudops' own origin with your
+session cookie. **Download** it and open it from disk.
+
+**A file that is clearly text shows up as a download.** Then it is not valid
+UTF-8 -- a UTF-16 or latin-1 file, or one with a NUL in it. The extension has no
+say in this; the bytes decide.
 
 **The clone failed.** The container comes up anyway, on purpose -- the session
 starts in `/workspace` so you can attach and see the cause. Usual suspects: wrong

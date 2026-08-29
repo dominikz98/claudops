@@ -151,6 +151,40 @@ export interface Upload {
   announced: boolean;
 }
 
+/** `EntryKind` in server/src/instances/files.ts. `other` is a symlink, a socket
+ *  or a device: shown in the tree, opened by neither half of the panel. */
+export type EntryKind = 'file' | 'directory' | 'other';
+
+/** One entry of a directory, as `GET /instances/:id/files` reports it. */
+export interface FileEntry {
+  name: string;
+  /** The absolute path in the container -- what the next request asks for, so
+   *  the browser never joins paths itself. */
+  path: string;
+  kind: EntryKind;
+  size: number;
+  modifiedAt: string;
+}
+
+/** `DirectoryListing` in server/src/instances/files.ts. One directory, one
+ *  level deep: a tree is walked by opening folders, not fetched at once. */
+export interface FileListing {
+  path: string;
+  /** `null` at the workspace root, which is where "up" stops. */
+  parent: string | null;
+  entries: FileEntry[];
+  /** The directory holds more entries than the server hands back at once. */
+  truncated: boolean;
+}
+
+/** What `GET /instances/:id/files/content` handed back. The bytes are already
+ *  decided: the server says what they are, this only carries the answer. */
+export interface FileBody {
+  /** The `content-type` of the response, e.g. `image/png` or `text/plain`. */
+  contentType: string;
+  blob: Blob;
+}
+
 /** A request the server answered with an error body: `{ error, message }`. */
 export class ApiCallError extends Error {
   constructor(
@@ -207,6 +241,20 @@ export interface Api {
   /** Puts one file into the instance's uploads directory and lets the server
    *  write its path into the console. One file per call. */
   upload(id: string, name: string, content: Blob): Promise<Upload>;
+  /** One directory of the instance's workspace. Without a path: the workspace
+   *  root. */
+  listFiles(id: string, path?: string): Promise<FileListing>;
+  /**
+   * The bytes of one file. Answers `path_not_found`, `wrong_path_kind`,
+   * `path_outside_workspace` or `file_too_large` as an ApiCallError.
+   */
+  readFile(id: string, path: string): Promise<FileBody>;
+  /**
+   * The URL those bytes live at -- for an `<img src>` and for a download link,
+   * both of which have to be a URL rather than a promise. The session cookie
+   * rides along with the browser's own request.
+   */
+  fileUrl(id: string, path: string, download?: boolean): string;
 }
 
 interface ErrorBody {
@@ -269,6 +317,13 @@ export function createApi(
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
   });
+
+  /** A free function rather than a method, so `readFile` below and the caller
+   *  building an `<img src>` produce the same URL without one of them reaching
+   *  through `this`. */
+  const fileUrl = (id: string, path: string, download = false): string =>
+    `/instances/${encodeURIComponent(id)}/files/content?path=${encodeURIComponent(path)}` +
+    (download ? '&download=1' : '');
 
   /** DELETE answers 204 with no body, so it cannot go through `request`. */
   const remove = async (path: string): Promise<void> => {
@@ -374,6 +429,24 @@ export function createApi(
     projectBuildLog(id: string): Promise<BuildLog> {
       return request<BuildLog>(`/projects/${encodeURIComponent(id)}/build-log`);
     },
+
+    async listFiles(id: string, path?: string): Promise<FileListing> {
+      const query = path === undefined ? '' : `?path=${encodeURIComponent(path)}`;
+      return await request<FileListing>(`/instances/${encodeURIComponent(id)}/files${query}`);
+    },
+
+    async readFile(id: string, path: string): Promise<FileBody> {
+      // Not through `request`: the body is bytes and its content type is the
+      // answer, so neither may go through `response.json()`.
+      const response = await fetchImpl(fileUrl(id, path));
+      if (!response.ok) throw await fail(response);
+      return {
+        contentType: response.headers.get('content-type') ?? 'application/octet-stream',
+        blob: await response.blob(),
+      };
+    },
+
+    fileUrl,
 
     upload(id: string, name: string, content: Blob): Promise<Upload> {
       return request<Upload>(

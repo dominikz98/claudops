@@ -1,11 +1,15 @@
+import { posix } from 'node:path';
 import { Duplex } from 'node:stream';
 import {
   ContainerNotFoundError,
   ContainerNotRunningError,
   DockerUnavailableError,
+  FileTooLargeError,
   ImageNotFoundError,
+  NotARegularFileError,
   type AttachTerminalOptions,
   type CommandResult,
+  type ContainerFile,
   type ContainerHealth,
   type ContainerSpec,
   type ContainerSummary,
@@ -16,6 +20,12 @@ import {
   type VolumeSummary,
 } from '../src/docker/engine.ts';
 import { instanceIdFromLabels, instanceLabels } from '../src/docker/labels.ts';
+import {
+  LIST_SCRIPT,
+  PATH_MISSING,
+  PATH_WRONG_KIND,
+  STAT_SCRIPT,
+} from '../src/instances/files.ts';
 
 /**
  * The container side of a fake TTY: what the bridge writes shows up in
@@ -166,6 +176,21 @@ export class FakeDockerEngine implements DockerEngine {
 ` }
       : { exitCode: 0, output: '' };
 
+  /**
+   * An in-memory workspace the file-browsing endpoints read: absolute path to
+   * bytes. Directories are implied by the paths rather than listed, exactly as
+   * they are in a repository somebody cloned.
+   *
+   * The scripts in `src/instances/files.ts` are matched by identity below, so
+   * this fake answers the same two commands the real container answers -- and a
+   * changed script shows up as a test that no longer finds its file rather than
+   * as one that silently passes.
+   */
+  readonly files = new Map<string, Uint8Array>();
+  /** Files whose mtime the listing reports. Anything not in here is the epoch,
+   *  which keeps a test that does not care about time free of a clock. */
+  readonly modified = new Map<string, Date>();
+
   private sequence = 0;
 
   async ping(): Promise<void> {
@@ -279,6 +304,23 @@ export class FakeDockerEngine implements DockerEngine {
     return Promise.resolve();
   }
 
+  async readFile(containerId: string, path: string, maxBytes: number): Promise<ContainerFile> {
+    this.guard();
+    this.requireRunning(containerId);
+
+    const content = this.files.get(path);
+    // The real engine reads a directory's archive and finds a directory entry
+    // in it; here the same two answers come from the same two questions.
+    if (content === undefined) {
+      if (this.isDirectory(path)) throw new NotARegularFileError(path);
+      throw new ContainerNotFoundError(containerId);
+    }
+    if (content.length > maxBytes) {
+      throw new FileTooLargeError(path, maxBytes, content.length);
+    }
+    return Promise.resolve({ name: posix.basename(path), content });
+  }
+
   async runCommand(containerId: string, command: string[]): Promise<CommandResult> {
     this.guard();
     this.requireRunning(containerId);
@@ -290,7 +332,56 @@ export class FakeDockerEngine implements DockerEngine {
     }
 
     this.commands.push({ containerId, command });
+
+    const script = command[2];
+    if (script === LIST_SCRIPT) return Promise.resolve(this.list(command[4] ?? ''));
+    if (script === STAT_SCRIPT) return Promise.resolve(this.stat(command[4] ?? ''));
+
     return Promise.resolve(this.commandResult(command));
+  }
+
+  /** A path that is nobody's file but is somebody's prefix. */
+  private isDirectory(path: string): boolean {
+    const prefix = path.endsWith('/') ? path : `${path}/`;
+    return [...this.files.keys()].some((file) => file.startsWith(prefix));
+  }
+
+  /** The `find -printf` records of one directory, in the format
+   *  `src/instances/files.ts` parses. */
+  private list(path: string): CommandResult {
+    const file = this.files.get(path);
+    if (file !== undefined) return { exitCode: PATH_WRONG_KIND, output: '' };
+    if (!this.isDirectory(path)) return { exitCode: PATH_MISSING, output: '' };
+
+    const prefix = path.endsWith('/') ? path : `${path}/`;
+    const children = new Map<string, { kind: string; size: number; mtime: number }>();
+    for (const [name, content] of this.files) {
+      if (!name.startsWith(prefix)) continue;
+
+      const rest = name.slice(prefix.length);
+      const slash = rest.indexOf('/');
+      children.set(
+        slash === -1 ? rest : rest.slice(0, slash),
+        slash === -1
+          ? {
+              kind: 'f',
+              size: content.length,
+              mtime: (this.modified.get(name) ?? new Date(0)).getTime() / 1000,
+            }
+          : { kind: 'd', size: 4096, mtime: 0 },
+      );
+    }
+
+    const output = [...children]
+      .map(([name, entry]) => `${entry.kind}\t${String(entry.size)}\t${String(entry.mtime)}\t${name}\0`)
+      .join('');
+    return { exitCode: 0, output };
+  }
+
+  private stat(path: string): CommandResult {
+    const content = this.files.get(path);
+    if (content !== undefined) return { exitCode: 0, output: `${String(content.length)}\n` };
+    return { exitCode: this.isDirectory(path) ? PATH_WRONG_KIND : PATH_MISSING, output: '' };
   }
 
   async buildImage(spec: ImageBuildSpec, onLog: (chunk: string) => void): Promise<void> {
@@ -324,6 +415,16 @@ export class FakeDockerEngine implements DockerEngine {
   }
 
   /** Test helpers -------------------------------------------------------- */
+
+  /** Puts one file into the fake workspace, the way an agent inside a container
+   *  would have written it. */
+  addFile(path: string, content: string | Uint8Array, modified?: Date): void {
+    this.files.set(
+      path,
+      typeof content === 'string' ? new TextEncoder().encode(content) : content,
+    );
+    if (modified !== undefined) this.modified.set(path, modified);
+  }
 
   /** The archive that was put last, as text -- every upload in these tests is
    *  a small one, and its bytes start at offset 512 behind the tar header. */
