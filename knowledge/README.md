@@ -75,4 +75,4 @@ Format and maintenance rules: skill `domain-knowledge`.
 - [A directory listing read through an exec has to be NUL-separated](a-listing-out-of-an-exec-is-nul-separated.md) - the one byte a filename cannot contain
 - [Overwriting a managed variable is not enough -- it has to be dropped](a-managed-variable-must-be-dropped-not-overwritten.md) - the empty slot an ANTHROPIC_API_KEY would land in
 - [An empty value seals to exactly a nonce and a tag, and a `<=` guard refuses it](an-empty-value-seals-to-nonce-plus-tag.md) - the variable that stores and never reads back
-- [A repository's `.mcp.json` is a fourth first-start question](a-repo-mcp-json-is-a-fourth-first-start-question.md) - and `${VAR}` is how its server gets a secret the repo must not hold
+- [A repository's `.mcp.json` is a fourth first-start question](a-repo-mcp-json-is-a-fourth-first-start-question.md) - `claude mcp list` is how to see it answered, without a session and without a token
