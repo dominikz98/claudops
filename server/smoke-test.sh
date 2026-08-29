@@ -45,9 +45,16 @@ OAUTH_PROBE="smoke-oauth-must-not-appear"
 # and appear nowhere else -- not in a response, not on disk, not in the log.
 ENV_PROBE="smoke-variable-must-not-appear"
 # A host the base image does not whitelist, so reaching it from inside an
-# instance proves the project's own list arrived. nuget rather than something
-# invented: it is what a dotnet project would actually ask for.
-PROJECT_HOST="api.nuget.org"
+# instance proves the project's own list arrived.
+#
+# Two things rule out the obvious candidate, api.nuget.org: the dotnet building
+# block writes it into the image's own allow-list, which would make this
+# assertion pass without the project's list doing anything under FULL_IMAGE=1 --
+# and it answers with a single address that rotates, so the one the firewall
+# resolved and the one curl picks seconds later need not be the same. pypi.org
+# answers with its whole Fastly pool, so a rotation within it still lands on a
+# whitelisted address.
+PROJECT_HOST="pypi.org"
 # The operator's server-wide list. A project adds to this one, it never replaces
 # it, and both halves have to show up in the container's FIREWALL_ALLOW.
 SERVER_HOST="registry.npmjs.org"
@@ -412,7 +419,7 @@ check "The instance's egress firewall came up" "active" "${firewall_state:-<no s
 
 if [[ "$firewall_state" == 'active' ]]; then
   check "The project's host is reachable from inside the instance" "0" \
-    "$(docker exec "$container_id" curl -sS --max-time 15 -o /dev/null "https://$PROJECT_HOST/v3/index.json" >/dev/null 2>&1; echo $?)"
+    "$(docker exec "$container_id" curl -sS --max-time 15 -o /dev/null "https://$PROJECT_HOST/simple/" >/dev/null 2>&1; echo $?)"
   unlisted_rc="$(docker exec "$container_id" curl -sS --max-time 5 -o /dev/null https://example.com >/dev/null 2>&1; echo $?)"
   if [[ "$unlisted_rc" != "0" ]]; then
     ok "A host nobody listed is refused (curl exit $unlisted_rc)"

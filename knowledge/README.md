@@ -76,3 +76,4 @@ Format and maintenance rules: skill `domain-knowledge`.
 - [Overwriting a managed variable is not enough -- it has to be dropped](a-managed-variable-must-be-dropped-not-overwritten.md) - the empty slot an ANTHROPIC_API_KEY would land in
 - [An empty value seals to exactly a nonce and a tag, and a `<=` guard refuses it](an-empty-value-seals-to-nonce-plus-tag.md) - the variable that stores and never reads back
 - [A repository's `.mcp.json` is a fourth first-start question](a-repo-mcp-json-is-a-fourth-first-start-question.md) - `claude mcp list` is how to see it answered, without a session and without a token
+- [A host used to probe the egress whitelist has to answer with a pool of addresses](an-egress-probe-host-needs-a-pool-of-addresses.md) - a single rotating address looks exactly like a whitelist that never arrived

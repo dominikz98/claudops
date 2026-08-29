@@ -41,9 +41,15 @@ STATUS_INSTANCE="smoke-instance-id"
 STATUS_TOKEN="smoke-status-token"
 # Issue #32: what claudops passes a container on behalf of its project -- an
 # extra host for the egress whitelist, and a variable a repository's `.mcp.json`
-# refers to as ${MCP_PROBE}. nuget rather than an invented name: it is a host
-# the base image does not whitelist and a real project would ask for.
-EXTRA_HOST="api.nuget.org"
+# refers to as ${MCP_PROBE}. A real host a project would ask for, and one this
+# image does not whitelist, so reaching it can only come from FIREWALL_ALLOW.
+#
+# pypi.org rather than a nuget or dotnet host: those answer with a single
+# address that rotates, and this check resolves the name a second time -- the
+# address the firewall froze and the one curl picks need not be the same. A name
+# whose answer is a whole pool survives that
+# (knowledge/an-egress-probe-host-needs-a-pool-of-addresses.md).
+EXTRA_HOST="pypi.org"
 MCP_PROBE_VALUE="smoke-mcp-value"
 MCP_PROBE_DIR="/workspace/mcp-probe"
 MCP_PROBE_MARKER="/tmp/claudops-mcp-resolved"
@@ -254,7 +260,7 @@ check "DNS still resolves" "0" \
 # the image's list nor the GitHub ranges, so reaching it can only come from
 # FIREWALL_ALLOW.
 check "A host from FIREWALL_ALLOW is reachable" "0" \
-  "$(dexec curl -sS --max-time 15 -o /dev/null "https://$EXTRA_HOST/v3/index.json" >/dev/null 2>&1; echo $?)"
+  "$(dexec curl -sS --max-time 15 -o /dev/null "https://$EXTRA_HOST/simple/" >/dev/null 2>&1; echo $?)"
 
 blocked_rc="$(dexec curl -sS --max-time 5 -o /dev/null https://example.com >/dev/null 2>&1; echo $?)"
 if [[ "$blocked_rc" != "0" ]]; then
