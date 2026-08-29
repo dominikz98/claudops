@@ -40,6 +40,14 @@ export interface UploadLimits {
   maxInstanceBytes: number;
 }
 
+/**
+ * The ceiling on one `GET /instances/:id/files/content`. Its own number rather
+ * than the upload limit: the two travel in opposite directions and are limited
+ * for different reasons -- an upload is bounded to keep the NUC's disk, a read
+ * to keep the server's memory, because a read is buffered before it is sent.
+ */
+export const DEFAULT_MAX_READ_BYTES = 10 * 1024 * 1024;
+
 export interface ServerConfig {
   host: string;
   port: number;
@@ -94,6 +102,8 @@ export interface ServerConfig {
   instanceLimits: ContainerLimits;
   /** What may be uploaded into an instance. */
   uploadLimits: UploadLimits;
+  /** The largest file `GET /instances/:id/files/content` will hand back. */
+  maxReadBytes: number;
 }
 
 export class ConfigError extends Error {}
@@ -130,7 +140,7 @@ export const DEFAULT_UPLOAD_LIMITS: UploadLimits = {
   maxInstanceBytes: 200 * 1024 * 1024,
 };
 
-/** Below this an upload limit is a mistake rather than a policy -- a kilobyte
+/** Below this a size limit is a mistake rather than a policy -- a kilobyte
  *  does not hold a screenshot. */
 const MIN_UPLOAD_BYTES = 1024;
 
@@ -205,7 +215,7 @@ function instanceLimits(env: NodeJS.ProcessEnv): ContainerLimits {
   return { cpus, memoryBytes };
 }
 
-function uploadBytes(env: NodeJS.ProcessEnv, key: string, fallback: number): number {
+function byteLimit(env: NodeJS.ProcessEnv, key: string, fallback: number): number {
   const raw = optional(env, key);
   const bytes = raw === undefined ? fallback : parseMemory(raw);
   if (bytes === undefined || bytes < MIN_UPLOAD_BYTES) {
@@ -217,12 +227,12 @@ function uploadBytes(env: NodeJS.ProcessEnv, key: string, fallback: number): num
 }
 
 function uploadLimits(env: NodeJS.ProcessEnv): UploadLimits {
-  const maxFileBytes = uploadBytes(
+  const maxFileBytes = byteLimit(
     env,
     'CLAUDOPS_UPLOAD_MAX_FILE',
     DEFAULT_UPLOAD_LIMITS.maxFileBytes,
   );
-  const maxInstanceBytes = uploadBytes(
+  const maxInstanceBytes = byteLimit(
     env,
     'CLAUDOPS_UPLOAD_MAX_TOTAL',
     DEFAULT_UPLOAD_LIMITS.maxInstanceBytes,
@@ -342,6 +352,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     secureCookie: optional(env, 'CLAUDOPS_SESSION_SECURE') === '1',
     instanceLimits: instanceLimits(env),
     uploadLimits: uploadLimits(env),
+    maxReadBytes: byteLimit(env, 'CLAUDOPS_FILE_MAX_READ', DEFAULT_MAX_READ_BYTES),
     instanceEnv: {
       claudeOauthToken: optional(env, 'CLAUDE_CODE_OAUTH_TOKEN'),
       gitUserName: optional(env, 'CLAUDOPS_GIT_USER_NAME'),

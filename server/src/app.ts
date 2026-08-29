@@ -6,18 +6,30 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { sessionGate } from './auth/gate.ts';
 import { authRoutes } from './auth/routes.ts';
 import type { SessionAuth } from './auth/session.ts';
-import { DEFAULT_UPLOAD_LIMITS, type InstanceEnvConfig, type UploadLimits } from './config.ts';
+import {
+  DEFAULT_MAX_READ_BYTES,
+  DEFAULT_UPLOAD_LIMITS,
+  type InstanceEnvConfig,
+  type UploadLimits,
+} from './config.ts';
 import type { Database } from './db/index.ts';
 import { InstanceRepository } from './db/instances.ts';
 import {
   ContainerNotFoundError,
   ContainerNotRunningError,
   DockerUnavailableError,
+  FileTooLargeError,
   ImageNotFoundError,
+  NotARegularFileError,
   type ContainerLimits,
   type DockerEngine,
 } from './docker/engine.ts';
 import type { ActivityTracker } from './instances/activity.ts';
+import {
+  PathNotFoundError,
+  PathOutsideWorkspaceError,
+  WrongPathKindError,
+} from './instances/files.ts';
 import { instanceRoutes } from './instances/routes.ts';
 import {
   ContainerCommandFailedError,
@@ -108,6 +120,8 @@ export interface AppOptions {
   instanceLimits?: ContainerLimits | undefined;
   /** What may be uploaded into an instance. Same fallback as above. */
   uploadLimits?: UploadLimits | undefined;
+  /** The ceiling on one file read back out of an instance. Same fallback. */
+  maxReadBytes?: number | undefined;
   /** Encrypts the project PATs. Left out, the server runs but refuses to store
    *  one -- the same behaviour as a missing CLAUDOPS_SECRET_KEY. */
   cipher?: SecretCipher | undefined;
@@ -190,6 +204,7 @@ export function buildApp(options: AppOptions): FastifyInstance {
     tmuxSession: options.tmuxSession,
     limits: options.instanceLimits,
     uploads: uploadLimits,
+    maxReadBytes: options.maxReadBytes ?? DEFAULT_MAX_READ_BYTES,
     sendKeysPauseMs: options.sendKeysPauseMs,
     activity: options.activity,
     statusTokens: options.statusTokens,
@@ -288,6 +303,30 @@ export function buildApp(options: AppOptions): FastifyInstance {
     }
     if (error instanceof ProjectNameTakenError) {
       return reply.code(409).send({ error: 'project_name_taken', message: error.message });
+    }
+    // A path that is not in the workspace, whether it said so plainly or got
+    // there through a symlink the container resolved. 400 rather than 404: the
+    // answer must not depend on whether the file exists, or the refusal would
+    // be a way to ask about the host's filesystem.
+    if (error instanceof PathOutsideWorkspaceError) {
+      return reply.code(400).send({ error: 'path_outside_workspace', message: error.message });
+    }
+    // The instance is there and the path in it is not -- a 404 about the path,
+    // which is why it does not go through the not-found handler.
+    if (error instanceof PathNotFoundError) {
+      return reply.code(404).send({ error: 'path_not_found', message: error.message });
+    }
+    // A directory asked for its bytes, or a file asked for its listing. 400,
+    // not 409: no state changes and waiting does not help -- the other
+    // endpoint is the answer.
+    if (error instanceof WrongPathKindError || error instanceof NotARegularFileError) {
+      return reply.code(400).send({ error: 'wrong_path_kind', message: error.message });
+    }
+    // 413 like an oversized upload, and for the same reason: the client has to
+    // ask for something smaller. Decided from the file's size before its bytes
+    // are read, so a refusal costs the server nothing.
+    if (error instanceof FileTooLargeError) {
+      return reply.code(413).send({ error: 'file_too_large', message: error.message });
     }
     // 413 for both ceilings, and for the one Fastify enforces itself: a client
     // that has to shrink a file does not care which of the three refused it.

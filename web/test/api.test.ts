@@ -429,3 +429,46 @@ describe('a lost session', () => {
     expect(seen).toBe(0);
   });
 });
+
+describe('browsing the files of an instance', () => {
+  it('asks for the workspace root when no path is given, and escapes one that is', async () => {
+    const listing = { path: '/workspace', parent: null, entries: [], truncated: false };
+    const { fetch, calls } = fakeFetch(() => json(listing));
+    const api = createApi(fetch);
+
+    expect(await api.listFiles('abc123')).toEqual(listing);
+    expect(calls[0]?.url).toBe('/instances/abc123/files');
+
+    await api.listFiles('abc123', '/workspace/a b/c&d');
+    expect(calls[1]?.url).toBe('/instances/abc123/files?path=%2Fworkspace%2Fa%20b%2Fc%26d');
+  });
+
+  it('reads the bytes and the content type the server chose, not the extension', async () => {
+    const { fetch } = fakeFetch(
+      () => new Response('# Report', { headers: { 'content-type': 'text/plain; charset=utf-8' } }),
+    );
+
+    const body = await createApi(fetch).readFile('abc123', '/workspace/report.md');
+    expect(body.contentType).toBe('text/plain; charset=utf-8');
+    expect(await body.blob.text()).toBe('# Report');
+  });
+
+  it('turns a refusal into an ApiCallError like every other call', async () => {
+    const { fetch } = fakeFetch(() =>
+      json({ error: 'file_too_large', message: 'too big' }, 413),
+    );
+
+    await expect(createApi(fetch).readFile('abc123', '/workspace/heap.bin')).rejects.toThrow(
+      ApiCallError,
+    );
+  });
+
+  it('builds the URL an <img src> and a download link both use', () => {
+    const api = createApi(fakeFetch(() => json({})).fetch);
+
+    expect(api.fileUrl('abc123', '/workspace/a.png')).toBe(
+      '/instances/abc123/files/content?path=%2Fworkspace%2Fa.png',
+    );
+    expect(api.fileUrl('abc123', '/workspace/a.png', true)).toContain('&download=1');
+  });
+});

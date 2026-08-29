@@ -1,11 +1,12 @@
 # `@claudops/web`
 
-The browser side of claudops: the projects page, the instance list and one
-xterm.js console per instance. Built with Vite into `dist/`, from where the server
-serves it on its own port -- there is no second process and no second origin.
+The browser side of claudops: the projects page, the instance list, one
+xterm.js console per instance and a panel beside it showing what the instance
+produced. Built with Vite into `dist/`, from where the server serves it on its
+own port -- there is no second process and no second origin.
 
 Plain TypeScript, no framework. There are four views, and the only real
-dependency is `@xterm/xterm` with its fit addon.
+dependency is `@xterm/xterm` with its fit and web-links addons.
 
 ## Run
 
@@ -43,7 +44,7 @@ logs a warning and serves the API only.
 | `#/` | Instance list: create from a project, status, model and effort, delete, log out. Polls `GET /instances` every 3 s -- and holds off on repainting the table while a dropdown in it has the focus, because rebuilding the rows underneath an open one closes it. |
 | | The Status column carries up to three things: the Docker state, whether the session is attachable, and -- once it is -- what Claude is doing (`idle`, `running`, `needs input`, `done`). |
 | `#/projects` | Projects: create, edit, delete the templates instances come from, and watch their images being built. Polls only while a build is running. |
-| `#/i/<id>` | The console of one instance, over `GET /instances/<id>/terminal`, with **Attach** for files. |
+| `#/i/<id>` | The console of one instance, over `GET /instances/<id>/terminal`, with **Attach** for files in and **Files** for files out. |
 
 Routes live in the hash on purpose: `/instances/<id>` and `/projects` are already
 REST resources, so a history route would collide with them.
@@ -95,6 +96,10 @@ words. Nothing reconnects by itself -- reload the page, or use the button.
 There is no scrollback and no session state in this package. Both live in the
 container's tmux session, which is why a reload finds the console where it was.
 
+URLs in the output are clickable: the web-links addon turns an artefact path or
+a pull-request link a run prints into a link, instead of something that has to
+be selected out of a terminal by hand.
+
 ## Attachments
 
 Three ways to hand the instance a file, all of them one `POST` per file with
@@ -115,6 +120,30 @@ or the server's error -- there is no size check in the browser: the limit is
 configurable on the server, and a second copy of that number here would be wrong
 after the first change to it.
 
+## The files panel
+
+**Files** in the console header opens `src/views/files.ts` next to the terminal,
+in the same flex row -- so the terminal gets narrower and reflows rather than
+being replaced. It is mounted on the first open, not with the page: an operator
+who only wants the console should not cost the instance a directory listing.
+
+One request per open folder, never a tree: the workspace holds a clone with its
+`node_modules`. Open folders are remembered, so **Refresh** and an upload
+re-read them instead of collapsing back to the root.
+
+What a file becomes is decided by the `content-type` the server sent, not by the
+extension -- the server had the bytes in front of it and this side did not. An
+image is shown from the blob that was just fetched (an object URL, revoked when
+the next one replaces it) rather than from a second request for the same URL;
+`text/plain` with a Markdown name goes through `src/markdown.ts`; other text is
+a `<pre>`; anything else is the **Download** link alone.
+
+`src/markdown.ts` is deliberately not a dependency. It escapes every character
+*first* and only then applies its rules, so no markup in the file can become an
+element -- the text comes out of a container, and this page has the operator's
+session. It writes the only `innerHTML` in this package, and link targets go
+through a scheme allowlist rather than a `javascript:` blocklist.
+
 ## Structure
 
 ```
@@ -125,7 +154,9 @@ src/terminal/session.ts   the WebSocket: frames, close codes, geometry
 src/views/list.ts         instance list and create form
 src/notify.ts             when an instance starts waiting: the notification and the tab count
 src/views/projects.ts     projects: form, edit mode, table, image state and build log
-src/views/console.ts      xterm.js, fit addon, status line, attachments
+src/views/console.ts      xterm.js, fit and web-links addons, status line, attachments
+src/views/files.ts        the files panel: tree, preview, download
+src/markdown.ts           the small, escape-first Markdown renderer the panel uses
 src/upload.ts             names for the files that arrive without one
 src/dom.ts                the three lines of DOM plumbing the views share
 ```
@@ -138,7 +169,8 @@ pnpm --filter @claudops/web test    # vitest, the DOM-free logic
 ```
 
 The unit tests cover the parts worth asserting without a DOM: the API client, the
-routes, the terminal URL, the close-code messages and the naming of a pasted
-file. Everything that needs a
+routes, the terminal URL, the close-code messages, the naming of a pasted file
+and the Markdown renderer -- that last one including what it must *not* render.
+Everything that needs a
 browser is in [`e2e/`](../e2e/run.sh), where it runs against a real server and a
 real container.

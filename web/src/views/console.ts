@@ -7,9 +7,13 @@
  * reconnect and not a restore. An attachment does not live here either: it goes
  * to the server as bytes, and what comes back is the path the server already
  * typed into the pane.
+ *
+ * The files panel is the other direction, and is mounted next to the screen
+ * rather than inside it -- see views/files.ts.
  */
 
 import { FitAddon } from '@xterm/addon-fit';
+import { WebLinksAddon } from '@xterm/addon-web-links';
 import { Terminal } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
 
@@ -17,6 +21,7 @@ import { ApiCallError, type Api } from '../api.ts';
 import { clear, el } from '../dom.ts';
 import { routeHash } from '../router.ts';
 import { pastedFileName } from '../upload.ts';
+import { mountFiles, type FilesPanel } from './files.ts';
 import {
   connectTerminal,
   type TerminalConnection,
@@ -56,6 +61,9 @@ export function mountConsole(root: HTMLElement, api: Api, id: string): View {
   let resizeTimer: number | undefined;
   let sent: TerminalSize = { cols: 0, rows: 0 };
   let destroyed = false;
+  /** Mounted on the first open rather than with the page: an operator who only
+   *  wants the console should not cost the instance a directory listing. */
+  let files: FilesPanel | undefined;
   /** One upload at a time, so the Attach button cannot start a second run over
    *  a queue that is still being worked through. */
   let uploading = false;
@@ -82,6 +90,11 @@ export function mountConsole(root: HTMLElement, api: Api, id: string): View {
     { type: 'button', class: 'secondary', 'data-testid': 'attach' },
     'Attach',
   );
+  const showFiles = el(
+    'button',
+    { type: 'button', class: 'secondary', 'aria-pressed': 'false', 'data-testid': 'files-toggle' },
+    'Files',
+  );
   const uploadStatus = el('span', {
     class: 'upload-status',
     hidden: 'hidden',
@@ -99,6 +112,9 @@ export function mountConsole(root: HTMLElement, api: Api, id: string): View {
   });
   const fit = new FitAddon();
   terminal.loadAddon(fit);
+  // A run prints artefact paths and PR links; without this they are text that
+  // has to be selected out of a terminal by hand.
+  terminal.loadAddon(new WebLinksAddon());
 
   const setStatus = (text: string, state: string): void => {
     status.textContent = text;
@@ -176,6 +192,9 @@ export function mountConsole(root: HTMLElement, api: Api, id: string): View {
           upload.announced ? 'done' : 'warn',
         );
       }
+      // The uploads directory has one more file in it than the panel knows
+      // about.
+      files?.refresh();
       // The path is in the prompt now; the cursor should be there too.
       terminal.focus();
     } catch (error) {
@@ -240,6 +259,29 @@ export function mountConsole(root: HTMLElement, api: Api, id: string): View {
 
   reconnect.addEventListener('click', connect);
 
+  // The screen and the panel share one row, so opening the panel makes the
+  // terminal narrower rather than pushing it off the page. xterm reflows into
+  // whatever is left because the ResizeObserver below watches the screen.
+  const split = el('div', { class: 'console-split' }, screen);
+
+  /** Opens and closes the panel. The terminal is not touched: the observer
+   *  sees the screen change width and refits it. */
+  const toggleFiles = (): void => {
+    if (files === undefined) {
+      files = mountFiles(api, id);
+      split.append(files.element);
+      showFiles.setAttribute('aria-pressed', 'true');
+      return;
+    }
+    files.element.remove();
+    files.destroy();
+    files = undefined;
+    showFiles.setAttribute('aria-pressed', 'false');
+    terminal.focus();
+  };
+
+  showFiles.addEventListener('click', toggleFiles);
+
   clear(root);
   root.append(
     el(
@@ -247,9 +289,9 @@ export function mountConsole(root: HTMLElement, api: Api, id: string): View {
       { class: 'console-header' },
       el('a', { class: 'back', href: routeHash({ view: 'list' }), 'data-testid': 'back' }, '← Instances'),
       title,
-      el('span', { class: 'status-line' }, uploadStatus, status, attach, reconnect, picker),
+      el('span', { class: 'status-line' }, uploadStatus, status, showFiles, attach, reconnect, picker),
     ),
-    screen,
+    split,
   );
 
   terminal.open(screen);
@@ -274,6 +316,7 @@ export function mountConsole(root: HTMLElement, api: Api, id: string): View {
       if (resizeTimer !== undefined) clearTimeout(resizeTimer);
       observer.disconnect();
       connection?.close();
+      files?.destroy();
       terminal.dispose();
     },
   };

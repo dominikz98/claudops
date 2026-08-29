@@ -13,7 +13,8 @@ from a browser page on the server's own port, a console survives a refresh, each
 instance runs under a CPU and memory ceiling, and leftovers are reconciled away at
 every server start. A build's log grows on the page while it runs, and an instance
 says whether its Claude session is up rather than only whether its container is,
-and files or pasted screenshots can be attached to a running instance. Everything else is planned; see the
+files or pasted screenshots can be attached to a running instance, and what a run
+produced is readable back from the console page. Everything else is planned; see the
 [issues](https://github.com/dominikz98/claudops/issues) and
 [EPIC #1](https://github.com/dominikz98/claudops/issues/1).
 
@@ -32,6 +33,7 @@ and files or pasted screenshots can be attached to a running instance. Everythin
 | File and image attachments | Available, end-to-end tested |
 | Model and effort per instance | Available, end-to-end tested |
 | Instance status (running, needs input, done) | Available, smoke-tested |
+| Browsing the files an instance produced | Available, browser-tested |
 
 ## Quick start
 

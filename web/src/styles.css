@@ -181,6 +181,13 @@ button.secondary[hidden] {
   display: none;
 }
 
+/* The Files toggle stays lit while its panel is open -- the panel is off to
+   the side, and the button is what says whether it is there. */
+button.secondary[aria-pressed='true'] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 button.danger {
   color: var(--danger);
 }
@@ -404,9 +411,20 @@ button.open:disabled {
   color: var(--danger);
 }
 
+/* The screen and the files panel share this row. Both have to be allowed to
+   shrink -- a flex item defaults to min-width: auto, and an xterm that cannot
+   shrink pushes the panel off the page instead of reflowing. */
+.console-split {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  gap: 1rem;
+}
+
 .screen {
   flex: 1;
   min-height: 0;
+  min-width: 0;
   background: #12151b;
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -450,4 +468,226 @@ button.open:disabled {
 .screen.dropping {
   border-style: dashed;
   border-color: var(--accent);
+}
+
+/* ------------------------------------------------------------------- files */
+
+/* Wide enough for a path and a screenshot, and never more than half the
+   window: the console is what the panel sits next to, not what it replaces. */
+.files {
+  flex: 0 0 clamp(22rem, 42%, 40rem);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  gap: 0.5rem;
+  padding: 0.5rem;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.files-bar,
+.preview-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  font-size: 0.8125rem;
+}
+
+.files-title {
+  font-weight: 600;
+}
+
+.files-bar button {
+  margin-left: auto;
+}
+
+/* The tree gets a third of the panel and scrolls; the preview takes the rest.
+   A tree that grows with its content would push the preview out of sight on
+   the first `node_modules` somebody opens. */
+.file-tree {
+  flex: 0 1 33%;
+  min-height: 6rem;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+}
+
+.tree-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.tree-entry {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  width: 100%;
+  background: none;
+  border: none;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.8125rem;
+  padding: 0.15rem 0.4rem;
+  text-align: left;
+}
+
+.tree-entry:hover:not(:disabled) {
+  background: var(--border);
+}
+
+.tree-entry[data-selected='true'] {
+  background: var(--border);
+  color: var(--accent);
+}
+
+.tree-entry:disabled {
+  color: var(--muted);
+  cursor: default;
+}
+
+.tree-entry[data-kind='directory'] .tree-name {
+  color: var(--accent);
+}
+
+.tree-mark {
+  color: var(--muted);
+  width: 1ch;
+}
+
+.tree-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Pushed to the right and never squeezed: a size is short and a name is not. */
+.tree-size {
+  margin-left: auto;
+  color: var(--muted);
+  font-family: ui-monospace, monospace;
+  font-size: 0.75rem;
+  flex: none;
+}
+
+.tree-message {
+  color: var(--muted);
+  font-size: 0.75rem;
+  padding: 0.15rem 0.6rem;
+}
+
+.tree-message[data-state='error'] {
+  color: var(--danger);
+}
+
+.tree-message[data-state='warn'] {
+  color: var(--attention);
+}
+
+/* The path is shortened from the left in JavaScript (`shortenPath`), so this
+   only has to keep it on one line -- no `direction: rtl`, which would move the
+   leading slash to the far end of the string. */
+.preview-name {
+  color: var(--muted);
+  font-family: ui-monospace, monospace;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.preview-download {
+  margin-left: auto;
+  flex: none;
+}
+
+.preview-download[hidden] {
+  display: none;
+}
+
+.file-preview {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  padding: 0.6rem 0.8rem;
+}
+
+.preview-message {
+  color: var(--muted);
+  font-size: 0.8125rem;
+  margin: 0;
+}
+
+.preview-message[data-state='error'] {
+  color: var(--danger);
+}
+
+/* A checkerboard behind it, so a screenshot with a transparent background is
+   not a picture of nothing. */
+.preview-image {
+  max-width: 100%;
+  background:
+    repeating-conic-gradient(#1b1f27 0% 25%, #12151b 0% 50%) 50% / 16px 16px;
+}
+
+.preview-text,
+.preview-markdown pre {
+  margin: 0;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.preview-markdown {
+  font-size: 0.875rem;
+  line-height: 1.55;
+}
+
+.preview-markdown h1,
+.preview-markdown h2,
+.preview-markdown h3,
+.preview-markdown h4,
+.preview-markdown h5,
+.preview-markdown h6 {
+  font-size: 1rem;
+  margin: 1em 0 0.4em;
+}
+
+.preview-markdown h1 {
+  font-size: 1.15rem;
+}
+
+.preview-markdown p,
+.preview-markdown ul {
+  margin: 0 0 0.75em;
+}
+
+.preview-markdown code {
+  background: var(--panel);
+  border-radius: 3px;
+  font-size: 0.8125rem;
+  padding: 0.05em 0.3em;
+}
+
+.preview-markdown pre {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow-x: auto;
+  padding: 0.6rem;
+}
+
+.preview-markdown pre code {
+  background: none;
+  padding: 0;
+}
+
+.preview-markdown hr {
+  border: none;
+  border-top: 1px solid var(--border);
 }

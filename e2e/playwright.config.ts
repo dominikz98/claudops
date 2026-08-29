@@ -2,9 +2,10 @@ import { resolve } from 'node:path';
 import { defineConfig, devices } from '@playwright/test';
 
 /**
- * The acceptance criteria of issue #5 are all browser-interactive, so they are
- * checked in a browser -- against a real server, a real Docker daemon and a
- * real container. `./run.sh` builds what this needs before calling it.
+ * The acceptance criteria of issue #5 -- and of every ticket since whose claim
+ * is about what a person sees -- are browser-interactive, so they are checked
+ * in a browser: against a real server, a real Docker daemon and a real
+ * container. `./run.sh` builds what this needs before calling it.
  */
 
 const PORT = process.env.CLAUDOPS_E2E_PORT ?? '18091';
@@ -77,6 +78,10 @@ export default defineConfig({
       // picker on every run would be minutes for one assertion.
       CLAUDOPS_UPLOAD_MAX_FILE: '64k',
       CLAUDOPS_UPLOAD_MAX_TOTAL: '1m',
+      // Same reasoning in the other direction (#18): files.spec.ts has to
+      // reach the refusal of an oversized *read*, and the default is ten
+      // megabytes.
+      CLAUDOPS_FILE_MAX_READ: '256k',
       CLAUDOPS_LOG_LEVEL: 'warn',
     },
   },

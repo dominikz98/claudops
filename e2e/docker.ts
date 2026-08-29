@@ -94,6 +94,38 @@ export function readFile(containerId: string, path: string): string {
 }
 
 /**
+ * Writes a file inside a container, playing what Claude leaves behind after a
+ * run -- a report, a screenshot, a heap dump.
+ *
+ * The content travels as base64 rather than as an argument: the fixtures here
+ * carry backticks, quotes and newlines, and `docker exec sh -c` would hand all
+ * three to a shell. `mkdir -p` first, because a run creates directories too.
+ */
+export function writeFile(containerId: string, path: string, content: Buffer | string): void {
+  const encoded = Buffer.from(content).toString('base64');
+  docker(
+    'exec',
+    containerId,
+    'sh',
+    '-c',
+    'mkdir -p "$(dirname "$1")" && base64 -d > "$1" <<EOF\n' + encoded + '\nEOF\n',
+    'sh',
+    path,
+  );
+}
+
+/** A file of `bytes` zero bytes, without pushing them through a pipe. */
+export function writeSparseFile(containerId: string, path: string, bytes: number): void {
+  docker('exec', containerId, 'truncate', '-s', String(bytes), path);
+}
+
+/** A symlink inside the container -- the one path check the server cannot make
+ *  on the string it was sent. */
+export function makeSymlink(containerId: string, target: string, link: string): void {
+  docker('exec', containerId, 'ln', '-sfn', target, link);
+}
+
+/**
  * Runs one command in a throwaway container off an image. `--entrypoint` because
  * claudops-base has one, and its arguments are not a command.
  *

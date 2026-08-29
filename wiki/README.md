@@ -28,7 +28,10 @@ the session, and files and pasted screenshots go into a running instance from it
 console and land next to the clone rather than in it. The list also says what
 Claude is doing in each instance -- working, waiting for an answer, or finished --
 reported by the instance itself, with a browser notification for the one that is
-waiting. Everything else is planned
+waiting. What a run produced is readable from the console page: a file tree of
+the workspace next to the terminal, with Markdown rendered, images shown and
+everything else downloadable, without any of it having been committed.
+Everything else is planned
 and marked with its issue number on the pages below. The component status table lives in the
 [root README](../README.md#state) -- kept in one place so the two cannot drift
 apart.

@@ -69,3 +69,7 @@ Format and maintenance rules: skill `domain-knowledge`.
 - [A `Notification` hook is not always a question](a-notification-is-not-always-a-question.md) - the nag that would turn every finished instance amber
 - [A hook that prints is a hook that talks to Claude](a-hook-that-prints-is-a-hook-that-talks-to-claude.md) - stdout becomes context, a non-zero exit eats the prompt
 - [The browser notification is the fallback, not the mechanism](notifications-need-a-secure-context.md) - plain http has no Notification API at all
+- [A file comes out of a container through `getArchive`, never through `cat`](reading-a-file-needs-getarchive-not-cat.md) - an exec's output is decoded as UTF-8 and a PNG does not survive it
+- [A path check in the server is about a string; a symlink is about the container](a-server-side-path-check-cannot-see-a-symlink.md) - why the path is resolved twice, in two places
+- [What an instance produced is served as text or as a download, never as a document](instance-files-must-not-be-served-as-html.md) - an agent's HTML would run on claudops' own origin
+- [A directory listing read through an exec has to be NUL-separated](a-listing-out-of-an-exec-is-nul-separated.md) - the one byte a filename cannot contain

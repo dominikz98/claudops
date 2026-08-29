@@ -1,4 +1,5 @@
 import type { FastifyPluginCallback, FastifyPluginOptions } from 'fastify';
+import { contentDisposition } from './files.ts';
 import {
   INSTANCE_EFFORTS,
   INSTANCE_MODELS,
@@ -46,6 +47,37 @@ const uploadQuerySchema = {
   required: ['name'],
   additionalProperties: false,
   properties: { name: { type: 'string', minLength: 1, maxLength: 255 } },
+} as const;
+
+/**
+ * The path of a browse or a read. Optional on the listing, which without one
+ * answers for the workspace root; a `path` that leaves the workspace is
+ * refused by the service, not by this schema -- `..` is a legitimate character
+ * sequence and only resolving it says where it ends up.
+ *
+ * 4096 is PATH_MAX on Linux: a longer one cannot name a file in the container,
+ * so refusing it here costs nothing and keeps a megabyte of query string away
+ * from the daemon.
+ */
+const MAX_PATH = 4096;
+
+const listQuerySchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: { path: { type: 'string', maxLength: MAX_PATH } },
+} as const;
+
+const contentQuerySchema = {
+  type: 'object',
+  required: ['path'],
+  additionalProperties: false,
+  properties: {
+    path: { type: 'string', minLength: 1, maxLength: MAX_PATH },
+    /** `1` asks for the download rather than the preview. A string rather than
+     *  a boolean: it travels in a link's href, where `?download=1` is what a
+     *  person writes and what an `<a>` carries. */
+    download: { enum: ['1'] },
+  },
 } as const;
 
 const idParamsSchema = {
@@ -181,6 +213,62 @@ export const instanceRoutes: FastifyPluginCallback<InstanceRoutesOptions> = (
    * multipart: a single file needs no envelope, and the route's own bodyLimit
    * is what refuses an oversized one before it is read.
    */
+  /**
+   * One directory of the instance's workspace. A GET where the POST below is
+   * an upload: same resource, opposite direction.
+   */
+  app.get<{ Params: { id: string }; Querystring: { path?: string } }>(
+    '/instances/:id/files',
+    { schema: { params: idParamsSchema, querystring: listQuerySchema } },
+    async (request, reply) => {
+      try {
+        return await service.listFiles(request.params.id, request.query.path);
+      } catch (error) {
+        if (error instanceof InstanceNotFoundError) return reply.callNotFound();
+        throw error;
+      }
+    },
+  );
+
+  /**
+   * The bytes of one file, as the browser is allowed to have them.
+   *
+   * Not JSON: a screenshot in a JSON field is a third bigger and has to be
+   * decoded before it can be shown, while a raw body is what an `<img src>`
+   * and a download link both already understand.
+   *
+   * The three headers are not decoration. This route serves content an agent
+   * wrote, from claudops' own origin, to a browser carrying the session
+   * cookie -- so nothing it hands back may execute: `nosniff` keeps the
+   * browser on the content type the service chose, the CSP turns a page opened
+   * in its own tab into a sandboxed one with no origin, and anything that is
+   * not an image or plain text is an attachment rather than a document.
+   */
+  app.get<{ Params: { id: string }; Querystring: { path: string; download?: '1' } }>(
+    '/instances/:id/files/content',
+    { schema: { params: idParamsSchema, querystring: contentQuerySchema } },
+    async (request, reply) => {
+      let file;
+      try {
+        file = await service.readFile(request.params.id, request.query.path);
+      } catch (error) {
+        if (error instanceof InstanceNotFoundError) return reply.callNotFound();
+        throw error;
+      }
+
+      const attachment = !file.inline || request.query.download === '1';
+      return await reply
+        .header('content-type', file.contentType)
+        .header('content-disposition', contentDisposition(file.name, attachment))
+        .header('x-content-type-options', 'nosniff')
+        .header('content-security-policy', "default-src 'none'; sandbox")
+        // A workspace file changes under the same path whenever the agent
+        // writes it again, so a cached preview would be the previous run's.
+        .header('cache-control', 'no-store')
+        .send(Buffer.from(file.content));
+    },
+  );
+
   app.post<{ Params: { id: string }; Querystring: { name: string }; Body: Buffer }>(
     '/instances/:id/files',
     {

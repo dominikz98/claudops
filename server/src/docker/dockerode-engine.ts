@@ -1,13 +1,16 @@
-import { Writable, type Duplex } from 'node:stream';
+import { Writable, type Duplex, type Readable } from 'node:stream';
 import Docker from 'dockerode';
 import {
   ContainerNotFoundError,
   ContainerNotRunningError,
   DockerUnavailableError,
+  FileTooLargeError,
   ImageBuildFailedError,
   ImageNotFoundError,
+  NotARegularFileError,
   type AttachTerminalOptions,
   type CommandResult,
+  type ContainerFile,
   type ContainerHealth,
   type ContainerSpec,
   type ContainerSummary,
@@ -18,6 +21,7 @@ import {
   type VolumeSummary,
 } from './engine.ts';
 import { instanceIdFromLabels, managedFilter } from './labels.ts';
+import { readFirstEntry } from './tar.ts';
 
 interface DockerError {
   statusCode?: number;
@@ -396,6 +400,46 @@ export class DockerodeEngine implements DockerEngine {
         .putArchive(Buffer.from(archive), { path: targetDir });
     } catch (error) {
       throw this.translateAttach(error, containerId);
+    }
+  }
+
+  /**
+   * Docker answers a read with a tar stream, so the bytes come out of an
+   * archive rather than off the wire directly.
+   *
+   * The stream is destroyed in every case, not only on the way out through an
+   * error: `readFirstEntry` stops at the end of the entry, and what follows it
+   * -- the padding and the end-of-archive marker for a file, the whole subtree
+   * for a directory somebody asked for anyway -- is bytes nobody wants. For an
+   * oversized file the decision is made from the header, which is why the
+   * refusal costs 512 bytes rather than the file.
+   */
+  async readFile(containerId: string, path: string, maxBytes: number): Promise<ContainerFile> {
+    let stream: Readable;
+    try {
+      stream = (await this.docker
+        .getContainer(containerId)
+        .getArchive({ path })) as unknown as Readable;
+    } catch (error) {
+      throw this.translateAttach(error, containerId);
+    }
+
+    try {
+      const entry = await readFirstEntry(stream, maxBytes);
+      switch (entry.kind) {
+        case 'file':
+          return { name: entry.name, content: entry.content };
+        case 'too-large':
+          throw new FileTooLargeError(path, maxBytes, entry.size);
+        case 'other':
+          throw new NotARegularFileError(path);
+        // An archive with no entry at all is a path Docker no longer has --
+        // the same answer as the 404 it would have given a moment earlier.
+        case 'empty':
+          throw new ContainerNotFoundError(containerId);
+      }
+    } finally {
+      stream.destroy();
     }
   }
 

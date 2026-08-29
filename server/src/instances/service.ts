@@ -1,5 +1,6 @@
 import {
   DEFAULT_INSTANCE_LIMITS,
+  DEFAULT_MAX_READ_BYTES,
   DEFAULT_UPLOAD_LIMITS,
   type InstanceEnvConfig,
   type UploadLimits,
@@ -8,6 +9,7 @@ import type { InstanceRepository } from '../db/instances.ts';
 import {
   ContainerNotFoundError,
   ContainerNotRunningError,
+  FileTooLargeError,
   type ContainerLimits,
   type ContainerSpec,
   type ContainerSummary,
@@ -17,6 +19,22 @@ import {
 } from '../docker/engine.ts';
 import { containerName, instanceLabels } from '../docker/labels.ts';
 import { singleFileArchive } from '../docker/tar.ts';
+import {
+  contentTypeOf,
+  LIST_SCRIPT,
+  parseListing,
+  PATH_ESCAPED,
+  PATH_MISSING,
+  PATH_WRONG_KIND,
+  PathNotFoundError,
+  PathOutsideWorkspaceError,
+  resolveWorkspacePath,
+  scriptCommand,
+  STAT_SCRIPT,
+  WrongPathKindError,
+  type DirectoryListing,
+  type FileContent,
+} from './files.ts';
 import { shortId } from '../ids.ts';
 import {
   ProjectImageNotReadyError,
@@ -422,6 +440,9 @@ export interface InstanceServiceOptions {
   /** What may be uploaded into an instance. Defaults to
    *  DEFAULT_UPLOAD_LIMITS, which is what the config falls back to as well. */
   uploads?: UploadLimits | undefined;
+  /** The ceiling on one file read back out of an instance. Defaults to
+   *  DEFAULT_MAX_READ_BYTES, exactly as the config does. */
+  maxReadBytes?: number | undefined;
   generateId?: () => string;
   now?: () => Date;
   /** How long to wait between the text of a slash command and its Enter.
@@ -444,6 +465,7 @@ export class InstanceService {
   private readonly tmuxSession: string;
   private readonly limits: ContainerLimits;
   private readonly uploads: UploadLimits;
+  private readonly maxReadBytes: number;
   private readonly generateId: () => string;
   private readonly now: () => Date;
   private readonly sendKeysPauseMs: number;
@@ -461,6 +483,7 @@ export class InstanceService {
     this.tmuxSession = options.tmuxSession ?? DEFAULT_TMUX_SESSION;
     this.limits = options.limits ?? DEFAULT_INSTANCE_LIMITS;
     this.uploads = options.uploads ?? DEFAULT_UPLOAD_LIMITS;
+    this.maxReadBytes = options.maxReadBytes ?? DEFAULT_MAX_READ_BYTES;
     this.generateId = options.generateId ?? shortId;
     this.now = options.now ?? (() => new Date());
     this.sendKeysPauseMs = options.sendKeysPauseMs ?? SEND_KEYS_PAUSE_MS;
@@ -753,10 +776,8 @@ export class InstanceService {
       throw new UploadTooLargeError('file', this.uploads.maxFileBytes, size);
     }
 
-    const containerId = this.containerOf(id);
-    const summary = (await this.containerSummaries()).get(containerId);
-    if (summary === undefined) throw new ContainerNotFoundError(containerId);
-    if (summary.state !== 'running') throw new ContainerNotRunningError(containerId);
+    const summary = await this.runningContainerOf(id);
+    const { containerId } = summary;
 
     const used = await this.usedUploadBytes(containerId);
     if (used + size > this.uploads.maxInstanceBytes) {
@@ -772,6 +793,109 @@ export class InstanceService {
       sessionOf(summary) === 'ready' ? await this.announce(containerId, path) : false;
 
     return { name, path, size, announced };
+  }
+
+  /**
+   * What one directory of the instance's workspace holds.
+   *
+   * A directory per request, not a tree: the workspace carries a clone with its
+   * `node_modules` and its `.git`, and a recursive walk of that is a megabyte
+   * of exec output for one click. The browser asks again when somebody opens a
+   * folder.
+   */
+  async listFiles(id: string, requestedPath?: string): Promise<DirectoryListing> {
+    const path = resolveWorkspacePath(requestedPath);
+    const { containerId } = await this.runningContainerOf(id);
+
+    const result = await this.engine.runCommand(
+      containerId,
+      scriptCommand(LIST_SCRIPT, path),
+    );
+    this.checkPath(result.exitCode, path, 'directory', result.output);
+
+    return parseListing(result.output, path);
+  }
+
+  /**
+   * One file of the workspace, as bytes.
+   *
+   * Two round trips on purpose. The first asks the container what the path is
+   * and how big it is, which is what makes an oversized file a 413 naming its
+   * size rather than a read that has to be aborted halfway. The second is the
+   * archive -- and it carries the limit again, because between the two the
+   * agent inside the container may still be writing.
+   */
+  async readFile(id: string, requestedPath: string): Promise<FileContent> {
+    const path = resolveWorkspacePath(requestedPath);
+    const { containerId } = await this.runningContainerOf(id);
+
+    const result = await this.engine.runCommand(
+      containerId,
+      scriptCommand(STAT_SCRIPT, path),
+    );
+    this.checkPath(result.exitCode, path, 'file', result.output);
+
+    const size = Number.parseInt(result.output.trim(), 10);
+    if (!Number.isFinite(size)) {
+      throw new Error(`the size of '${path}' could not be read: ${result.output.trim()}`);
+    }
+    if (size > this.maxReadBytes) throw new FileTooLargeError(path, this.maxReadBytes, size);
+
+    const file = await this.engine.readFile(containerId, path, this.maxReadBytes);
+    return {
+      path,
+      name: file.name,
+      size: file.content.length,
+      content: file.content,
+      ...contentTypeOf(file.name, file.content),
+    };
+  }
+
+  /**
+   * Turns the exit code of one of the two scripts into the error that belongs
+   * to it. Anything else is a container that could not run the script at all,
+   * which is a 500 rather than something about the path.
+   */
+  private checkPath(
+    exitCode: number,
+    path: string,
+    wanted: 'file' | 'directory',
+    output: string,
+  ): void {
+    switch (exitCode) {
+      case 0:
+        return;
+      case PATH_MISSING:
+        throw new PathNotFoundError(path);
+      case PATH_WRONG_KIND:
+        throw new WrongPathKindError(path, wanted);
+      // A symlink whose target is outside the workspace. The server's own check
+      // cannot see this one: it is a fact about the container's filesystem, not
+      // about the string that was sent.
+      case PATH_ESCAPED:
+        throw new PathOutsideWorkspaceError(path);
+      default:
+        throw new ContainerCommandFailedError(
+          scriptCommand('<file script>', path),
+          exitCode,
+          output,
+        );
+    }
+  }
+
+  /**
+   * The container of an instance that has to have one *and* have it running.
+   * Everything that reads or writes inside a container starts here.
+   *
+   * The summary rather than the id alone: it is one `docker ps` for the whole
+   * request, and an upload needs the session readiness out of the same answer.
+   */
+  private async runningContainerOf(id: string): Promise<ContainerSummary> {
+    const containerId = this.containerOf(id);
+    const summary = (await this.containerSummaries()).get(containerId);
+    if (summary === undefined) throw new ContainerNotFoundError(containerId);
+    if (summary.state !== 'running') throw new ContainerNotRunningError(containerId);
+    return summary;
   }
 
   /**

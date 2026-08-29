@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Smoke test for claudops-server: checks the acceptance criteria from issues #3,
-# #6, #7, #8, #15, #16 and #17 against a real Docker daemon and a real server
-# process. #8
+# #6, #7, #8, #15, #16, #17 and #18 against a real Docker daemon and a real
+# server process. #8
 # needs two server processes on the same database -- the startup reconcile is
 # only observable across a restart.
 #
@@ -50,6 +50,10 @@ UPLOAD_MAX_FILE="256k"
 UPLOAD_MAX_TOTAL="600k"
 UPLOAD_TOO_BIG_BYTES=300000
 UPLOAD_FILLER_BYTES=250000
+# The same reasoning in the other direction (#18): the refusal of an oversized
+# *read* has to be reachable, and the default is ten megabytes.
+FILE_MAX_READ="128k"
+READ_TOO_BIG_BYTES=200000
 # Hex rather than base64: it survives every layer of quoting between here and
 # the server's environment without a thought.
 SECRET_KEY="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))')"
@@ -96,6 +100,7 @@ start_server "$PORT" "$DB_FILE_NATIVE" "$SERVER_LOG" \
   'CLAUDOPS_GIT_USER_EMAIL=claudops@example.invalid' \
   "CLAUDOPS_UPLOAD_MAX_FILE=$UPLOAD_MAX_FILE" \
   "CLAUDOPS_UPLOAD_MAX_TOTAL=$UPLOAD_MAX_TOTAL" \
+  "CLAUDOPS_FILE_MAX_READ=$FILE_MAX_READ" \
   "CLAUDOPS_STATUS_PORT=$STATUS_PORT"
 server_pid="$SERVER_PID"
 
@@ -468,6 +473,111 @@ check "And says so" "upload_too_large" \
 check "Deleting one in the container frees the budget again" "201" \
   "$(docker exec "$clone_container" rm "$uploads_dir/filler-1.bin" >/dev/null 2>&1; \
      head -1 <<<"$(upload "$clone_id" "filler-3.bin" "$filler_file")")"
+
+# --------------------------------------- #18: reading what the instance produced
+# Still against the clone instance: a real repository is what makes the listing
+# a listing of something, and the clone's own files are what a browser would be
+# looking at.
+info "#18: the workspace is browsable and its files readable"
+
+# curl again rather than api(): a content response is bytes with headers that
+# matter, and neither survives the JSON helper.
+raw_get() {
+  curl -s -w '\n%{http_code}' -b "$COOKIE_JAR_NATIVE" "$BASE$1"
+}
+headers_of() {
+  curl -s -o /dev/null -D - -b "$COOKIE_JAR_NATIVE" "$BASE$1" | tr -d '\r'
+}
+# A path in a query string. printf %s through jq would be another dependency;
+# these paths are ASCII and the two characters that matter are the slash and
+# the dot-dot.
+urlenc() { printf '%s' "$1" | sed -e 's|/|%2F|g' -e 's|\.\.|%2E%2E|g'; }
+
+report_body='# Smoke report
+
+Written **inside** the container, never committed.
+'
+docker exec "$clone_container" sh -c 'cat > /workspace/claudops/SMOKE.md' <<<"$report_body" \
+  >/dev/null 2>&1
+docker exec "$clone_container" truncate -s "$READ_TOO_BIG_BYTES" /workspace/claudops/big.bin \
+  >/dev/null 2>&1
+docker exec "$clone_container" ln -sfn /etc/passwd /workspace/escape.txt >/dev/null 2>&1
+docker exec "$clone_container" ln -sfn /etc /workspace/outside >/dev/null 2>&1
+
+root_listing="$(body_of GET "/instances/$clone_id/files")"
+check "GET /instances/:id/files answers for the workspace root" "/workspace" \
+  "$(json path <<<"$root_listing")"
+contains "The clone is in it" '"name":"claudops"' "$root_listing"
+contains "And so is the uploads directory of #15" '"name":".claudops"' "$root_listing"
+# `path` and `kind` are adjacent in the entry; `name` is not next to either.
+contains "A symlink is neither a file nor a directory" \
+  '"path":"/workspace/escape.txt","kind":"other"' "$(tr -d ' ' <<<"$root_listing")"
+
+repo_listing="$(body_of GET "/instances/$clone_id/files?path=$(urlenc /workspace/claudops)")"
+contains "A directory below it lists what the clone holds" '"name":"SMOKE.md"' "$repo_listing"
+contains "With the path the next request needs" \
+  '"path":"/workspace/claudops/SMOKE.md"' "$(tr -d ' ' <<<"$repo_listing")"
+
+info "#18 AC 2: a file Claude wrote comes back as it was written"
+md="$(raw_get "/instances/$clone_id/files/content?path=$(urlenc /workspace/claudops/SMOKE.md)")"
+check "Reading it answers 200" "200" "$(tail -n1 <<<"$md")"
+contains "And the Markdown is intact" 'Written **inside** the container' "$(sed '$d' <<<"$md")"
+
+md_headers="$(headers_of "/instances/$clone_id/files/content?path=$(urlenc /workspace/claudops/SMOKE.md)")"
+# Never text/html and never sniffable: this is content an agent wrote, served
+# from claudops' own origin to a browser carrying the session cookie.
+contains "It is served as plain text" 'content-type: text/plain' "$md_headers"
+contains "Nothing may sniff it into something else" 'x-content-type-options: nosniff' "$md_headers"
+contains "And a tab opened on it has no origin" "content-security-policy: default-src 'none'; sandbox" \
+  "$md_headers"
+contains "?download=1 turns the same URL into a Save as" 'content-disposition: attachment' \
+  "$(headers_of "/instances/$clone_id/files/content?path=$(urlenc /workspace/claudops/SMOKE.md)&download=1")"
+
+info "#18 AC 1: an attachment is readable back through the API, byte for byte"
+shot="$(raw_get "/instances/$clone_id/files/content?path=$(urlenc "$uploads_dir/probe.png")")"
+check "The uploaded file reads back" "200" "$(tail -n1 <<<"$shot")"
+check "With exactly the bytes that went in" "$(cat "$probe_file")" "$(sed '$d' <<<"$shot")"
+
+info "#18 AC 3: nothing outside the workspace is readable"
+for path in "../../etc/passwd" "/etc/passwd" "/workspace/../etc/passwd"; do
+  refusal="$(raw_get "/instances/$clone_id/files/content?path=$(urlenc "$path")")"
+  check "Reading '$path' answers 400" "400" "$(tail -n1 <<<"$refusal")"
+  check "And says why" "path_outside_workspace" "$(json error <<<"$(sed '$d' <<<"$refusal")")"
+  check "And no line of /etc/passwd came back" "0" \
+    "$(grep -c 'root:x:' <<<"$refusal" || true)"
+done
+check "Listing /etc answers 400 as well" "400" \
+  "$(status_of GET "/instances/$clone_id/files?path=$(urlenc /etc)")"
+
+# The one the server cannot decide on the string it was sent: the path is in
+# the workspace and what it points at is not. Only the container knows, which
+# is why the scripts resolve it there a second time.
+escape="$(raw_get "/instances/$clone_id/files/content?path=$(urlenc /workspace/escape.txt)")"
+check "A symlink out of the workspace is refused" "400" "$(tail -n1 <<<"$escape")"
+check "And is not followed" "0" "$(grep -c 'root:x:' <<<"$escape" || true)"
+check "Nor is a path through a symlinked directory" "400" \
+  "$(status_of GET "/instances/$clone_id/files?path=$(urlenc /workspace/outside)")"
+
+info "#18 AC 4: a file over the limit is refused instead of being read"
+oversize_read="$(raw_get "/instances/$clone_id/files/content?path=$(urlenc /workspace/claudops/big.bin)")"
+check "A read over CLAUDOPS_FILE_MAX_READ answers 413" "413" "$(tail -n1 <<<"$oversize_read")"
+check "The refusal says what was wrong" "file_too_large" \
+  "$(json error <<<"$(sed '$d' <<<"$oversize_read")")"
+check "The server is still healthy afterwards" "200" "$(status_of GET /health)"
+check "And still reads a file that fits" "200" \
+  "$(tail -n1 <<<"$(raw_get "/instances/$clone_id/files/content?path=$(urlenc /workspace/claudops/SMOKE.md)")")"
+
+check "A directory asked for its bytes answers 400" "400" \
+  "$(status_of GET "/instances/$clone_id/files/content?path=$(urlenc /workspace/claudops)")"
+check "A path that is not there is a 404 about the path" "path_not_found" \
+  "$(json error <<<"$(body_of GET "/instances/$clone_id/files/content?path=$(urlenc /workspace/claudops/nope.txt)")")"
+
+# Reading is reading: the only two entries git sees are the two fixtures
+# written above, and nothing the browsing added.
+check "Browsing added nothing to the clone" "2" \
+  "$(docker exec "$clone_container" git -C /workspace/claudops status --porcelain 2>/dev/null \
+     | tr -d '\r' | grep -c . )"
+
 
 check "DELETE of the clone instance answers 204" "204" "$(status_of DELETE "/instances/$clone_id")"
 check "DELETE of the clone project answers 204" "204" "$(status_of DELETE "/projects/$clone_project")"
