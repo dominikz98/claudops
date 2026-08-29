@@ -26,5 +26,14 @@ never fires in a claudops container, so the question that does arrive is
 decision an image could revisit, and a permission prompt is a question either
 way.
 
+**What is observed and what is read.** `hook_event_name` is confirmed against
+the CLI: a real session fires `UserPromptSubmit`, `Stop` and `SessionEnd` with
+exactly that field. `Notification` could not be provoked in a harness -- it needs
+a permission prompt or sixty idle seconds at a real TUI -- so its
+`notification_type` comes from the documentation rather than from a capture.
+That is why the fallback above matters: if the field ever disappears, a
+notification during a turn is still a question and one after it is still
+ignored, which is the behaviour this file argues for either way.
+
 **Applies to.** `server/src/instances/activity.ts`,
 `docker/base/claudops-status`, `server/test/activity.test.ts`, issue #17.
