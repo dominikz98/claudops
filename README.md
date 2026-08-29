@@ -100,6 +100,7 @@ configuration in [server/README.md](server/README.md).
 | [`e2e/`](e2e/run.sh) | Playwright: the browser acceptance tests, against a real server and real containers |
 | [`wiki/`](wiki/README.md) | Documentation for users and colleagues: architecture, getting started, operations, glossary |
 | [`knowledge/`](knowledge/README.md) | Domain knowledge database: the non-obvious decisions and their reasons |
+| [`prompts/`](prompts/project-manager-view.md) | Briefs handed to Claude Code for a phase of work, kept so the next one can be read against them |
 | [`CLAUDE.md`](CLAUDE.md) | Project rules for Claude Code working in this repository |
 | [`.claude/skills/`](.claude/skills/) | Skills that make those rules executable |
 
