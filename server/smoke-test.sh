@@ -397,8 +397,18 @@ fi
 # before either probe means anything -- a sealed container refuses both, and a
 # container without CAP_NET_ADMIN allows both.
 info "#32 AC 4: a host the project listed answers, one it did not is refused"
-firewall_state="$(docker exec "$container_id" head -1 /run/claudops-firewall.state 2>/dev/null | tr -d '\r')"
-check "The instance's egress firewall came up" "active" "$firewall_state"
+# Polled, not read once: the script writes 'configuring' before it starts and
+# settles only after it has resolved a dozen names and GitHub's ranges, which is
+# seconds to a minute. Reading the file straight after the create asserts on a
+# state that has not happened yet
+# (knowledge/a-smoke-test-must-wait-for-the-state-it-asserts-on.md).
+firewall_state=""
+for _ in $(seq 1 90); do
+  firewall_state="$(docker exec "$container_id" head -1 /run/claudops-firewall.state 2>/dev/null | tr -d '\r')"
+  [[ -n "$firewall_state" && "$firewall_state" != 'configuring' ]] && break
+  sleep 2
+done
+check "The instance's egress firewall came up" "active" "${firewall_state:-<no state file>}"
 
 if [[ "$firewall_state" == 'active' ]]; then
   check "The project's host is reachable from inside the instance" "0" \
