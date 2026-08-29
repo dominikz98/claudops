@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Smoke test for claudops-server: checks the acceptance criteria from issues #3,
-# #6, #7, #8, #15, #16, #17 and #18 against a real Docker daemon and a real
+# #6, #7, #8, #15, #16, #17, #18 and #32 against a real Docker daemon and a real
 # server process. #8
 # needs two server processes on the same database -- the startup reconcile is
 # only observable across a restart.
@@ -15,8 +15,9 @@
 # which is what proves the toolchain arrives in an actual instance.
 #
 # Requires: docker, node, curl, and network access -- one instance really clones
-# the public claudops repository. A CLAUDE_CODE_OAUTH_TOKEN is passed through if
-# set, but is not required -- the container stays alive either way.
+# the public claudops repository, and the egress checks of #32 really reach out
+# of a container. A CLAUDE_CODE_OAUTH_TOKEN is passed through if set, but is not
+# required -- the container stays alive either way.
 #
 # The terminal bridge of issue #4 has its own script: ./server/terminal-smoke-test.sh
 set -uo pipefail
@@ -40,6 +41,23 @@ GIT_TOKEN_PROBE="smoke-pat-must-not-appear"
 # response, out of the database and out of the log, and a real one would put a
 # working credential into a temporary directory.
 OAUTH_PROBE="smoke-oauth-must-not-appear"
+# The same idea for a project variable (#32): it has to arrive in the container
+# and appear nowhere else -- not in a response, not on disk, not in the log.
+ENV_PROBE="smoke-variable-must-not-appear"
+# A host the base image does not whitelist, so reaching it from inside an
+# instance proves the project's own list arrived.
+#
+# Two things rule out the obvious candidate, api.nuget.org: the dotnet building
+# block writes it into the image's own allow-list, which would make this
+# assertion pass without the project's list doing anything under FULL_IMAGE=1 --
+# and it answers with a single address that rotates, so the one the firewall
+# resolved and the one curl picks seconds later need not be the same. pypi.org
+# answers with its whole Fastly pool, so a rotation within it still lands on a
+# whitelisted address.
+PROJECT_HOST="pypi.org"
+# The operator's server-wide list. A project adds to this one, it never replaces
+# it, and both halves have to show up in the container's FIREWALL_ALLOW.
+SERVER_HOST="registry.npmjs.org"
 PUBLIC_REPO="https://github.com/dominikz98/claudops.git"
 # Deliberately far below the defaults (#15): the refusal of a file over the
 # limit has to be reachable without pushing twenty-five megabytes through curl
@@ -101,7 +119,8 @@ start_server "$PORT" "$DB_FILE_NATIVE" "$SERVER_LOG" \
   "CLAUDOPS_UPLOAD_MAX_FILE=$UPLOAD_MAX_FILE" \
   "CLAUDOPS_UPLOAD_MAX_TOTAL=$UPLOAD_MAX_TOTAL" \
   "CLAUDOPS_FILE_MAX_READ=$FILE_MAX_READ" \
-  "CLAUDOPS_STATUS_PORT=$STATUS_PORT"
+  "CLAUDOPS_STATUS_PORT=$STATUS_PORT" \
+  "CLAUDOPS_FIREWALL_ALLOW=$SERVER_HOST"
 server_pid="$SERVER_PID"
 
 if wait_for_health "$BASE"; then
@@ -133,7 +152,7 @@ check "The cookie from the login opens the API" "200" "$(status_of GET /instance
 
 # ------------------------------------------------ #6: a project holds the PAT
 info "#6: creating a project with a PAT"
-created="$(api POST /projects "{\"name\":\"smoke\",\"repoUrl\":\"https://github.com/dominikz98/does-not-exist.git\",\"repoBranch\":\"main\",\"gitToken\":\"$GIT_TOKEN_PROBE\",\"buildingBlocks\":{\"dotnet\":true,\"playwright\":false}}")"
+created="$(api POST /projects "{\"name\":\"smoke\",\"repoUrl\":\"https://github.com/dominikz98/does-not-exist.git\",\"repoBranch\":\"main\",\"gitToken\":\"$GIT_TOKEN_PROBE\",\"buildingBlocks\":{\"dotnet\":true,\"playwright\":false},\"env\":{\"SMOKE_VARIABLE\":\"$ENV_PROBE\",\"SMOKE_EMPTY\":\"\"},\"egressHosts\":[\"$PROJECT_HOST\"]}")"
 check "POST /projects answers 201" "201" "$(head -1 <<<"$created")"
 
 project_json="$(tail -n +2 <<<"$created")"
@@ -170,6 +189,36 @@ else
 fi
 check "The PAT is not in the server log" "0" \
   "$(grep -c "$GIT_TOKEN_PROBE" "$SERVER_LOG" | tr -d '\r')"
+
+# ------------------------------------ #32: a project carries its own environment
+# The same three properties as the PAT, one level down: the value is write-only,
+# sealed on disk and absent from the log. The names are not secret -- they are
+# what the UI lists and what a PATCH addresses a single variable by.
+info "#32 AC 3: a project's variables are write-only and sealed on disk"
+check "The project answers with its variable names" "SMOKE_EMPTY" \
+  "$(json envNames.0 <<<"$project_json")"
+check "And with the second one" "SMOKE_VARIABLE" "$(json envNames.1 <<<"$project_json")"
+check "The value is not in the response" "0" "$(grep -c "$ENV_PROBE" <<<"$project_json")"
+check "The value is not readable on disk" "0" "$(db_bytes | grep -ac "$ENV_PROBE" || true)"
+check "The value is not in the server log" "0" \
+  "$(grep -c "$ENV_PROBE" "$SERVER_LOG" | tr -d '\r')"
+check "The egress hosts do come back -- they are not secret" "$PROJECT_HOST" \
+  "$(json egressHosts.0 <<<"$project_json")"
+
+info "#32 AC 2: a project cannot take over a variable claudops manages"
+for managed in GIT_TOKEN CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY; do
+  check "POST with $managed answers 409" "409" \
+    "$(status_of POST /projects \
+        "{\"name\":\"hostile-$managed\",\"repoUrl\":\"$PUBLIC_REPO\",\"env\":{\"$managed\":\"mine\"}}")"
+done
+check "A PATCH cannot smuggle one in either" "409" \
+  "$(status_of PATCH "/projects/$project_id" '{"env":{"GIT_TOKEN":"mine"}}')"
+check "A host the firewall could not use is refused" "400" \
+  "$(status_of POST /projects \
+      "{\"name\":\"bad-host\",\"repoUrl\":\"$PUBLIC_REPO\",\"egressHosts\":[\"https://api.example.com/v1\"]}")"
+check "And so is a wildcard, which an ipset cannot hold" "400" \
+  "$(status_of POST /projects \
+      "{\"name\":\"wild\",\"repoUrl\":\"$PUBLIC_REPO\",\"egressHosts\":[\"*.example.com\"]}")"
 
 # ------------------------------------------ #7: the project gets its own image
 info "#7: the project's image is built and reported"
@@ -280,6 +329,21 @@ else
 fi
 check "No ANTHROPIC_API_KEY next to the OAuth token" "0" \
   "$(container_env "$container_id" | grep -c '^ANTHROPIC_API_KEY=' | tr -d '\r')"
+
+# --------------------------- #32 AC 1: the project's variables are in the container
+info "#32 AC 1: a variable set on the project shows in docker inspect"
+if container_env "$container_id" | grep -q "^SMOKE_VARIABLE=$ENV_PROBE$"; then
+  ok "SMOKE_VARIABLE is the decrypted value of the project variable"
+else
+  bad "SMOKE_VARIABLE did not reach the container"
+fi
+# Empty but present: a variable that exists and says nothing is a legitimate
+# thing to hand a program, unlike a server setting nobody configured.
+check "An empty variable is present rather than dropped" "1" \
+  "$(container_env "$container_id" | grep -c '^SMOKE_EMPTY=$' | tr -d '\r')"
+check "FIREWALL_ALLOW carries the server-wide list and the project's, in that order" \
+  "FIREWALL_ALLOW=$SERVER_HOST,$PROJECT_HOST" \
+  "$(container_env "$container_id" | grep '^FIREWALL_ALLOW=' | tr -d '\r')"
 check "Token is not echoed back by the API" "0" \
   "$(grep -c "$GIT_TOKEN_PROBE" <<<"$instance_json")"
 check "Token still not readable on disk" "0" \
@@ -334,6 +398,51 @@ else
     "$(docker exec "$container_id" cat /tmp/claudops-blocks 2>/dev/null | tr -d '\r')"
   printf '  %s\n' "(FULL_IMAGE=1 checks a real dotnet SDK in the instance instead)"
 fi
+
+# ------------------------------ #32 AC 4: the project's hosts are on the whitelist
+# The container's own firewall is what makes this true, so it has to be up
+# before either probe means anything -- a sealed container refuses both, and a
+# container without CAP_NET_ADMIN allows both.
+info "#32 AC 4: a host the project listed answers, one it did not is refused"
+# Polled, not read once: the script writes 'configuring' before it starts and
+# settles only after it has resolved a dozen names and GitHub's ranges, which is
+# seconds to a minute. Reading the file straight after the create asserts on a
+# state that has not happened yet
+# (knowledge/a-smoke-test-must-wait-for-the-state-it-asserts-on.md).
+firewall_state=""
+for _ in $(seq 1 90); do
+  firewall_state="$(docker exec "$container_id" head -1 /run/claudops-firewall.state 2>/dev/null | tr -d '\r')"
+  [[ -n "$firewall_state" && "$firewall_state" != 'configuring' ]] && break
+  sleep 2
+done
+check "The instance's egress firewall came up" "active" "${firewall_state:-<no state file>}"
+
+if [[ "$firewall_state" == 'active' ]]; then
+  check "The project's host is reachable from inside the instance" "0" \
+    "$(docker exec "$container_id" curl -sS --max-time 15 -o /dev/null "https://$PROJECT_HOST/simple/" >/dev/null 2>&1; echo $?)"
+  unlisted_rc="$(docker exec "$container_id" curl -sS --max-time 5 -o /dev/null https://example.com >/dev/null 2>&1; echo $?)"
+  if [[ "$unlisted_rc" != "0" ]]; then
+    ok "A host nobody listed is refused (curl exit $unlisted_rc)"
+  else
+    bad "example.com was reachable -- the instance is not filtering"
+  fi
+  # The ipset is the whitelist itself: a rule in the chain would let a host
+  # through that the resolved addresses do not cover, and the other way round.
+  check "The project's host resolved into the container's ipset" "0" \
+    "$(docker exec -u root "$container_id" sh -c \
+        "getent ahostsv4 $PROJECT_HOST | awk 'NR==1{print \$1}' | xargs -r ipset test claudops-allow" \
+        >/dev/null 2>&1; echo $?)"
+else
+  bad "Skipping the egress probes -- the firewall is '$firewall_state', not 'active'"
+fi
+
+# One variable at a time, like the PAT's own Remove: what is stored is not shown,
+# so it cannot be edited in place -- a name has to be addressable on its own.
+info "#32: a single variable can be removed without touching the others"
+after_removal="$(body_of PATCH "/projects/$project_id" '{"env":{"SMOKE_EMPTY":null}}')"
+check "The removed variable is gone" "SMOKE_VARIABLE" "$(json envNames.0 <<<"$after_removal")"
+check "And it was the only one removed" "" "$(json envNames.1 <<<"$after_removal")"
+check "The image is untouched by it" "ready" "$(json image.status <<<"$after_removal")"
 
 # ------------------------------------ AC 1 continued: the clone really happens
 # A second project, without a PAT: the public repository refuses invalid
@@ -891,7 +1000,7 @@ check "POST /instances with an unknown project answers 422" "422" \
 check "POST /projects without a repository answers 400" "400" \
   "$(status_of POST /projects '{"name":"x"}')"
 check "POST /projects with an unknown field answers 400" "400" \
-  "$(status_of POST /projects '{"name":"x","repoUrl":"https://host/r.git","env":{}}')"
+  "$(status_of POST /projects '{"name":"x","repoUrl":"https://host/r.git","secrets":{}}')"
 check "GET on an unknown instance answers 404" "404" "$(status_of GET /instances/does-not-exist)"
 check "GET on an unknown project answers 404" "404" "$(status_of GET /projects/does-not-exist)"
 
@@ -904,12 +1013,23 @@ check "Second one is a conflict" "409" "$(status_of POST /projects "$duplicate")
 # build that really fails -- the unit tests can only fake one. It has no secret
 # key either, which is the other thing that cannot be faked from in-process.
 info "#7 AC 3: a failed build is visible on the project and blocks instance start"
-second_port=$((PORT + 1))
+# +2 and +3, not +1: PORT+1 is the status listener of the server above, which
+# binds 0.0.0.0 rather than loopback -- a second API on it never comes up, and
+# every check below then reads an empty answer. Its own status port is named for
+# the same reason: the default is 8081, which is whatever else is on the box.
+second_port=$((PORT + 2))
 second_base="http://127.0.0.1:$second_port"
 start_server "$second_port" "$WORK_DIR_NATIVE/no-image.db" "$WORK_DIR/no-image.log" \
   'CLAUDOPS_BASE_IMAGE=claudops-does-not-exist:0' \
-  "CLAUDOPS_PROJECT_CONTEXT=$PROJECT_CONTEXT_NATIVE"
-wait_for_health "$second_base"
+  "CLAUDOPS_PROJECT_CONTEXT=$PROJECT_CONTEXT_NATIVE" \
+  "CLAUDOPS_STATUS_PORT=$((PORT + 3))"
+
+if wait_for_health "$second_base"; then
+  ok "The second server is up"
+else
+  bad "The second server did not become healthy -- log:"
+  sed 's/^/        /' "$WORK_DIR/no-image.log"
+fi
 
 BASE="$second_base"
 keyless="$(api POST /projects '{"name":"needs-a-key","repoUrl":"https://host/r.git","gitToken":"nope"}')"

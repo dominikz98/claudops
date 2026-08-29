@@ -82,6 +82,10 @@ export default defineConfig({
       // reach the refusal of an oversized *read*, and the default is ten
       // megabytes.
       CLAUDOPS_FILE_MAX_READ: '256k',
+      // The operator's server-wide egress list (#32). project.spec.ts checks
+      // that a project's own hosts are merged into it rather than replacing it,
+      // which needs both halves to be non-empty.
+      CLAUDOPS_FIREWALL_ALLOW: 'registry.npmjs.org',
       CLAUDOPS_LOG_LEVEL: 'warn',
     },
   },

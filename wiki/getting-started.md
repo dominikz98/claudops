@@ -85,10 +85,25 @@ opens. The full variable table is in
 ## Create a project
 
 An instance is created from a project: repository, branch, environment building
-blocks and -- for a private repository -- the PAT. Open **Projects** in the top
-right, fill in name and repository, optionally a branch and a token, tick the
-building blocks the repository needs, and press Create. The token is masked,
-stored encrypted and never shown again; the row says `stored` instead.
+blocks, the variables its instances run with, the hosts they may reach and --
+for a private repository -- the PAT. Open **Projects** in the top right, fill in
+name and repository, optionally a branch and a token, tick the building blocks
+the repository needs, and press Create. The token is masked, stored encrypted and
+never shown again; the row says `stored` instead.
+
+**Variables** takes one `NAME=value` per line. They are stored encrypted like the
+PAT and are never shown again either: an edit lists their names with an `x` to
+remove one, and the box itself starts empty -- what is typed into it is added or
+replaced, everything else is left alone. Every instance of the project gets them,
+and a `${NAME}` in the repository's own `.mcp.json` resolves against them, which
+is how an MCP server gets a token the repository must not hold. Names claudops
+sets itself are refused, `ANTHROPIC_API_KEY` among them.
+
+**Egress hosts** takes hosts and CIDRs, separated by commas, spaces or newlines.
+They are added to the server-wide `CLAUDOPS_FIREWALL_ALLOW` for this project's
+instances, never instead of it, and they are not secret -- the field shows what is
+stored. Both fields take effect for instances created from now on: a container
+reads its environment and its whitelist once, at start.
 
 The **Image** column then goes from `queued` to `building` to `ready`. That is the
 project's environment being built: `claudops-project-<id>`, the base image plus a
@@ -107,9 +122,21 @@ curl -s localhost:8080/projects \
         "repoUrl": "https://github.com/dominikz98/claudops.git",
         "repoBranch": "main",
         "gitToken": "'"$GITHUB_PAT"'",
-        "buildingBlocks": { "dotnet": false, "playwright": false }
+        "buildingBlocks": { "dotnet": false, "playwright": false },
+        "env": { "DATABASE_URL": "postgres://user:secret@db.internal/app" },
+        "egressHosts": ["db.internal", "api.example.com"]
       }'
 ```
+
+A project answers with the names of its variables, never their values:
+
+```json
+{ "envNames": ["DATABASE_URL"], "egressHosts": ["db.internal", "api.example.com"] }
+```
+
+A `PATCH` addresses one variable at a time -- `{"env":{"NAME":"new"}}` sets or
+replaces it, `{"env":{"NAME":null}}` removes it, and a name that is not mentioned
+keeps its value. `egressHosts` is replaced as a whole, and `[]` clears it.
 
 The answer carries the project `id`, and an `image` that is not built yet:
 

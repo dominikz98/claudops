@@ -1,9 +1,10 @@
 /**
- * The acceptance criteria of issues #6 and #7, in the order a person would try
- * them: create a project with a PAT and an environment, watch its image get
- * built, create an instance from it, check that the container really got the
- * repository, the token and the project image, and that the project refuses to
- * disappear while an instance still points at it.
+ * The acceptance criteria of issues #6, #7 and #32, in the order a person would
+ * try them: create a project with a PAT, an environment, a variable and an
+ * egress host, watch its image get built, create an instance from it, check that
+ * the container really got the repository, the token, the variable, the merged
+ * whitelist and the project image, and that the project refuses to disappear
+ * while an instance still points at it.
  *
  * One browser page for the whole file, like the console spec: these steps build
  * on each other on purpose.
@@ -33,6 +34,11 @@ const REPO = 'https://github.com/dominikz98/private-e2e.git';
 const BRANCH = 'feature/dz/6';
 /** Never a real token: the point is that it turns up in exactly one place. */
 const PAT = 'e2e-pat-must-not-appear';
+/** A project variable, with the same property as the PAT (#32). */
+const VARIABLE = 'e2e-variable-must-not-appear';
+/** What the project adds to the server-wide whitelist in playwright.config.ts. */
+const PROJECT_HOST = 'api.nuget.org';
+const SERVER_HOST = 'registry.npmjs.org';
 
 let page: Page;
 let projectId = '';
@@ -58,6 +64,8 @@ test('a project can be created from the browser', async () => {
   await page.getByTestId('project-repoBranch').fill(BRANCH);
   await page.getByTestId('project-gitToken').fill(PAT);
   await page.getByTestId('block-dotnet').check();
+  await page.getByTestId('project-env').fill(`DATABASE_URL=${VARIABLE}`);
+  await page.getByTestId('project-egressHosts').fill(PROJECT_HOST);
   await page.getByTestId('project-submit').click();
 
   const created = row().filter({ hasText: PROJECT });
@@ -66,10 +74,19 @@ test('a project can be created from the browser', async () => {
   await expect(created.getByTestId('project-instances')).toHaveText('0');
   await expect(created).toContainText('dotnet');
   await expect(created).toContainText(BRANCH);
+  // #32: counts, never values -- the names are on the cell's title.
+  await expect(created.getByTestId('project-environment')).toContainText('1 var');
+  await expect(created.getByTestId('project-environment')).toContainText('1 host');
+  await expect(created.getByTestId('project-environment')).toHaveAttribute(
+    'title',
+    `DATABASE_URL, ${PROJECT_HOST}`,
+  );
 
-  // The form is emptied, so the PAT does not sit in the DOM afterwards.
+  // The form is emptied, so neither secret sits in the DOM afterwards.
   await expect(page.getByTestId('project-gitToken')).toHaveValue('');
+  await expect(page.getByTestId('project-env')).toHaveValue('');
   expect(await page.content()).not.toContain(PAT);
+  expect(await page.content()).not.toContain(VARIABLE);
 
   projectId = (await created.getAttribute('data-project-id')) ?? '';
   expect(projectId).not.toBe('');
@@ -131,6 +148,11 @@ test('AC 1: an instance created from the project gets its repo, branch and PAT',
   expect(env).toContain(`REPO_BRANCH=${BRANCH}`);
   expect(env).toContain(`GIT_TOKEN=${PAT}`);
   expect(env.filter((line) => line.startsWith('ANTHROPIC_API_KEY='))).toEqual([]);
+
+  // #32 AC 1 and AC 4: the project's variable is in the container, and its host
+  // was added to the operator's list rather than replacing it.
+  expect(env).toContain(`DATABASE_URL=${VARIABLE}`);
+  expect(env).toContain(`FIREWALL_ALLOW=${SERVER_HOST},${PROJECT_HOST}`);
 
   // #7: the container runs on the project image, and the building blocks that
   // were ticked in the form reached the build as args.
@@ -211,10 +233,29 @@ test('a project can be edited and its token removed', async () => {
   await expect(page.getByTestId('token-hint')).toContainText('A token is stored');
   await expect(page.getByTestId('block-dotnet')).toBeChecked();
 
+  // #32: the same for a variable -- its name comes back, its value does not.
+  // The hosts do come back, because they are not a secret.
+  await expect(page.getByTestId('project-env')).toHaveValue('');
+  await expect(page.getByTestId('env-names')).toContainText('DATABASE_URL');
+  await expect(page.getByTestId('project-egressHosts')).toHaveValue(PROJECT_HOST);
+
   await page.getByTestId('project-remove-token').click();
 
   await expect(row().filter({ hasText: PROJECT }).getByTestId('project-token')).toHaveText('--');
   expect(await (await page.request.get('/projects')).text()).not.toContain(PAT);
+});
+
+test('#32 AC 3: a variable is removed by name, and its value never comes back', async () => {
+  const created = row().filter({ hasText: PROJECT });
+  await created.getByTestId('edit').click();
+
+  await page.getByTestId('remove-variable').click();
+
+  await expect(page.getByTestId('env-names')).toContainText('No variables stored');
+  await expect(
+    row().filter({ hasText: PROJECT }).getByTestId('project-environment'),
+  ).not.toContainText('var');
+  expect(await (await page.request.get('/projects')).text()).not.toContain(VARIABLE);
 });
 
 test('AC 3: with the instance gone the project can be deleted', async () => {

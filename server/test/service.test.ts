@@ -29,6 +29,7 @@ import {
 } from '../src/instances/service.ts';
 import { ProjectRepository } from '../src/db/projects.ts';
 import { projectImageTag } from '../src/docker/labels.ts';
+import { MANAGED_ENV_NAMES } from '../src/projects/env.ts';
 import {
   ProjectImageNotReadyError,
   ProjectNotFoundError,
@@ -209,6 +210,82 @@ describe('InstanceService', () => {
       expect(engine.specFor('id-wide')?.env).toMatchObject({
         FIREWALL_ALLOW: 'api.nuget.org, 10.9.8.0/24',
       });
+    });
+
+    it("hands over the project's own variables", async () => {
+      const id = addProject({
+        name: 'with-env',
+        env: { API_URL: 'https://api.example.com', EMPTY: '' },
+      });
+
+      await service.create({ name: 'demo', projectId: id });
+
+      expect(engine.specFor('id-1')?.env).toMatchObject({
+        API_URL: 'https://api.example.com',
+        // Empty, but present: a variable that exists and says nothing is a
+        // legitimate thing to hand a program, unlike a server setting nobody
+        // configured.
+        EMPTY: '',
+      });
+    });
+
+    // The API refuses these names (projects/env.ts), so this writes them the
+    // only way that gets past it -- straight into the repository. What is being
+    // checked is the second half of that guarantee: the order in `envFor`, which
+    // holds even for a project that somehow carries one.
+    it('lets nothing a project carries replace a variable claudops manages', async () => {
+      const id = addProject({ name: 'hostile', gitToken: 'pat-secret' });
+      const cipher = testCipher();
+      projectRepository.update(id, {
+        env: Object.fromEntries(
+          MANAGED_ENV_NAMES.map((variable) => [
+            variable,
+            cipher.seal(`stolen-${variable}`, 'project.env'),
+          ]),
+        ),
+        updatedAt: '2026-08-25T08:00:00.000Z',
+      });
+
+      await service.create({ name: 'demo', projectId: id });
+      const env = engine.specFor('id-1')?.env ?? {};
+
+      expect(env.GIT_TOKEN).toBe('pat-secret');
+      expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe('oauth-token');
+      expect(env.REPO_URL).toBe(TEST_REPO_URL);
+      // Not merely different -- nothing the project wrote survived anywhere.
+      expect(JSON.stringify(env)).not.toContain('stolen-');
+    });
+
+    it("merges the project's egress hosts into the operator's whitelist", async () => {
+      const wide = new InstanceService(repository, engine, {
+        instanceEnv: { ...instanceEnv, firewallAllow: 'api.nuget.org' },
+        projects,
+        generateId: () => 'id-both',
+      });
+      const id = addProject({
+        name: 'with-hosts',
+        egressHosts: ['api.example.com', '10.1.0.0/16'],
+      });
+
+      await wide.create({ name: 'demo', projectId: id });
+
+      expect(engine.specFor('id-both')?.env).toMatchObject({
+        FIREWALL_ALLOW: 'api.nuget.org,api.example.com,10.1.0.0/16',
+      });
+    });
+
+    it("passes the project's hosts on their own when the server lists none", async () => {
+      const id = addProject({ name: 'only-project', egressHosts: ['api.example.com'] });
+
+      await service.create({ name: 'demo', projectId: id });
+
+      expect(engine.specFor('id-1')?.env).toMatchObject({ FIREWALL_ALLOW: 'api.example.com' });
+    });
+
+    it('leaves FIREWALL_ALLOW out when neither side lists a host', async () => {
+      await service.create({ name: 'demo', projectId });
+
+      expect(Object.keys(engine.specFor('id-1')?.env ?? {})).not.toContain('FIREWALL_ALLOW');
     });
 
     it('never sets an ANTHROPIC_API_KEY next to the OAuth token', async () => {

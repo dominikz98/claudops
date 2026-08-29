@@ -8,6 +8,8 @@ import { createTestProject, TEST_REPO_URL, testCipher, waitForImage } from './fi
 
 const PAT = 'ghp_pat-secret';
 
+const VARIABLE = 'postgres://user:s3cret@db.example.com/app';
+
 interface ProjectBody {
   id: string;
   name: string;
@@ -16,6 +18,8 @@ interface ProjectBody {
   buildingBlocks: { dotnet: boolean; playwright: boolean };
   image: { tag: string; status: string; builtAt: string | null };
   hasGitToken: boolean;
+  envNames: string[];
+  egressHosts: string[];
   instanceCount: number;
   createdAt: string;
   updatedAt: string;
@@ -26,9 +30,13 @@ describe('project REST API', () => {
   let db: Database.Database;
   let engine: FakeDockerEngine;
 
-  /** Every project row as text -- what a `grep` over the database file would
-   *  see. */
-  const storedRows = (): string => JSON.stringify(db.prepare('SELECT * FROM projects').all());
+  /** Every project row and every variable as text -- what a `grep` over the
+   *  database file would see. */
+  const storedRows = (): string =>
+    JSON.stringify([
+      ...db.prepare('SELECT * FROM projects').all(),
+      ...db.prepare('SELECT * FROM project_env').all(),
+    ]);
 
   const post = (payload: Record<string, unknown>) =>
     app.inject({ method: 'POST', url: '/projects', payload });
@@ -98,6 +106,92 @@ describe('project REST API', () => {
       });
     });
 
+    it('reports its variables by name and never by value', async () => {
+      const response = await post({
+        name: 'with-env',
+        repoUrl: TEST_REPO_URL,
+        env: { DATABASE_URL: VARIABLE, FEATURE_FLAG: 'on' },
+        egressHosts: ['db.example.com', '10.1.0.0/16'],
+      });
+
+      expect(response.statusCode).toBe(201);
+      expect(response.body).not.toContain(VARIABLE);
+      expect(response.json<ProjectBody>()).toMatchObject({
+        // Sorted, not in the order they were sent: this is a list somebody
+        // reads.
+        envNames: ['DATABASE_URL', 'FEATURE_FLAG'],
+        // Hosts are not secret, so these do come back as they went in.
+        egressHosts: ['db.example.com', '10.1.0.0/16'],
+      });
+    });
+
+    it('stores a variable encrypted, so the database holds no readable value', async () => {
+      await post({
+        name: 'with-env',
+        repoUrl: TEST_REPO_URL,
+        env: { DATABASE_URL: VARIABLE },
+      });
+
+      expect(storedRows()).not.toContain(VARIABLE);
+      expect(storedRows()).not.toContain('s3cret');
+      // The name is not a secret and is stored as it is -- it is what a PATCH
+      // addresses one variable by.
+      expect(storedRows()).toContain('DATABASE_URL');
+    });
+
+    it('refuses a variable claudops sets itself, by name', async () => {
+      for (const variable of ['GIT_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']) {
+        const response = await post({
+          name: `hostile-${variable}`,
+          repoUrl: TEST_REPO_URL,
+          env: { [variable]: 'mine-now' },
+        });
+
+        expect(response.statusCode).toBe(409);
+        expect(response.json<{ error: string; variable: string }>()).toMatchObject({
+          error: 'reserved_env_name',
+          variable,
+        });
+      }
+    });
+
+    it('refuses a name no shell would accept', async () => {
+      expect(
+        (await post({ name: 'x', repoUrl: TEST_REPO_URL, env: { '1BAD': 'v' } })).statusCode,
+      ).toBe(400);
+      expect(
+        (await post({ name: 'x', repoUrl: TEST_REPO_URL, env: { 'A-B': 'v' } })).statusCode,
+      ).toBe(400);
+    });
+
+    it('refuses a host the container firewall could not use', async () => {
+      const response = await post({
+        name: 'bad-host',
+        repoUrl: TEST_REPO_URL,
+        egressHosts: ['https://api.example.com/v1'],
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(response.json<{ error: string }>().error).toBe('invalid_egress_host');
+    });
+
+    it('refuses a wildcard, which an ipset cannot hold at all', async () => {
+      expect(
+        (await post({ name: 'wild', repoUrl: TEST_REPO_URL, egressHosts: ['*.example.com'] }))
+          .statusCode,
+      ).toBe(400);
+    });
+
+    it('drops a blank host and keeps the first of two identical ones', async () => {
+      const response = await post({
+        name: 'messy',
+        repoUrl: TEST_REPO_URL,
+        egressHosts: ['  api.example.com  ', ' ', 'api.example.com'],
+      });
+
+      expect(response.json<ProjectBody>().egressHosts).toEqual(['api.example.com']);
+    });
+
     it('reports a stored PAT without ever returning it', async () => {
       const response = await post({ name: 'private', repoUrl: TEST_REPO_URL, gitToken: PAT });
 
@@ -120,7 +214,7 @@ describe('project REST API', () => {
     });
 
     it('rejects an unknown field and an unknown building block', async () => {
-      expect((await post({ name: 'x', repoUrl: TEST_REPO_URL, env: {} })).statusCode).toBe(400);
+      expect((await post({ name: 'x', repoUrl: TEST_REPO_URL, secrets: {} })).statusCode).toBe(400);
       expect(
         (await post({ name: 'x', repoUrl: TEST_REPO_URL, buildingBlocks: { rust: true } }))
           .statusCode,
@@ -174,6 +268,18 @@ describe('project REST API', () => {
       expect(response.body).not.toContain(PAT);
     });
 
+    it('refuses to store a variable either, for the same reason', async () => {
+      const response = await keyless.inject({
+        method: 'POST',
+        url: '/projects',
+        payload: { name: 'with-env', repoUrl: TEST_REPO_URL, env: { TOKEN: VARIABLE } },
+      });
+
+      expect(response.statusCode).toBe(422);
+      expect(response.json<{ error: string }>().error).toBe('secret_key_missing');
+      expect(response.body).not.toContain(VARIABLE);
+    });
+
     it('still creates a project that needs no PAT', async () => {
       const response = await keyless.inject({
         method: 'POST',
@@ -182,6 +288,18 @@ describe('project REST API', () => {
       });
 
       expect(response.statusCode).toBe(201);
+    });
+
+    // Hosts are not a secret, so nothing has to be sealed for them.
+    it('still takes egress hosts without a key', async () => {
+      const response = await keyless.inject({
+        method: 'POST',
+        url: '/projects',
+        payload: { name: 'hosts', repoUrl: TEST_REPO_URL, egressHosts: ['api.example.com'] },
+      });
+
+      expect(response.statusCode).toBe(201);
+      expect(response.json<ProjectBody>().egressHosts).toEqual(['api.example.com']);
     });
   });
 
@@ -266,6 +384,61 @@ describe('project REST API', () => {
       expect(storedRows()).not.toContain('v1:');
     });
 
+    it('changes one variable without touching the others', async () => {
+      await patch(id, { env: { A: 'one', B: 'two' } });
+
+      const response = await patch(id, { env: { B: 'changed', C: 'three' } });
+
+      expect(response.json<ProjectBody>().envNames).toEqual(['A', 'B', 'C']);
+      expect(response.body).not.toContain('changed');
+    });
+
+    it('removes one variable when handed null for it', async () => {
+      await patch(id, { env: { A: 'one', B: 'two' } });
+
+      expect((await patch(id, { env: { A: null } })).json<ProjectBody>().envNames).toEqual(['B']);
+    });
+
+    it('leaves every variable alone when the field is not sent', async () => {
+      await patch(id, { env: { A: 'one' } });
+
+      expect((await patch(id, { name: 'renamed' })).json<ProjectBody>().envNames).toEqual(['A']);
+    });
+
+    it('replaces the host list as a whole and clears it with an empty one', async () => {
+      await patch(id, { egressHosts: ['a.example.com', 'b.example.com'] });
+
+      expect((await patch(id, { egressHosts: ['c.example.com'] })).json<ProjectBody>()
+        .egressHosts).toEqual(['c.example.com']);
+      expect((await patch(id, { egressHosts: [] })).json<ProjectBody>().egressHosts).toEqual([]);
+    });
+
+    it('refuses a managed name here too, and changes nothing when it does', async () => {
+      await patch(id, { env: { A: 'one' } });
+
+      const response = await patch(id, { env: { B: 'two', GIT_TOKEN: 'mine-now' } });
+
+      expect(response.statusCode).toBe(409);
+      // The whole PATCH is refused, not the half of it that was acceptable: the
+      // service validates before it writes.
+      expect(
+        (await app.inject({ method: 'GET', url: `/projects/${id}` })).json<ProjectBody>().envNames,
+      ).toEqual(['A']);
+    });
+
+    // Everything the project image is built from is unchanged by either field,
+    // and a rebuild would block instance creation for minutes.
+    it('does not put the image back to pending for a variable or a host', async () => {
+      await waitForImage(app, id);
+
+      expect((await patch(id, { env: { A: 'one' } })).json<ProjectBody>().image.status).toBe(
+        'ready',
+      );
+      expect(
+        (await patch(id, { egressHosts: ['a.example.com'] })).json<ProjectBody>().image.status,
+      ).toBe('ready');
+    });
+
     it('changes one building block without clearing the other', async () => {
       await patch(id, { buildingBlocks: { dotnet: true, playwright: true } });
 
@@ -310,6 +483,15 @@ describe('project REST API', () => {
 
       expect((await app.inject({ method: 'DELETE', url: `/projects/${id}` })).statusCode).toBe(204);
       expect(await list()).toEqual([]);
+    });
+
+    it('takes the sealed variables with it', async () => {
+      const id = await createTestProject(app, { env: { DATABASE_URL: VARIABLE } });
+
+      await app.inject({ method: 'DELETE', url: `/projects/${id}` });
+
+      expect(storedRows()).not.toContain('DATABASE_URL');
+      expect(storedRows()).not.toContain('v1:');
     });
 
     it('answers 404 for an unknown id and on a second delete', async () => {

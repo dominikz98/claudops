@@ -62,7 +62,7 @@ drops.
 | `CLAUDE_ARGS` | `--dangerously-skip-permissions` | Arguments for the `claude` start. Only acceptable because of the container isolation, which is what the egress firewall below provides. |
 | `CLAUDE_MODEL` | – | Model alias -- `opus`, `sonnet`, `haiku`, `fable` -- appended as `--model`. Deliberately **not** `ANTHROPIC_MODEL`: see below. |
 | `CLAUDE_EFFORT` | – | Effort level -- `low`, `medium`, `high`, `xhigh`, `max` -- appended as `--effort`. Deliberately **not** `CLAUDE_CODE_EFFORT_LEVEL`: that one outranks `/effort` and would make a switch in the console do nothing. |
-| `FIREWALL_ALLOW` | – | Extra hosts and CIDRs for the egress whitelist, comma- or space-separated, on top of the built-in list in `/etc/claudops/firewall-allow.d`. |
+| `FIREWALL_ALLOW` | – | Extra hosts and CIDRs for the egress whitelist, comma- or space-separated, on top of the built-in list in `/etc/claudops/firewall-allow.d`. claudops fills this from the server-wide `CLAUDOPS_FIREWALL_ALLOW` and the project's own hosts, in that order. |
 | `FIREWALL_MODE` | `enforce` | `off` skips the firewall entirely. The operator's escape hatch, never the agent's -- and it is also what makes `CLAUDE_ARGS` unsafe. |
 | `FIREWALL_REFRESH_SECONDS` | `900` | How often the whitelist is re-resolved, because CDN addresses rotate. `0` disables it. |
 | `CLAUDOPS_STATUS_PORT` | `8081` | Port of the claudops status listener on the docker bridge gateway -- the one address the firewall opens, and where the hooks report what Claude is doing. Has to match the server's `CLAUDOPS_STATUS_PORT`. |
@@ -116,6 +116,12 @@ drops.
   (`knowledge/claude-onboarding-must-be-pre-seeded.md`). Pre-accepting the
   bypass-permissions warning is the same decision as the `CLAUDE_ARGS` default
   above, not an additional one.
+- **A repository's own MCP servers start without being asked about.** A clone
+  that brings a `.mcp.json` produces a fourth first-start question -- whether to
+  trust the servers it declares -- and `enableAllProjectMcpServers` in
+  `~/.claude/settings.json` answers it. `${VAR}` in such a file resolves against
+  the container's environment, which is where a project's variables arrive, so a
+  server that needs a token gets one without the repository holding it.
 - **The container reports when its session is up.** A `HEALTHCHECK` runs
   `tmux has-session -t "$TMUX_SESSION"` every five seconds, so
   `docker inspect -f '{{.State.Health.Status}}'` tells "the container started"

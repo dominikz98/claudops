@@ -3,8 +3,10 @@
 | Term | Meaning |
 | --- | --- |
 | **Instance** | One Docker container running exactly one Claude Code session in a tmux session named `main`. Created from a project, capped in CPU and memory, stoppable, disposable. |
-| **Project** | The template an instance is created from: repository URL, branch, environment building blocks and a git credential. Its name is unique, and it cannot be deleted while instances point at it. |
+| **Project** | The template an instance is created from: repository URL, branch, environment building blocks, environment variables, egress hosts and a git credential. Its name is unique, and it cannot be deleted while instances point at it. |
 | **Project PAT** | The GitHub token of a project, stored encrypted with `CLAUDOPS_SECRET_KEY`. Write-only: the API reports whether one is set, never its value. |
+| **Project variable** | A named environment variable every instance of a project is started with. Stored encrypted like the PAT and just as write-only -- the API answers with `envNames`, never with values. A `${NAME}` in the repository's own `.mcp.json` resolves against them. The names claudops sets itself are refused, `ANTHROPIC_API_KEY` among them. |
+| **Egress hosts** | Hosts and CIDRs a project adds to its instances' whitelist, merged into `FIREWALL_ALLOW` after the server-wide `CLAUDOPS_FIREWALL_ALLOW`. Not secret, so the API shows them. A project widens the whitelist and never narrows it. |
 | **Base image** | `claudops-base` -- Node, Claude Code CLI, git, tmux, the non-root user `claude` and the entrypoint. Every instance image derives from it. |
 | **Project image** | `claudops-project-<id>` -- the base image plus the environment building blocks of one project, prebuilt by the server from `docker/project/Dockerfile`. Instances start from it. Tagged after the project id, so a rename keeps the image. |
 | **Building block** | An optional layer in a project image: dotnet SDK, or Playwright with Chromium. Ticked on the project, passed to the build as an arg. |
@@ -29,7 +31,7 @@
 | **Model override** | `~/.claudops/model` and `~/.claudops/effort` in a container: what the server writes when the model is switched, and what the entrypoint prefers over the environment on the next start. An empty file means "no flag"; no file at all means "use the environment". |
 | **Instance id** | The short id the server generates. It names the container (`claudops-<id>`) and is the value of the claudops label. |
 | **Egress firewall** | The default-deny iptables/ipset ruleset a container installs on itself at start-up, before it clones anything. It reaches its whitelist and nothing else -- of the docker bridge only the status listener's single port, so neither the claudops API nor its neighbours -- and it refuses to be reconfigured for the life of the container. |
-| **Whitelist** | What the egress firewall lets through: a built-in host list in the image, GitHub's published ranges, the project's own repository host, and whatever `CLAUDOPS_FIREWALL_ALLOW` adds. Re-resolved every 15 minutes, because CDN addresses rotate. |
+| **Whitelist** | What the egress firewall lets through: a built-in host list in the image, GitHub's published ranges, the project's own repository host, and whatever `FIREWALL_ALLOW` adds -- the server-wide `CLAUDOPS_FIREWALL_ALLOW` plus the project's egress hosts. Re-resolved every 15 minutes, because CDN addresses rotate. |
 | **Firewall state** | The one word in `/run/claudops-firewall.state`: `active`, `failed` (sealed to loopback) or `unfiltered` (nothing could be applied, almost always a missing `NET_ADMIN`). In the last two cases Claude is not started at all. |
 | **Session cookie** | `claudops_session` -- an HMAC over an expiry, handed out by `POST /login` in exchange for `CLAUDOPS_LOGIN_SECRET`. Twelve hours, renewed while in use. There is no session store, so logging out clears the browser's cookie but revokes nothing. |
 | **NUC** | The Intel NUC running Ubuntu and Docker that hosts all of this. |

@@ -36,6 +36,7 @@ import {
   type FileContent,
 } from './files.ts';
 import { shortId } from '../ids.ts';
+import { MANAGED_ENV_NAMES, mergeFirewallAllow } from '../projects/env.ts';
 import {
   ProjectImageNotReadyError,
   type ProjectService,
@@ -1096,12 +1097,24 @@ export class InstanceService {
     };
   }
 
-  /** Exactly the variables docker/base/README.md documents. An
-   *  ANTHROPIC_API_KEY is never among them -- it would override the
-   *  subscription (knowledge/auth-token-handling.md). The PAT is handed over as
-   *  GIT_TOKEN and read by the credential helper, so it never reaches
-   *  .git/config or the console
-   *  (knowledge/git-token-via-credential-helper.md). */
+  /**
+   * The project's own variables, and on top of them exactly the ones
+   * docker/base/README.md documents.
+   *
+   * The filter is the guarantee, not the validation: a managed name is dropped
+   * from what the project carries rather than overwritten by it. Overwriting
+   * would not be enough -- `set` leaves a variable out when there is nothing to
+   * say, so a project variable would simply stay in the empty slot, which is
+   * exactly what an ANTHROPIC_API_KEY would want. `POST /projects` refuses those
+   * names as well (projects/env.ts), and that refusal is the good error message;
+   * this is what holds if one ever gets past it.
+   *
+   * An ANTHROPIC_API_KEY is never among the managed ones -- it would override
+   * the subscription (knowledge/auth-token-handling.md). The PAT is handed over
+   * as GIT_TOKEN and read by the credential helper, so it never reaches
+   * .git/config or the console
+   * (knowledge/git-token-via-credential-helper.md).
+   */
   private envFor(
     id: string,
     template: ProjectTemplate,
@@ -1112,13 +1125,22 @@ export class InstanceService {
       if (value !== undefined && value !== '') env[key] = value;
     };
 
+    // Not through `set`: an empty value is a legitimate variable, and only the
+    // fixed set below means "leave it out when there is nothing to say".
+    for (const [name, value] of Object.entries(template.env)) {
+      if (MANAGED_ENV_NAMES.includes(name)) continue;
+      env[name] = value;
+    }
+
     set('REPO_URL', template.repoUrl);
     set('REPO_BRANCH', template.repoBranch ?? undefined);
     set('GIT_TOKEN', template.gitToken);
     set('GIT_USER_NAME', this.instanceEnv.gitUserName);
     set('GIT_USER_EMAIL', this.instanceEnv.gitUserEmail);
     set('CLAUDE_CODE_OAUTH_TOKEN', this.instanceEnv.claudeOauthToken);
-    set('FIREWALL_ALLOW', this.instanceEnv.firewallAllow);
+    // The server-wide list and the project's, in that order: a project widens
+    // the whitelist, it never narrows it (projects/env.ts).
+    set('FIREWALL_ALLOW', mergeFirewallAllow(this.instanceEnv.firewallAllow, template.egressHosts));
 
     // Read by the entrypoint and turned into `--model` / `--effort`, not by
     // Claude Code itself: ANTHROPIC_MODEL and CLAUDE_CODE_EFFORT_LEVEL would be
