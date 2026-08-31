@@ -54,12 +54,17 @@ language, and `wiki/glossary.md` is where the two are tied together:
 | In the code | On the page |
 | --- | --- |
 | instance | the person doing the work: name, role, what they are on |
-| project | the team and everything its members are equipped with |
 | activity `running` / `needs_input` / `done` | working / has a question / finished |
 | a prompt typed into tmux | a briefing |
 | the workspace and its files | what they produced |
 | stop / start | off shift / back on shift |
 | delete | let go -- and the desk is cleared with them |
+
+**A project stays a project**, in the code and on the page. It is the one word
+the manager's language and the operator's language already agree on, and it is
+the thing that carries repository, branch, credential, environment blocks, image,
+variables and egress hosts -- the context an instance works *in*. Nothing below
+renames it, folds it into anything, or makes it optional.
 
 Do not put cute personifications into log lines, error messages or code
 comments. The metaphor shapes *what is built*, not how the machine talks.
@@ -101,6 +106,12 @@ ticket that says so out loud and writes the new reasoning into `knowledge/`:
   gets to soften it.
 - **Nothing polls in the server.** The reconcile is a startup pass, deliberately.
   Two packages below need a timer; each has to argue for it rather than assume it.
+- **A project is the template, an instance is a copy of it.** Repository,
+  branch, environment blocks, variables and egress hosts live on the project and
+  nowhere else -- a manager runs several projects at once and they do not share
+  an environment. A role, an assignment or a board column is something an
+  instance carries *in addition*; none of them may become the place a repository
+  or an environment is configured.
 - **Secrets are write-only.** A project reports that a PAT is set and the names
   of its variables. Never a value, not in a response, not in a log, not on the
   board.
@@ -166,18 +177,43 @@ Criteria: an assignment survives a server restart; deleting its instance leaves
 the assignment with a state and no instance rather than deleting it; two
 dispatches never brief the same instance twice.
 
-### 3. Hire for a role, not just for a project
+### 3. Hire for a role, on top of the project
 
-- named roles on a project: a name and a briefing preamble
-- chosen when an instance is created, shown on the board
+A role is a job description, not a workplace: "reviewer" means the same thing on
+every project, and the project keeps deciding the repository and the environment.
+The two are orthogonal -- an instance has both, and neither replaces the other.
+
+- a catalogue of roles: a name and a briefing preamble, reusable across projects
+- a project may add its own roles; it never loses the shared ones
+- chosen next to the project when an instance is created, shown on the board
 - the preamble is prepended to the first briefing, not written into the clone --
   the repository's own `CLAUDE.md` belongs to the repository
 
-Criteria: the role is visible on the list without opening a console; the preamble
-reaches the session once and not on every following briefing; a role cannot
-smuggle in a managed environment variable.
+Criteria: one role is usable on two projects with different environments; the
+role is visible on the list without opening a console; the preamble reaches the
+session once and not on every following briefing; a role cannot set a repository,
+an environment block or a managed variable.
 
-### 4. Say what the instance produced, in git terms
+### 4. Give a project a standing brief
+
+A repository's own `CLAUDE.md` covers the repository. What it does not cover is
+what this *project* knows and the repository must not say: the staging URL, the
+colleague to ask, the convention that is not written down anywhere, the wiki
+worth reading first. Without a place for it, a manager types the same paragraph
+into every new console.
+
+- a standing brief on the project: free text, editable, versionless
+- every instance of that project gets it once, before its first briefing
+- it is context, not configuration -- it cannot set a variable or a host, and
+  it is not a secret, so it comes back out of the API as it went in
+- reaches the container as a file next to the clone, not inside it
+
+Criteria: a new instance of a project with a standing brief knows it without
+anyone typing; two projects have different ones at the same time; editing it
+does not touch instances that are already running; it never lands in the
+repository's `git status`.
+
+### 5. Say what the instance produced, in git terms
 
 - `GET /instances/:id/git`: branch, upstream, ahead/behind, dirty count, last commit
 - shown on the board and on the console page
@@ -187,7 +223,7 @@ Criteria: a fresh clone reports clean and 0/0; a commit inside the container
 shows as ahead 1 within one poll; Push makes the branch appear on the remote; an
 instance whose clone failed reports "no repository" rather than a 500.
 
-### 5. Let the backlog be GitHub
+### 6. Let the backlog be GitHub
 
 - `GET /projects/:id/issues` through the project's PAT, from the **server**, not
   from the instance
@@ -198,7 +234,7 @@ Criteria: the open issues of a project's repo are listed; a project without a PA
 says so instead of failing; the created assignment carries the number and shows
 it on the board.
 
-### 6. Give the NUC a headcount
+### 7. Give the NUC a headcount
 
 Four gigabytes per instance and one small box: the tenth instance is not a
 slower machine, it is a dead one.
@@ -210,7 +246,7 @@ slower machine, it is a dead one.
 Criteria: with the cap at one, a second start answers `429`; stopping one lets
 the waiting assignment run; the cap counts running containers, not rows.
 
-### 7. Send an idle instance off shift
+### 8. Send an idle instance off shift
 
 - an instance whose activity has been `done` or `idle` for a configured time is
   stopped -- stopped, never deleted, the workspace is the work
@@ -224,7 +260,7 @@ Criteria: an instance past the timeout is `exited` and starts back up with its
 workspace; an instance in `needs_input` is never stopped; the setting off means
 nothing is ever stopped.
 
-### 8. Escalate a question that nobody is looking at
+### 9. Escalate a question that nobody is looking at
 
 Browser notifications need an open tab and a secure context -- see
 `knowledge/notifications-need-a-secure-context.md`. A manager who closed the
@@ -237,7 +273,7 @@ laptop is the normal case, not the exception.
 Criteria: one post for one question, however long it waits; none for an instance
 that answers itself; a failing webhook is logged and never blocks the list.
 
-### 9. One board instead of twenty consoles
+### 10. One board instead of twenty consoles
 
 - the landing page becomes a board grouped by activity, across all projects
 - a card carries name, project, role, assignment, elapsed time and the last line
@@ -249,7 +285,7 @@ Criteria: twenty instances are readable without scrolling into a second screen;
 the card's state matches what the console shows within one poll; a card with a
 question is answerable from the board.
 
-### 10. Keep the timeline, not just the current state
+### 11. Keep the timeline, not just the current state
 
 - the hook events appended to a table: instance, event, timestamp
 - `GET /instances/:id/timeline`, shown on the console page
