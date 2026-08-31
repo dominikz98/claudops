@@ -14,9 +14,11 @@ instance runs under a CPU and memory ceiling, and leftovers are reconciled away 
 every server start. A build's log grows on the page while it runs, and an instance
 says whether its Claude session is up rather than only whether its container is,
 files or pasted screenshots can be attached to a running instance, and what a run
-produced is readable back from the console page. Everything else is planned; see the
+produced is readable back from the console page. What comes next is the project
+manager's side of it -- briefings, assignments, roles and one board instead of
+twenty consoles; see the
 [issues](https://github.com/dominikz98/claudops/issues) and
-[EPIC #1](https://github.com/dominikz98/claudops/issues/1).
+[EPIC #36](https://github.com/dominikz98/claudops/issues/36).
 
 | Component | State |
 | --- | --- |
