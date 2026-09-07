@@ -30,6 +30,7 @@ rather than building on my assumption.
 | #50 | A stage is handed over with a written note and a pushed branch; the manager decides every hop |
 | #51 | A ticket gets its own page: its stages, who held each, what note they left |
 | #52 | Advancing without the manager, opt-in per project -- deliberately last, and may be closed unbuilt |
+| #53 | A webhook for a ticket that stopped moving. **No screen of its own** -- the stall is already the backlog's third kind below; do not invent a page for it |
 
 Plus: #36 gained a core decision ("a stage is a fresh worker, and the branch is
 the handover"), and #46 gained a scope line for the stage chip and the backlog.
