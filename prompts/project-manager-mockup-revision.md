@@ -84,8 +84,10 @@ Round one nests `BACKLOG` inside the `OFF SHIFT` column. An assignment nobody
 has picked up is not an off-shift instance; putting it there says it is.
 
 Give the backlog its own place: a strip above the columns, or its own page next
-to the board. It holds the project's open GitHub issues and the assignments
-waiting above the headcount cap, each with one action -- hire for this.
+to the board. It holds three kinds of work that has no worker -- open GitHub
+issues nobody picked up, assignments queued above the headcount cap, and
+assignments sitting between two stages -- each with one action, hire for this.
+Fix 12 is where the third kind comes from.
 
 ### 5. The board shows one axis of three
 
@@ -163,22 +165,69 @@ nothing either way.
   what gets built.
 - Project detail: two columns that balance, or one that admits it is one.
 
+## The flow fix
+
+### 12. A ticket is a journey, and round one drew only one hop
+
+The cards show an instance working on an issue. They do not show that the issue
+came from somewhere, that it is going somewhere, or that the instance holding it
+is the second of three workers on it.
+
+The model (#49, #50, #51): an assignment runs through an ordered list of roles --
+`planner`, `implementer`, `reviewer`. **Each stage is its own hire**, because a
+reviewer that is the implementer's own session reviews its own reasoning. What
+crosses between two stages is a pushed branch and a written note; never a
+workspace, which dies with its container. The manager decides every handover.
+
+Four things have to become visible:
+
+- **On a card**: which stage, and of how many. `implementing 2/3`. A card with
+  no stage is an instance nobody gave a ticket to -- that is legitimate and must
+  look different from a card mid-pipeline.
+- **The handover moment**: the finishing instance's note, the branch and how far
+  ahead it is, then three choices -- Hand over to review, Send back, Keep
+  working. Draw the refusal too: a branch with unpushed commits cannot be handed
+  over, and the button has to say why rather than fail on click.
+- **The ticket's own page**: the stages oldest first, who held each, how long,
+  what note they left, what the outcome was. This is the only view where the
+  ticket is the subject rather than an instance -- and it has to stay readable
+  when the instances in its history are long deleted.
+- **The backlog holds two kinds of waiting work**: issues nobody has picked up,
+  and assignments sitting between two stages with no worker. They are not the
+  same thing and must not look the same, but they belong in one list -- that is
+  what the backlog *is*, work without a worker.
+
+One thing not to draw: an automatic pipeline. Nothing advances without the
+manager (#52 is the one ticket that argues with that, and it may lose). A screen
+that implies work flows on by itself is describing a product this EPIC decided
+against.
+
 ## The artboards to produce
 
-Ten, on one page, in this order:
+Twelve, in this order. Put 1-6 on a page called Flow and 7-12 on a page called
+Screens -- the first six are the manager's loop, the rest are the surfaces it
+runs on.
 
-1. `Board.dc.html` -- twenty cards, four columns, every state from fix 5, filled frame
-2. `BoardEmpty.dc.html` -- first run: no projects, no instances, one way forward
-3. `Answer.dc.html` -- answering a question from its card, before and after
-4. `Instances.dc.html` -- the operator's table, complete, with the new columns
-5. `Hire.dc.html` -- create an instance: name, project, role, model, effort, first briefing
-6. `Backlog.dc.html` -- a project's open issues and the queued assignments, with hire
-7. `Projects.dc.html` -- the project list plus the create form
-8. `ProjectDetail.dc.html` -- editable fields, standing brief, the role list with add and edit, build log, rebuild, delete
-9. `Console.dc.html` -- terminal, files panel, Attach, model and effort dropdowns, briefing box, what they produced, timeline
-10. `Login.dc.html` -- the shared secret, and a wrong one
+1. `Board.dc.html` -- twenty cards, four columns, stage chips, every state from
+   fix 5, filled frame
+2. `Backlog.dc.html` -- both kinds of waiting work: untouched issues and
+   assignments between stages, each with one way to hire
+3. `Hire.dc.html` -- name, project, role, model, effort, first briefing
+4. `Answer.dc.html` -- answering a question from its card, before and after
+5. `Handover.dc.html` -- the note, the branch, the three choices, and the
+   refusal when the branch is not pushed
+6. `Pipeline.dc.html` -- the ticket's own page: three stages, who held each,
+   their notes, where it is now
+7. `BoardEmpty.dc.html` -- first run: no projects, no instances, one way forward
+8. `Instances.dc.html` -- the operator's table, complete, with the new columns
+9. `Projects.dc.html` -- the project list plus the create form
+10. `ProjectDetail.dc.html` -- editable fields, standing brief, the role list
+    with add and edit, build log, rebuild, delete
+11. `Console.dc.html` -- terminal, files panel, Attach, model and effort
+    dropdowns, briefing box, what they produced, timeline
+12. `Login.dc.html` -- the shared secret, and a wrong one
 
-`Main.dc.html` is the board.
+`Main.dc.html` is the board. Set the launch view to the Flow page.
 
 ## How to work
 
